@@ -1,0 +1,134 @@
+"""Typed application configuration with YAML and environment variable loading."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar, cast
+
+import yaml
+from pydantic import Field
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+from lai.config.profiles import DEFAULT_MODEL_PROFILE_NAME
+from lai.domain.errors import ValidationFailedError
+from lai.domain.inference import ModelProfile
+
+if TYPE_CHECKING:
+    from pydantic.fields import FieldInfo
+
+
+class _MappingSettingsSource(PydanticBaseSettingsSource):
+    """Settings source backed by an in-memory key/value mapping."""
+
+    def __init__(self, settings_cls: type[BaseSettings], data: dict[str, object]) -> None:
+        super().__init__(settings_cls)
+        self._data = data
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[object, str, bool]:
+        """Return raw field value from the backing mapping."""
+        del field
+        value = self._data.get(field_name)
+        return value, field_name, False
+
+    def __call__(self) -> dict[str, object]:
+        """Return a shallow copy of the backing settings dictionary."""
+        return dict(self._data)
+
+
+class LaiSettings(BaseSettings):
+    """Runtime settings for the local AI server, storage, and inference backend."""
+
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
+        env_prefix="LAI_",
+        env_nested_delimiter="__",
+        extra="forbid",
+        validate_default=True,
+    )
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8400, ge=1, le=65535)
+    llama_host: str = "127.0.0.1"
+    llama_port: int = Field(default=8081, ge=1, le=65535)
+
+    data_dir: Path = Path("data")
+    models_dir: Path = Path("models")
+    bin_dir: Path = Path("bin")
+
+    max_upload_bytes: int = Field(default=262_144_000, ge=1)
+    direct_file_budget_tokens: int = Field(default=12000, ge=256)
+    map_window_tokens: int = Field(default=9000, ge=256)
+    map_window_overlap_tokens: int = Field(default=300, ge=0)
+    max_queued_jobs: int = Field(default=64, ge=1)
+
+    keepalive_interval_seconds: float = Field(default=10.0, gt=0.0)
+    json_keepalive_threshold_seconds: float = Field(default=20.0, gt=0.0)
+    rate_limit_rpm: int = Field(default=120, ge=1)
+
+    cf_access_enabled: bool = False
+    cf_access_client_id: str | None = None
+    cf_access_client_secret: str | None = None
+    cf_access_team_domain: str | None = None
+    cf_access_aud: str | None = None
+
+    default_model_profile: str = DEFAULT_MODEL_PROFILE_NAME
+    custom_profiles: dict[str, ModelProfile] = Field(default_factory=dict)
+    log_level: str = "INFO"
+    log_json: bool = False
+
+
+def load_yaml_mapping(config_path: Path) -> dict[str, object]:
+    """Load and validate a YAML configuration file as a dictionary."""
+    if not config_path.exists():
+        msg = f"Configuration file not found: {config_path}"
+        raise ValidationFailedError(msg, details={"path": str(config_path)})
+    raw_text = config_path.read_text(encoding="utf-8")
+    loaded: object = yaml.safe_load(raw_text)
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        msg = f"Configuration file root must be a YAML mapping: {config_path}"
+        raise ValidationFailedError(msg, details={"path": str(config_path)})
+    mapping = cast("dict[object, object]", loaded)
+    return {str(key): value for key, value in mapping.items()}
+
+
+def load_settings(
+    config_path: Path | None = None,
+    **overrides: object,
+) -> LaiSettings:
+    """Load settings with precedence: explicit overrides > env vars > YAML > defaults."""
+    resolved_path = config_path
+    if resolved_path is None:
+        env_path = os.environ.get("LAI_CONFIG_FILE")
+        if env_path:
+            resolved_path = Path(env_path)
+
+    yaml_data = load_yaml_mapping(resolved_path) if resolved_path is not None else {}
+    override_data = dict(overrides)
+
+    class _ConfiguredLaiSettings(LaiSettings):
+        @classmethod
+        def settings_customise_sources(
+            cls,
+            settings_cls: type[BaseSettings],
+            init_settings: PydanticBaseSettingsSource,
+            env_settings: PydanticBaseSettingsSource,
+            dotenv_settings: PydanticBaseSettingsSource,
+            file_secret_settings: PydanticBaseSettingsSource,
+        ) -> tuple[PydanticBaseSettingsSource, ...]:
+            return (
+                init_settings,
+                _MappingSettingsSource(settings_cls, override_data),
+                env_settings,
+                dotenv_settings,
+                _MappingSettingsSource(settings_cls, yaml_data),
+                file_secret_settings,
+            )
+
+    loaded = _ConfiguredLaiSettings()
+    return LaiSettings.model_validate(loaded.model_dump())
