@@ -55,11 +55,12 @@ def _run_script(script_rel_path: str, *args: str) -> int:
 
 def cmd_lint() -> int:
     """Run ruff lint, ruff format check, and 350-line file size guard."""
-    for step in (
-        lambda: _run_python_module("ruff", "check", "src", "tests"),
-        lambda: _run_python_module("ruff", "format", "--check", "src", "tests"),
+    steps: tuple[Callable[[], int], ...] = (
+        lambda: _run_python_module("ruff", "check", "src", "tests", "scripts"),
+        lambda: _run_python_module("ruff", "format", "--check", "src", "tests", "scripts"),
         lambda: _run_script("scripts/check_file_sizes.py"),
-    ):
+    )
+    for step in steps:
         rc = step()
         if rc != 0:
             return rc
@@ -69,7 +70,7 @@ def cmd_lint() -> int:
 def cmd_typecheck() -> int:
     """Run basedpyright (strict) and mypy (strict)."""
     for module in ("basedpyright", "mypy"):
-        rc = _run_python_module(module, "src", "tests")
+        rc = _run_python_module(module, "src", "tests", "scripts")
         if rc != 0:
             return rc
     return 0
@@ -92,11 +93,16 @@ def cmd_boundaries() -> int:
     return result if isinstance(result, int) else 0
 
 
-def cmd_test(cov_fail_under: int | None = None) -> int:
-    """Run unit and integration tests with coverage."""
-    args = ["tests/unit", "tests/integration", "-v", "--cov=lai"]
-    if cov_fail_under is not None:
-        args.append(f"--cov-fail-under={cov_fail_under}")
+def cmd_test(cov_fail_under: int = 85) -> int:
+    """Run unit and integration tests with branch coverage."""
+    args = [
+        "tests/unit",
+        "tests/integration",
+        "-v",
+        "--cov=lai",
+        "--cov-branch",
+        f"--cov-fail-under={cov_fail_under}",
+    ]
     return _run_python_module("pytest", *args)
 
 
@@ -182,7 +188,7 @@ def cmd_mutate(
 def cmd_all(
     *,
     skip_mutate: bool = False,
-    cov_fail_under: int | None = None,
+    cov_fail_under: int = 85,
     targets: str = DEFAULT_MUTATION_TARGETS,
     min_score: float = DEFAULT_MIN_MUTATION_SCORE,
 ) -> int:
@@ -217,8 +223,8 @@ def _build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--cov-fail-under",
         type=int,
-        default=None,
-        help="Optional minimum coverage percentage threshold.",
+        default=85,
+        help="Minimum branch coverage percentage threshold (default: 85).",
     )
 
     subparsers.add_parser("schema", help="Validate checked-in OpenAPI schema.")
@@ -245,8 +251,8 @@ def _build_parser() -> argparse.ArgumentParser:
     all_parser.add_argument(
         "--cov-fail-under",
         type=int,
-        default=None,
-        help="Optional minimum coverage percentage threshold.",
+        default=85,
+        help="Minimum branch coverage percentage threshold (default: 85).",
     )
     all_parser.add_argument(
         "--targets",
@@ -272,7 +278,7 @@ def main() -> int:
         "lint": cmd_lint,
         "typecheck": cmd_typecheck,
         "boundaries": cmd_boundaries,
-        "test": lambda: cmd_test(cov_fail_under=cast("int | None", args.cov_fail_under)),
+        "test": lambda: cmd_test(cov_fail_under=cast("int", args.cov_fail_under)),
         "schema": cmd_schema,
         "mutate": lambda: cmd_mutate(
             targets=cast("str", args.targets),
@@ -280,7 +286,7 @@ def main() -> int:
         ),
         "all": lambda: cmd_all(
             skip_mutate=cast("bool", args.skip_mutate),
-            cov_fail_under=cast("int | None", args.cov_fail_under),
+            cov_fail_under=cast("int", args.cov_fail_under),
             targets=cast("str", args.targets),
             min_score=cast("float", args.min_score),
         ),

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import inspect
 from contextlib import suppress
 from pathlib import Path
@@ -35,6 +34,7 @@ from lai.ingestion import (
     LocalIngestionPipeline,
 )
 from lai.observability import PromptAuditLogger, configure_observability, get_component_logger
+from lai.orchestrator.service import TurnOrchestrator
 from lai.scheduler import InferenceSpooler, SessionGate
 from lai.security import (
     ApiKeyAuthProvider,
@@ -117,20 +117,6 @@ async def _build_authenticator(
                 )
 
     return CompositeAuthenticator(providers=providers, edge_verifier=edge_verifier)
-
-
-def _instantiate_orchestrator(**kwargs: object) -> OrchestratorPort:
-    """Dynamically import TurnOrchestrator from lai.orchestrator.service."""
-    try:
-        module = importlib.import_module("lai.orchestrator.service")
-    except ModuleNotFoundError as exc:
-        msg = (
-            "lai.orchestrator.service is not available; pass an explicit "
-            "orchestrator or AppServices to create_app()."
-        )
-        raise RuntimeError(msg) from exc
-    orchestrator_cls = cast("Callable[..., OrchestratorPort]", module.TurnOrchestrator)
-    return orchestrator_cls(**kwargs)
 
 
 def _build_inference_provider(settings: LaiSettings) -> InferenceProviderPort:
@@ -233,7 +219,7 @@ async def build_app_services(
     tool_executor = GuardedToolExecutor(tool_registry, tool_audit_repo)
     model_profile = _resolve_model_profile(settings)
 
-    resolved_orchestrator = orchestrator or _instantiate_orchestrator(
+    resolved_orchestrator = orchestrator or TurnOrchestrator(
         settings=settings,
         session_repo=session_repo,
         file_repo=file_repo,

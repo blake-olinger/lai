@@ -234,7 +234,8 @@ def test_cli_serve_supervises_backends_and_uvicorn(
         return cast("ASGIApp", _noop_asgi)
 
     monkeypatch.setattr(serve_cmd, "build_supervisors", _fake_supervisors)
-    monkeypatch.setattr(serve_cmd, "_load_create_app", lambda: _fake_create_app)
+    assert callable(serve_cmd.create_app)
+    monkeypatch.setattr(serve_cmd, "create_app", _fake_create_app)
     monkeypatch.setattr(uvicorn, "Server", _FakeServer)
 
     runner = CliRunner()
