@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -12,13 +13,17 @@ from typing import TYPE_CHECKING
 from lai.api.schemas.common import ErrorDetail, ErrorResponse
 from lai.domain.chat import ContentDeltaEvent, KeepaliveEvent, OrchestratorEvent, TurnCompletedEvent
 from lai.domain.errors import LaiError
-from lai.observability.logging import get_request_id
+from lai.domain.observability import AlertCategory
+from lai.observability.logging import bind_log_context, get_request_id
 from lai.scheduler import stream_with_sse_keepalive
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
 _DEFAULT_PEEK_BUDGET_SECONDS = 0.25
+_INTERNAL_ERROR_CODE = "internal_error"
+_INTERNAL_ERROR_MESSAGE = "An unexpected internal server error occurred."
+_fatal_logger = logging.getLogger("lai.api")
 
 
 @dataclass(slots=True)
@@ -91,7 +96,12 @@ async def _consume_priming_window(
             break
 
         task: asyncio.Task[OrchestratorEvent] = asyncio.create_task(_next_event(guarded))
-        done, _ = await asyncio.wait({task}, timeout=remaining)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=remaining)
+        except BaseException:
+            await _cancel_pending(task)
+            await _close_async_iter(guarded)
+            raise
         if task not in done:
             pending_task = task
             break
@@ -160,16 +170,35 @@ async def prime_sse_stream(
     )
 
 
+def _log_unhandled_sse_exception(exc: Exception) -> None:
+    """Emit a critical FATAL_EXCEPTION alert log for an unhandled mid-stream exception."""
+    request_id = get_request_id()
+    alert_payload = json.dumps(
+        {
+            "event": "unhandled_sse_exception",
+            "component": "api",
+            "alert_category": AlertCategory.FATAL_EXCEPTION.value,
+            "request_id": request_id,
+            "exception_type": type(exc).__name__,
+        }
+    )
+    with bind_log_context(request_id=request_id):
+        _fatal_logger.critical(alert_payload, exc_info=exc)
+
+
 async def _guard_sse_frames(
     frames: AsyncIterator[str],
     on_error: Callable[[LaiError], str],
 ) -> AsyncIterator[str]:
-    """Stream SSE frames and emit a formatted terminal frame if LaiError occurs mid-stream."""
+    """Stream SSE frames and emit a formatted terminal frame if an error occurs mid-stream."""
     try:
         async for frame in frames:
             yield frame
     except LaiError as exc:
         yield on_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        _log_unhandled_sse_exception(exc)
+        yield on_error(LaiError(_INTERNAL_ERROR_MESSAGE, code=_INTERNAL_ERROR_CODE))
 
 
 def _format_orchestrator_error_frame(exc: LaiError) -> str:
@@ -190,12 +219,12 @@ def _format_openai_error_frame(exc: LaiError) -> str:
 
 
 async def guard_orchestrator_sse_frames(frames: AsyncIterator[str]) -> AsyncIterator[str]:
-    """Convert mid-stream LaiErrors on orchestrator SSE streams into error events."""
+    """Convert mid-stream LaiErrors and unhandled exceptions on orchestrator SSE streams."""
     async for frame in _guard_sse_frames(frames, _format_orchestrator_error_frame):
         yield frame
 
 
 async def guard_openai_sse_frames(frames: AsyncIterator[str]) -> AsyncIterator[str]:
-    """Convert mid-stream LaiErrors on OpenAI SSE streams into error chunks plus [DONE]."""
+    """Convert mid-stream LaiErrors and unhandled exceptions on OpenAI SSE streams plus [DONE]."""
     async for frame in _guard_sse_frames(frames, _format_openai_error_frame):
         yield frame
