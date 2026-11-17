@@ -10,12 +10,22 @@ from lai.domain.auth import (
     CreatedApiKey,
     RequestCredentials,
 )
+from lai.domain.observability import (
+    AlertCategory,
+    AlertEvent,
+    AlertSeverity,
+    LoggingConfig,
+)
 
 __all__ = [
+    "AlertCategory",
+    "AlertEvent",
+    "AlertSeverity",
     "ApiKeyRecord",
     "ApiScope",
     "AuthMethod",
     "AuthPrincipal",
     "CreatedApiKey",
+    "LoggingConfig",
     "RequestCredentials",
 ]

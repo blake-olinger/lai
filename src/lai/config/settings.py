@@ -17,6 +17,7 @@ from pydantic_settings import (
 from lai.config.profiles import DEFAULT_MODEL_PROFILE_NAME
 from lai.domain.errors import ValidationFailedError
 from lai.domain.inference import ModelProfile
+from lai.domain.observability import LoggingConfig
 
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
@@ -94,6 +95,7 @@ class LaiSettings(BaseSettings):
 
     default_model_profile: str = DEFAULT_MODEL_PROFILE_NAME
     custom_profiles: dict[str, ModelProfile] = Field(default_factory=dict)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     log_level: str = "INFO"
     log_json: bool = False
 

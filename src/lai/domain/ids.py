@@ -13,6 +13,7 @@ API_KEY_ID_PREFIX = "key_"
 JOB_ID_PREFIX = "job_"
 APPROVAL_ID_PREFIX = "apr_"
 AUDIT_ID_PREFIX = "aud_"
+ALERT_ID_PREFIX = "alt_"
 
 ALL_ID_PREFIXES: tuple[str, ...] = (
     PROJECT_ID_PREFIX,
@@ -24,6 +25,7 @@ ALL_ID_PREFIXES: tuple[str, ...] = (
     JOB_ID_PREFIX,
     APPROVAL_ID_PREFIX,
     AUDIT_ID_PREFIX,
+    ALERT_ID_PREFIX,
 )
 
 
@@ -86,3 +88,8 @@ def new_approval_id() -> str:
 def new_audit_id() -> str:
     """Return a new tool audit log identifier."""
     return generate_prefixed_id(AUDIT_ID_PREFIX)
+
+
+def new_alert_id() -> str:
+    """Return a new observability alert identifier."""
+    return generate_prefixed_id(ALERT_ID_PREFIX)

@@ -147,6 +147,7 @@ layers = [
     "lai.api | lai.cli",
     "lai.orchestrator",
     "lai.scheduler | lai.tools | lai.inference | lai.ingestion | lai.db | lai.security | lai.config",
+    "lai.observability",
     "lai.ports",
     "lai.domain",
 ]
