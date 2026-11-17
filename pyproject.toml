@@ -26,6 +26,9 @@ dependencies = [
     "PyJWT[crypto]>=2.10",
 ]
 
+[project.scripts]
+lai = "lai.cli.app:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
@@ -54,7 +57,7 @@ pythonpath = ["src"]
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = [
@@ -121,7 +124,7 @@ runtime-evaluated-decorators = [
 [tool.basedpyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.13"
-include = ["src", "tests"]
+include = ["src", "tests", "scripts"]
 reportMissingTypeStubs = false
 
 [tool.mypy]
@@ -145,7 +148,8 @@ root_package = "lai"
 name = "Clean architectural layers"
 type = "layers"
 layers = [
-    "lai.api | lai.cli",
+    "lai.cli",
+    "lai.api",
     "lai.orchestrator",
     "lai.scheduler | lai.tools | lai.guardrails | lai.inference | lai.ingestion | lai.db | lai.security | lai.config",
     "lai.observability",

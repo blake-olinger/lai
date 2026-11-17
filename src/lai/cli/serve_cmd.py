@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 from pathlib import Path  # noqa: TC003 - evaluated at runtime by Typer
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 import uvicorn
 
+from lai.api.app import create_app
 from lai.cli._common import resolve_llama_executable, resolve_log_dir, resolve_settings
 from lai.config.profiles import get_model_profile
 from lai.domain.errors import LaiError
@@ -17,21 +17,10 @@ from lai.guardrails import ShieldGemmaSupervisor
 from lai.inference import LlamaCppSupervisor, OllamaSupervisor
 
 if TYPE_CHECKING:
-    from starlette.types import ASGIApp
-
     from lai.config.settings import LaiSettings
     from lai.ports.inference import InferenceSupervisorPort
 
-
-class _AppFactory(Protocol):
-    def __call__(self, settings: LaiSettings) -> ASGIApp: ...
-
-
-def _load_create_app() -> _AppFactory:
-    """Load lai.api.app.create_app dynamically to preserve layer independence."""
-    module = importlib.import_module("lai.api.app")
-    factory = module.create_app
-    return cast("_AppFactory", factory)
+__all__ = ["build_supervisors", "create_app", "serve_async", "serve_command"]
 
 
 def build_supervisors(
@@ -85,7 +74,7 @@ async def serve_async(settings: LaiSettings, *, supervise: bool = True) -> None:
             if guardrail_supervisor is not None:
                 await guardrail_supervisor.ensure_running(settings.guardrails)
 
-        app = _load_create_app()(settings)
+        app = create_app(settings)
         uv_config = uvicorn.Config(
             app=app,
             host=settings.host,

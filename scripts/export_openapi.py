@@ -3,26 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from pathlib import Path
-from typing import Protocol, cast
 
 from openapi_spec_validator import validate as validate_openapi_spec
 
+from lai.api.app import create_app
 from lai.config.settings import LaiSettings
-
-
-class _OpenApiApp(Protocol):
-    def openapi(self) -> dict[str, object]: ...
-
-
-def _load_app() -> _OpenApiApp:
-    """Construct the FastAPI application with default settings without entering lifespan."""
-    module = importlib.import_module("lai.api.app")
-    app_obj: object = module.create_app(LaiSettings())
-    return cast("_OpenApiApp", app_obj)
 
 
 def main() -> int:
@@ -41,9 +29,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    app = _load_app()
+    app = create_app(LaiSettings())
     schema = app.openapi()
-    validate_openapi_spec(schema)  # type: ignore[arg-type]
+    validate_openapi_spec(schema)
     rendered = json.dumps(schema, indent=2, sort_keys=True) + "\n"
     output_path: Path = args.output
 

@@ -304,7 +304,7 @@ def test_cli_ollama_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     def _fake_app(_settings: LaiSettings) -> ASGIApp:
         return cast("ASGIApp", _noop_asgi)
 
-    monkeypatch.setattr(serve_cmd, "_load_create_app", lambda: _fake_app)
+    monkeypatch.setattr(serve_cmd, "create_app", _fake_app)
     monkeypatch.setattr(uvicorn, "Server", _FakeServer)
     res_serve = runner.invoke(
         cli_app, ["serve", "--backend", "ollama", "--no-supervise", "--config", str(cfg_path)]

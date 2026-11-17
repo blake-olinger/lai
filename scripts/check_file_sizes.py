@@ -1,4 +1,4 @@
-"""Check that all Python files under src/ and tests/ stay within the 350-line budget."""
+"""Check that all Python files under src/, tests/, and scripts/ stay within the 350-line budget."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 MAX_LINES = 350
-TARGET_DIRS = ("src", "tests")
+TARGET_DIRS = ("src", "tests", "scripts")
 
 
 def find_oversized_files(root: Path, max_lines: int = MAX_LINES) -> list[tuple[Path, int]]:
