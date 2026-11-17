@@ -1,0 +1,18 @@
+# Cloudflare Named Tunnel Template for LAI
+# Render a customized copy via:
+#   uv run python -m lai.cli tunnel render-config --hostname ai.example.com --tunnel <TUNNEL_UUID> -o cloudflared.yml
+#
+# Run the tunnel alongside `lai serve`:
+#   cloudflared tunnel --config deploy/cloudflared/config.yml run
+
+tunnel: "<REPLACE_WITH_TUNNEL_UUID>"
+credentials-file: "~/.cloudflared/<REPLACE_WITH_TUNNEL_UUID>.json"
+
+ingress:
+  - hostname: "ai.example.com"
+    service: "http://127.0.0.1:8400"
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: "30s"
+      keepAliveTimeout: "90s"
+  - service: "http_status:404"
