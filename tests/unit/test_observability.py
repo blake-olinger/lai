@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 import httpx
 import pytest
 import respx
+import structlog
 
 from lai.domain import AlertCategory, AlertEvent, AlertSeverity, LoggingConfig
 from lai.domain.ids import new_alert_id
@@ -313,3 +314,31 @@ async def test_alert_manager_flushes_sync_deferred_deliveries() -> None:
     thread.join()
     await manager.flush()
     assert [item.id for item in sink.events] == [event.id]
+
+
+def test_pre_init_component_logger_routes_to_files_and_alerts(tmp_path: Path) -> None:
+    """Logger created before configure_observability routes to JSONL files and AlertManager."""
+    structlog.reset_defaults()
+    pre_init_log = get_component_logger("pre_init")
+    cfg = LoggingConfig(log_dir=tmp_path, level="INFO", json_console=True, enable_file_logs=True)
+    manager = configure_observability(cfg)
+    try:
+        pre_init_log.error("upstream timed out", alert_category=AlertCategory.TIMEOUT.value)
+    finally:
+        manager.close()
+        for handler in list(logging.getLogger().handlers):
+            handler.flush()
+            handler.close()
+
+    alerts = manager.recent_alerts()
+    assert len(alerts) == 1
+    assert alerts[0].category is AlertCategory.TIMEOUT
+    assert alerts[0].component == "pre_init"
+    for filename in ("lai.jsonl", "errors.jsonl"):
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / filename).read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["component"] == "pre_init"
+        assert rows[0]["event"] == "upstream timed out"

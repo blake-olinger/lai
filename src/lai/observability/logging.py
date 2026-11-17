@@ -221,5 +221,5 @@ def configure_observability(
 
 
 def get_component_logger(component: str) -> structlog.stdlib.BoundLogger:
-    """Return a bound structlog logger pre-tagged with component name."""
-    return structlog.stdlib.get_logger(f"lai.{component}").bind(component=component)
+    """Return a lazy bound structlog logger pre-tagged with component name."""
+    return structlog.stdlib.get_logger(f"lai.{component}", component=component)
