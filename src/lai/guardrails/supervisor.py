@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from lai.domain.errors import InferenceBackendError
 from lai.domain.inference import BackendHealth
@@ -89,6 +89,11 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
         self._stopping = False
         self._last_exit_code: int | None = None
         self._log = get_component_logger("guardrails")
+
+    @property
+    def job_handle(self) -> int | None:
+        """Return the active Win32 Job Object handle if attached."""
+        return self._job_handle
 
     async def ensure_running(self, config: GuardrailConfig) -> BackendHealth:
         """Start or verify the CPU-only ShieldGemma llama-server process."""
@@ -247,17 +252,24 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
 
             await asyncio.sleep(self._poll_interval_seconds)
 
-    async def _stop_locked(self, *, preserve_last_exit_code: bool = False) -> None:
-        """Terminate running process, release handles, and close rotating log writer."""
-        self._stopping = True
-        proc = self._process
-        if proc is not None and proc.returncode is None:
+    async def _terminate_and_drain(self, proc: asyncio.subprocess.Process) -> None:
+        """Terminate or kill proc if still running and await process exit."""
+        if proc.returncode is None:
             terminate_process_tree(proc)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=self._stop_timeout_seconds)
             except TimeoutError:
                 kill_process_tree(proc)
                 await proc.wait()
+        else:
+            await proc.wait()
+
+    async def _stop_locked(self, *, preserve_last_exit_code: bool = False) -> None:
+        """Terminate running process, release handles, and close rotating log writer."""
+        self._stopping = True
+        proc = self._process
+        if proc is not None:
+            await self._terminate_and_drain(proc)
 
         if self._monitor_task is not None:
             if not self._monitor_task.done():
@@ -265,6 +277,12 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._monitor_task
             self._monitor_task = None
+
+        if proc is not None:
+            transport = cast("asyncio.BaseTransport | None", getattr(proc, "_transport", None))
+            if transport is not None:
+                transport.close()
+            await asyncio.sleep(0)
 
         close_win32_handle(self._job_handle)
         self._job_handle = None
