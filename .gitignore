@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.gremlins*/
+.cosmic-ray*
+htmlcov/
+.coverage*
+data/
+models/
+bin/
+.env
+*.gguf
+*.db
+*.sqlite*

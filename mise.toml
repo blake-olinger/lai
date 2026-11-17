@@ -1,0 +1,52 @@
+[tools]
+python = "3.13"
+uv = "latest"
+
+[tasks.setup]
+description = "Install Python 3.13 and sync project dependencies"
+run = [
+    "uv python install 3.13",
+    "uv sync",
+]
+
+[tasks.fmt]
+description = "Format source and tests with ruff"
+run = [
+    "uv run ruff format src tests scripts",
+    "uv run ruff check --fix src tests scripts",
+]
+
+[tasks.lint]
+description = "Run ruff lint, format check, and 350-line file size guard"
+run = [
+    "uv run ruff check src tests",
+    "uv run ruff format --check src tests",
+    "uv run python scripts/check_file_sizes.py",
+]
+
+[tasks.typecheck]
+description = "Run basedpyright (strict) and mypy (strict)"
+run = [
+    "uv run basedpyright src tests",
+    "uv run mypy src tests",
+]
+
+[tasks.boundaries]
+description = "Check architectural layer and independence contracts"
+run = "uv run lint-imports"
+
+[tasks.test]
+description = "Run unit and integration tests with coverage"
+run = "uv run pytest tests/unit tests/integration -v --cov=lai"
+
+[tasks.schema]
+description = "Validate exported OpenAPI schema"
+run = "uv run python scripts/export_openapi.py --check"
+
+[tasks.mutate]
+description = "Run mutation tests with pytest-gremlins"
+run = "uv run pytest --gremlins tests/unit"
+
+[tasks.verify]
+description = "Run full local verification suite"
+depends = ["lint", "typecheck", "boundaries", "test", "schema"]
