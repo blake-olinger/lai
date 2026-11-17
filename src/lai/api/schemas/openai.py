@@ -41,7 +41,7 @@ class OpenAIChatCompletionRequest(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="allow")
 
-    model: str = Field(default="gemma4-26b-a4b", min_length=1)
+    model: str | None = Field(default=None, min_length=1)
     messages: list[OpenAIChatMessageInput] = Field(min_length=1)
     stream: bool = False
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)

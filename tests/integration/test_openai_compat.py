@@ -283,3 +283,30 @@ async def test_openai_models_and_transparent_retrieval_and_map_reduce(
         frame["choices"][0]["finish_reason"] == "stop" and frame["usage"] is not None
         for frame in chunk_frames
     )
+
+    # 5. body.file_ids, body.context_mode, and max_completion_tokens override X-LAI-* headers
+    prev_stream_count = len(inf.stream_requests)
+    r_override = await client.post(
+        "/v1/chat/completions",
+        headers={
+            **oai_env.headers,
+            "X-LAI-Project-Id": oai_env.project_id,
+            "X-LAI-File-Ids": oai_env.log_file_id,
+            "X-LAI-Context-Mode": "map_reduce",
+        },
+        json={
+            "model": "gemma4-26b-a4b",
+            "messages": [{"role": "user", "content": "Read unrelated.md directly"}],
+            "file_ids": [oai_env.other_file_id],
+            "context_mode": "direct",
+            "max_completion_tokens": 77,
+            "stream": False,
+        },
+    )
+    assert r_override.status_code == HTTPStatus.OK
+    assert len(inf.stream_requests) == prev_stream_count + 1
+    override_req = inf.stream_requests[-1]
+    assert override_req.max_tokens == 77  # noqa: PLR2004
+    override_text = "\n".join(m.content for m in override_req.messages)
+    assert "SecretUnrelatedMarker" in override_text
+    assert "db_timeout" not in override_text

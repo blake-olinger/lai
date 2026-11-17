@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from lai.config.profiles import DEFAULT_MODEL_PROFILE_NAME, get_model_profile
+from lai.config.profiles import get_model_profile
 from lai.domain.chat import Citation, Message, MessageRole, TokenUsage
 from lai.domain.errors import AuthorizationError, NotFoundError
 from lai.domain.files import FileStatus
@@ -34,29 +34,28 @@ def resolve_model_profile(
     settings: LaiSettings,
     session: Session | None,
     explicit_profile: ModelProfile | None,
+    requested_model: str | None = None,
 ) -> ModelProfile:
-    """Select the effective ModelProfile from session override, explicit default, or settings."""
-    if session is not None:
-        name = session.model_profile
-        if explicit_profile is not None and name in {
-            explicit_profile.name,
-            DEFAULT_MODEL_PROFILE_NAME,
-        }:
-            return explicit_profile
-        try:
-            return get_model_profile(name, settings.custom_profiles)
-        except NotFoundError:
-            if explicit_profile is not None:
-                return explicit_profile
-            return ModelProfile(
-                name=name,
-                hf_repo="local/custom",
-                hf_filename=f"{name}.gguf",
-            )
+    """Select the effective ModelProfile from turn override, session, explicit, or settings."""
+    if requested_model is not None:
+        return get_model_profile(requested_model, settings.custom_profiles)
+    if session is None:
+        return explicit_profile or get_model_profile(
+            settings.default_model_profile,
+            settings.custom_profiles,
+        )
 
-    if explicit_profile is not None:
+    name = session.model_profile
+    if explicit_profile is not None and name == explicit_profile.name:
         return explicit_profile
-    return get_model_profile(settings.default_model_profile, settings.custom_profiles)
+    try:
+        return get_model_profile(name, settings.custom_profiles)
+    except NotFoundError:
+        return explicit_profile or ModelProfile(
+            name=name,
+            hf_repo="local/custom",
+            hf_filename=f"{name}.gguf",
+        )
 
 
 async def resolve_target_files(
