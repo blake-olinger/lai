@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import Field
 
+from lai.domain.auth import ApiScope
 from lai.domain.base import StrictModel, utc_now
 from lai.domain.ids import new_approval_id, new_audit_id
 
@@ -56,6 +57,8 @@ class ToolExecutionContext(StrictModel):
     project_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
     principal_id: str = Field(min_length=1)
+    principal_scopes: tuple[ApiScope, ...] = ()
+    allowed_file_ids: tuple[str, ...] = ()
     workspace_root: str | None = None
     approved_approval_id: str | None = None
     request_id: str | None = None

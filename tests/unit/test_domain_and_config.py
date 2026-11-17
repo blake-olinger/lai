@@ -20,6 +20,12 @@ from lai.config.profiles import (
     get_model_profile,
 )
 from lai.config.settings import LaiSettings, load_settings
+from lai.domain import (
+    ApiScope,
+    AuthMethod,
+    AuthPrincipal,
+    RequestCredentials,
+)
 from lai.domain.base import MutableStateModel, StrictModel, utc_now
 from lai.domain.errors import (
     AuthenticationError,
@@ -58,6 +64,8 @@ from lai.domain.ids import (
 )
 from lai.domain.inference import ModelProfile
 from lai.domain.projects import CreateProjectInput, Project
+from lai.domain.scheduler import JobPriority, LeaseRequest, SpoolerSnapshot
+from lai.domain.tools import ToolExecutionContext
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -93,6 +101,22 @@ EXPECTED_SETTINGS_DEFAULTS: dict[str, object] = {
     "json_keepalive_threshold_seconds": 20.0,
     "rate_limit_rpm": 120,
     "cf_access_enabled": False,
+    "auth_providers": ("api_key",),
+    "oidc_enabled": False,
+    "oidc_issuer_url": "https://accounts.google.com",
+    "oidc_jwks_url": "https://www.googleapis.com/oauth2/v3/certs",
+    "oidc_audience": None,
+    "oidc_allowed_emails": (),
+    "oidc_allowed_domains": (),
+    "oidc_default_scopes": (
+        "projects:read",
+        "files:read",
+        "files:write",
+        "chat:read",
+        "chat:write",
+        "tools:safe",
+    ),
+    "oidc_admin_emails": (),
 }
 
 UPDATED_COUNT = 2
@@ -249,3 +273,54 @@ def test_logging_and_request_id_context() -> None:
         assert get_request_id() == "req_abc123"
         logger.info("test_event", ok=True)
     assert get_request_id() is None
+
+
+def test_pluggable_auth_scopes_credentials_and_context_fields() -> None:
+    """New AuthMethod, ApiScope, RequestCredentials, tool context, and scheduler fields work."""
+    assert ApiScope.CHAT_READ.value == "chat:read"
+    assert ApiScope.TOOLS_SAFE.value == "tools:safe"
+    assert ApiScope.TOOLS_EXEC.value == "tools:exec"
+    assert set(AuthMethod) == {
+        AuthMethod.API_KEY,
+        AuthMethod.OIDC,
+        AuthMethod.CLOUDFLARE_ACCESS,
+        AuthMethod.LOCAL_CLI,
+    }
+
+    sample_bearer = new_job_id()
+    creds = RequestCredentials(
+        authorization_scheme="Bearer",
+        bearer_token=sample_bearer,
+        headers={"cf-access-jwt-assertion": "edge_jwt"},
+        client_host="127.0.0.1",
+    )
+    assert creds.bearer_token == sample_bearer
+
+    principal = AuthPrincipal(
+        principal_id="oidc:sub_1",
+        auth_method=AuthMethod.OIDC,
+        scopes=(ApiScope.CHAT_READ, ApiScope.TOOLS_SAFE),
+        email="user@example.com",
+        issuer="https://accounts.google.com",
+        subject="sub_1",
+    )
+    assert principal.auth_method is AuthMethod.OIDC
+    assert principal.issuer == "https://accounts.google.com"
+    assert principal.subject == "sub_1"
+
+    ctx = ToolExecutionContext(
+        project_id="prj_1",
+        session_id="ses_1",
+        principal_id=principal.principal_id,
+        principal_scopes=principal.scopes,
+        allowed_file_ids=("fil_1", "fil_2"),
+    )
+    assert ctx.principal_scopes == (ApiScope.CHAT_READ, ApiScope.TOOLS_SAFE)
+    assert ctx.allowed_file_ids == ("fil_1", "fil_2")
+
+    lease = LeaseRequest(session_id="ses_1", project_id="prj_1")
+    assert lease.principal_id == "anonymous"
+    assert lease.priority == JobPriority.INTERACTIVE
+    snapshot = SpoolerSnapshot()
+    assert snapshot.total_evicted == 0
+    assert snapshot.avg_wait_ms == 0.0

@@ -31,6 +31,8 @@ class SpoolerSnapshot(StrictModel):
     queued_by_priority: dict[str, int] = Field(default_factory=dict)
     total_completed: int = Field(default=0, ge=0)
     total_rejected: int = Field(default=0, ge=0)
+    total_evicted: int = Field(default=0, ge=0)
+    avg_wait_ms: float = Field(default=0.0, ge=0.0)
 
 
 class LeaseRequest(StrictModel):
@@ -39,5 +41,6 @@ class LeaseRequest(StrictModel):
     job_id: str = Field(default_factory=new_job_id)
     session_id: str = Field(min_length=1)
     project_id: str = Field(min_length=1)
+    principal_id: str = Field(default="anonymous", min_length=1)
     priority: JobPriority = JobPriority.INTERACTIVE
     enqueued_at: datetime = Field(default_factory=utc_now)

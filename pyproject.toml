@@ -23,6 +23,7 @@ dependencies = [
     "typer>=0.15",
     "huggingface-hub>=0.27",
     "tiktoken>=0.8",
+    "PyJWT[crypto]>=2.10",
 ]
 
 [dependency-groups]

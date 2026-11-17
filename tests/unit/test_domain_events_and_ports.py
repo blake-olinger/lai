@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from lai.domain.auth import ApiKeyRecord, ApiScope, AuthPrincipal
+from lai.domain.auth import ApiKeyRecord, ApiScope, AuthMethod, AuthPrincipal
 from lai.domain.chat import (
     ApprovalRequiredEvent,
     ContentDeltaEvent,
@@ -36,6 +36,11 @@ from lai.domain.files import (
 )
 from lai.domain.scheduler import JobPriority, LeaseRequest, SpoolerSnapshot
 from lai.domain.tools import PermissionTier, ToolSpec
+from lai.ports import (
+    AuthenticatorPort,
+    AuthProviderPort,
+    EdgeVerifierPort,
+)
 from lai.ports.inference import InferenceProviderPort, InferenceSupervisorPort
 from lai.ports.orchestrator import OrchestratorPort
 from lai.ports.repositories import (
@@ -79,7 +84,7 @@ def test_auth_models_scope_and_expiry_checks() -> None:
 
     reader = AuthPrincipal(
         principal_id="usr_1",
-        auth_method="api_key",
+        auth_method=AuthMethod.API_KEY,
         scopes=(ApiScope.PROJECTS_READ,),
     )
     assert reader.has_scope(ApiScope.PROJECTS_READ) is True
@@ -87,7 +92,7 @@ def test_auth_models_scope_and_expiry_checks() -> None:
 
     admin = AuthPrincipal(
         principal_id="usr_admin",
-        auth_method="cloudflare_access",
+        auth_method=AuthMethod.CLOUDFLARE_ACCESS,
         scopes=(ApiScope.ADMIN,),
         email="ops@example.com",
     )
@@ -186,6 +191,9 @@ def test_file_and_scheduler_domain_models() -> None:
 def test_ports_are_runtime_checkable_protocols() -> None:
     """All infrastructure and orchestrator ports expose runtime-checkable protocols."""
     protocols: tuple[type[object], ...] = (
+        AuthProviderPort,
+        EdgeVerifierPort,
+        AuthenticatorPort,
         ApiKeyRepositoryPort,
         ProjectRepositoryPort,
         SessionRepositoryPort,

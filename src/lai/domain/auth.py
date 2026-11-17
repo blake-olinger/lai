@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
 
 from pydantic import Field
 
@@ -19,9 +18,21 @@ class ApiScope(StrEnum):
     PROJECTS_WRITE = "projects:write"
     FILES_READ = "files:read"
     FILES_WRITE = "files:write"
+    CHAT_READ = "chat:read"
     CHAT_WRITE = "chat:write"
+    TOOLS_SAFE = "tools:safe"
+    TOOLS_EXEC = "tools:exec"
     TOOLS_APPROVE = "tools:approve"
     ADMIN = "admin"
+
+
+class AuthMethod(StrEnum):
+    """Authentication mechanism that established a caller principal."""
+
+    API_KEY = "api_key"
+    OIDC = "oidc"
+    CLOUDFLARE_ACCESS = "cloudflare_access"
+    LOCAL_CLI = "local_cli"
 
 
 class ApiKeyRecord(StrictModel):
@@ -56,11 +67,22 @@ class AuthPrincipal(StrictModel):
     """Authenticated caller identity attached to a request or turn."""
 
     principal_id: str = Field(min_length=1)
-    auth_method: Literal["api_key", "cloudflare_access", "local_cli"]
+    auth_method: AuthMethod
     scopes: tuple[ApiScope, ...]
     key_id: str | None = None
     email: str | None = None
+    issuer: str | None = None
+    subject: str | None = None
 
     def has_scope(self, scope: ApiScope) -> bool:
         """Return True if the principal holds the requested scope or admin."""
         return ApiScope.ADMIN in self.scopes or scope in self.scopes
+
+
+class RequestCredentials(StrictModel):
+    """Extracted HTTP/CLI request credentials evaluated by auth providers."""
+
+    authorization_scheme: str | None = None
+    bearer_token: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    client_host: str | None = None

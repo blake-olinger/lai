@@ -75,6 +75,23 @@ class LaiSettings(BaseSettings):
     cf_access_team_domain: str | None = None
     cf_access_aud: str | None = None
 
+    auth_providers: tuple[str, ...] = ("api_key",)
+    oidc_enabled: bool = False
+    oidc_issuer_url: str = "https://accounts.google.com"
+    oidc_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
+    oidc_audience: str | None = None
+    oidc_allowed_emails: tuple[str, ...] = ()
+    oidc_allowed_domains: tuple[str, ...] = ()
+    oidc_default_scopes: tuple[str, ...] = (
+        "projects:read",
+        "files:read",
+        "files:write",
+        "chat:read",
+        "chat:write",
+        "tools:safe",
+    )
+    oidc_admin_emails: tuple[str, ...] = ()
+
     default_model_profile: str = DEFAULT_MODEL_PROFILE_NAME
     custom_profiles: dict[str, ModelProfile] = Field(default_factory=dict)
     log_level: str = "INFO"
