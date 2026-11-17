@@ -30,7 +30,7 @@ class AuthProviderPort(Protocol):
 class EdgeVerifierPort(Protocol):
     """Optional network edge verification guard (e.g., Cloudflare Access)."""
 
-    def verify_edge(self, credentials: RequestCredentials) -> None:
+    async def verify_edge(self, credentials: RequestCredentials) -> None:
         """Verify edge assertions or raise AuthenticationError/AuthorizationError."""
         ...
 

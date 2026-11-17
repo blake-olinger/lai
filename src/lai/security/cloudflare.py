@@ -3,26 +3,29 @@
 from __future__ import annotations
 
 import hmac
-from typing import TYPE_CHECKING, Any, cast
+import time
+from typing import TYPE_CHECKING, Any
 
-import httpx
 import jwt
 from pydantic import Field
 
 from lai.domain.base import StrictModel
 from lai.domain.errors import AuthenticationError
-from lai.domain.observability import AlertCategory
 from lai.observability.logging import get_component_logger
 from lai.ports.auth import EdgeVerifierPort
+from lai.security._jwks import JwksCache, JwksCachePolicy, JwksFetchSpec, fetch_jwks_payload
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    import httpx
 
     from lai.domain.auth import RequestCredentials
 
 _HEADER_CLIENT_ID = "cf-access-client-id"
 _HEADER_CLIENT_SECRET_HDR = "cf-access-client-secret"  # noqa: S105
 _HEADER_JWT_ASSERTION = "cf-access-jwt-assertion"
+_ALLOWED_EDGE_ALGORITHMS = frozenset({"RS256", "ES256"})
 
 
 class CloudflareEdgeConfig(StrictModel):
@@ -34,6 +37,8 @@ class CloudflareEdgeConfig(StrictModel):
     team_domain: str | None = None
     audience: str | None = None
     jwks_timeout_seconds: float = Field(default=5.0, gt=0.0)
+    jwks_cache_ttl_seconds: float = Field(default=300.0, gt=0.0)
+    min_jwks_refresh_interval_seconds: float = Field(default=30.0, ge=0.0)
 
 
 def _normalize_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -46,26 +51,11 @@ def _normalize_issuer(team_domain: str | None) -> str | None:
     if not team_domain:
         return None
     stripped = team_domain.strip().rstrip("/")
+    if not stripped:
+        return None
     if stripped.startswith(("https://", "http://")):
         return stripped
     return f"https://{stripped}"
-
-
-def _find_edge_key(jwks: Mapping[str, Any], kid: str | None) -> jwt.PyJWK | None:
-    """Locate a JWK matching `kid`, or the sole key if `kid` is absent."""
-    raw_keys = jwks.get("keys")
-    if not isinstance(raw_keys, list) or not raw_keys:
-        return None
-    keys_list = cast("list[object]", raw_keys)
-    dict_keys = [cast("dict[str, Any]", item) for item in keys_list if isinstance(item, dict)]
-    if kid is not None:
-        for entry in dict_keys:
-            if entry.get("kid") == kid:
-                return jwt.PyJWK.from_dict(entry)
-        return None
-    if len(dict_keys) == 1:
-        return jwt.PyJWK.from_dict(dict_keys[0])
-    return None
 
 
 class CloudflareEdgeVerifier(EdgeVerifierPort):
@@ -78,55 +68,45 @@ class CloudflareEdgeVerifier(EdgeVerifierPort):
         jwks: Mapping[str, Any] | None = None,
         jwt_verifier: Callable[[str], None] | None = None,
         http_client: httpx.AsyncClient | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
-        self._jwks: dict[str, Any] | None = dict(jwks) if jwks is not None else None
         self._jwt_verifier = jwt_verifier
         self._http_client = http_client
+        self._jwks_cache = JwksCache(
+            fetcher=self._fetch_jwks,
+            policy=JwksCachePolicy(
+                ttl_seconds=config.jwks_cache_ttl_seconds,
+                min_refresh_interval_seconds=config.min_jwks_refresh_interval_seconds,
+                can_fetch=_normalize_issuer(config.team_domain) is not None,
+                log_prefix="cloudflare",
+            ),
+            clock=clock,
+            initial_jwks=jwks,
+        )
 
-    async def refresh_jwks(self) -> None:
+    async def _fetch_jwks(self) -> dict[str, Any]:
         """Fetch Cloudflare Access certs from `team_domain/cdn-cgi/access/certs`."""
         issuer = _normalize_issuer(self._config.team_domain)
         if issuer is None:
             msg = "Cloudflare team_domain must be configured to fetch JWKS."
             raise AuthenticationError(msg)
         certs_url = f"{issuer}/cdn-cgi/access/certs"
-        try:
-            if self._http_client is not None:
-                response = await self._http_client.get(
-                    certs_url, timeout=self._config.jwks_timeout_seconds
-                )
-            else:
-                async with httpx.AsyncClient(timeout=self._config.jwks_timeout_seconds) as client:
-                    response = await client.get(certs_url)
-            response.raise_for_status()
-            parsed: object = response.json()
-        except (httpx.TimeoutException, TimeoutError) as exc:
-            get_component_logger("security").error(
-                "cloudflare_jwks_fetch_timeout",
-                certs_url=certs_url,
-                alert_category=AlertCategory.TIMEOUT.value,
-                exception_type=type(exc).__name__,
-            )
-            msg = "Timed out fetching Cloudflare Access JWKS."
-            raise AuthenticationError(msg) from exc
-        except (httpx.HTTPError, ValueError) as exc:
-            get_component_logger("security").error(
-                "cloudflare_jwks_fetch_failed", certs_url=certs_url, error=str(exc)
-            )
-            msg = f"Failed to fetch Cloudflare Access JWKS: {exc}"
-            raise AuthenticationError(msg) from exc
+        return await fetch_jwks_payload(
+            JwksFetchSpec(
+                url=certs_url,
+                timeout_seconds=self._config.jwks_timeout_seconds,
+                label="Cloudflare Access",
+                log_prefix="cloudflare",
+            ),
+            http_client=self._http_client,
+        )
 
-        if not isinstance(parsed, dict):
-            msg = "Invalid Cloudflare Access JWKS payload."
-            raise AuthenticationError(msg)
-        parsed_dict = cast("dict[str, Any]", parsed)
-        if not isinstance(parsed_dict.get("keys"), list):
-            msg = "Invalid Cloudflare Access JWKS payload."
-            raise AuthenticationError(msg)
-        self._jwks = parsed_dict
+    async def refresh_jwks(self) -> None:
+        """Fetch Cloudflare Access certs from `team_domain/cdn-cgi/access/certs`."""
+        await self._jwks_cache.refresh()
 
-    def verify_edge(self, credentials: RequestCredentials) -> None:
+    async def verify_edge(self, credentials: RequestCredentials) -> None:
         """Verify Cloudflare Access service token or edge JWT when enabled."""
         if not self._config.enabled:
             return
@@ -140,7 +120,7 @@ class CloudflareEdgeVerifier(EdgeVerifierPort):
 
         assertion = headers.get(_HEADER_JWT_ASSERTION)
         if assertion:
-            self._verify_jwt_assertion(assertion)
+            await self._verify_jwt_assertion(assertion)
             return
 
         get_component_logger("security").warning(
@@ -176,32 +156,53 @@ class CloudflareEdgeVerifier(EdgeVerifierPort):
             msg = "Invalid Cloudflare Access service token."
             raise AuthenticationError(msg)
 
-    def _verify_jwt_assertion(self, assertion: str) -> None:
-        """Validate `Cf-Access-Jwt-Assertion` via injected verifier or loaded JWKS."""
+    def _read_unverified_header(self, assertion: str) -> tuple[str, str | None]:
+        """Parse JWT header and require asymmetric RS256/ES256 edge signature."""
+        try:
+            header = jwt.get_unverified_header(assertion)
+        except jwt.PyJWTError as exc:
+            get_component_logger("security").warning(
+                "cloudflare_edge_rejected",
+                reason="invalid_jwt_header",
+                error=str(exc),
+            )
+            msg = f"Invalid Cloudflare Access JWT assertion: {exc}"
+            raise AuthenticationError(msg) from exc
+
+        alg = header.get("alg")
+        if not isinstance(alg, str) or alg not in _ALLOWED_EDGE_ALGORITHMS:
+            get_component_logger("security").warning(
+                "cloudflare_edge_rejected",
+                reason="unsupported_alg",
+                alg=str(alg),
+            )
+            msg = f"Unsupported Cloudflare JWT algorithm: {alg!r}"
+            raise AuthenticationError(msg)
+
+        raw_kid = header.get("kid")
+        kid = raw_kid if isinstance(raw_kid, str) and raw_kid else None
+        return alg, kid
+
+    async def _verify_jwt_assertion(self, assertion: str) -> None:
+        """Validate `Cf-Access-Jwt-Assertion` via injected verifier or cached/on-demand JWKS."""
         if self._jwt_verifier is not None:
             self._jwt_verifier(assertion)
             return
 
-        if self._jwks is None:
-            get_component_logger("security").warning(
-                "cloudflare_edge_rejected", reason="jwks_not_loaded"
-            )
-            msg = "Cloudflare Access JWKS is not loaded to verify JWT assertion."
-            raise AuthenticationError(msg)
+        alg, kid = self._read_unverified_header(assertion)
+        issuer = _normalize_issuer(self._config.team_domain)
+        missing_msg = (
+            "Cloudflare Access JWKS is not loaded to verify JWT assertion."
+            if self._jwks_cache.jwks is None and issuer is None
+            else "No matching Cloudflare Access JWK found."
+        )
+        signing_key = await self._jwks_cache.resolve_key(
+            kid,
+            error_prefix="Invalid Cloudflare Access JWK",
+            missing_key_message=missing_msg,
+        )
 
         try:
-            header = jwt.get_unverified_header(assertion)
-            raw_kid = header.get("kid")
-            kid = raw_kid if isinstance(raw_kid, str) and raw_kid else None
-            alg = header.get("alg")
-            if not isinstance(alg, str) or alg not in {"RS256", "ES256"}:
-                msg = f"Unsupported Cloudflare JWT algorithm: {alg!r}"
-                raise AuthenticationError(msg)
-            signing_key = _find_edge_key(self._jwks, kid)
-            if signing_key is None:
-                msg = "No matching Cloudflare Access JWK found."
-                raise AuthenticationError(msg)
-            issuer = _normalize_issuer(self._config.team_domain)
             jwt.decode(
                 assertion,
                 signing_key.key,

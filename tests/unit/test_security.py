@@ -235,8 +235,9 @@ async def test_oidc_provider_rsa_ec_caching_rotation_and_policies() -> None:
     assert user_principal.scopes == cfg.default_scopes
     assert fetch_count == 1
 
-    # Unknown kid triggers immediate refresh; TTL expiry triggers subsequent refresh.
+    # Unknown kid refreshes after cooldown; TTL expiry triggers subsequent refresh.
     jwks_payload = {"keys": [rsa_jwk2]}
+    clock_now = 130.0
     rotated_token = _sign_jwt(rsa_priv2, alg="RS256", kid="rsa-2", email="user@example.com")
     await provider.authenticate(_bearer(rotated_token))
     assert fetch_count == _FETCH_TWICE
@@ -303,13 +304,13 @@ async def test_cloudflare_edge_and_composite_authenticator_chain() -> None:
     verifier = CloudflareEdgeVerifier(cf_cfg, jwks={"keys": [rsa_jwk]})
     assert isinstance(verifier, EdgeVerifierPort)
     svc_hdrs = {"CF-Access-Client-Id": "cf-id", "CF-Access-Client-Secret": edge_cred}
-    verifier.verify_edge(RequestCredentials(headers=svc_hdrs))
+    await verifier.verify_edge(RequestCredentials(headers=svc_hdrs))
     cf_jwt = _sign_jwt(rsa_priv, kid="cf-1", iss="https://team.cloudflareaccess.com", aud="cf-aud")
-    verifier.verify_edge(RequestCredentials(headers={"Cf-Access-Jwt-Assertion": cf_jwt}))
+    await verifier.verify_edge(RequestCredentials(headers={"Cf-Access-Jwt-Assertion": cf_jwt}))
 
     for bad_hdrs in ({"CF-Access-Client-Id": "cf-id", "CF-Access-Client-Secret": "bad"}, {}):
         with pytest.raises(AuthenticationError):
-            verifier.verify_edge(RequestCredentials(headers=bad_hdrs))
+            await verifier.verify_edge(RequestCredentials(headers=bad_hdrs))
 
     created = generate_api_key("chain-key", (ApiScope.FILES_READ,))
     chain = CompositeAuthenticator(

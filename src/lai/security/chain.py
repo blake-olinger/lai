@@ -39,7 +39,7 @@ class CompositeAuthenticator(AuthenticatorPort):
     async def authenticate(self, credentials: RequestCredentials) -> AuthPrincipal:
         """Validate edge assertions and authenticate via the first matching provider."""
         if self._edge_verifier is not None:
-            self._edge_verifier.verify_edge(credentials)
+            await self._edge_verifier.verify_edge(credentials)
 
         for provider in self._providers:
             if provider.supports(credentials):

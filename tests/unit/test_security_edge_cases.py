@@ -94,7 +94,9 @@ async def test_oidc_http_jwks_success_and_error_paths() -> None:
 async def test_cloudflare_refresh_jwks_timeout_and_disabled_verifier() -> None:
     """CloudflareEdgeVerifier refreshes certs via HTTP, alerts on timeout, and skips disabled."""
     priv, jwk = _rsa_key_and_jwk("cf-1")
-    CloudflareEdgeVerifier(CloudflareEdgeConfig(enabled=False)).verify_edge(RequestCredentials())
+    await CloudflareEdgeVerifier(CloudflareEdgeConfig(enabled=False)).verify_edge(
+        RequestCredentials()
+    )
 
     cfg = CloudflareEdgeConfig(
         enabled=True,
@@ -114,7 +116,7 @@ async def test_cloudflare_refresh_jwks_timeout_and_disabled_verifier() -> None:
         algorithm="RS256",
         headers={"kid": "cf-1"},
     )
-    verifier.verify_edge(RequestCredentials(headers={"Cf-Access-Jwt-Assertion": assertion}))
+    await verifier.verify_edge(RequestCredentials(headers={"Cf-Access-Jwt-Assertion": assertion}))
 
     manager = configure_observability(LoggingConfig(enable_file_logs=False, level="INFO"))
     try:

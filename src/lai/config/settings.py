@@ -72,6 +72,7 @@ class LaiSettings(BaseSettings):
     keepalive_interval_seconds: float = Field(default=10.0, gt=0.0)
     json_keepalive_threshold_seconds: float = Field(default=20.0, gt=0.0)
     rate_limit_rpm: int = Field(default=120, ge=1)
+    ip_rate_limit_rpm: int = Field(default=240, ge=1)
 
     cf_access_enabled: bool = False
     cf_access_client_id: str | None = None

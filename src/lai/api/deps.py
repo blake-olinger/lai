@@ -69,6 +69,9 @@ class AppServices:
     tool_executor: ToolExecutorPort
     orchestrator: OrchestratorPort
     gpu_telemetry_fn: Callable[[], GpuTelemetry | None] = query_gpu_telemetry
+    ip_rate_limiter: TokenBucketRateLimiter = field(
+        default_factory=lambda: TokenBucketRateLimiter(requests_per_minute=240)
+    )
     background_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     close_callbacks: list[Callable[[], Awaitable[None] | None]] = field(default_factory=list)
 
@@ -130,12 +133,29 @@ def extract_request_credentials(request: Request) -> RequestCredentials:
     )
 
 
+def _resolve_client_ip(credentials: RequestCredentials, *, trust_cf_header: bool) -> str:
+    """Resolve client IP for pre-auth rate limiting, trusting CF header only when CF enabled."""
+    if trust_cf_header:
+        for header_name, header_value in credentials.headers.items():
+            if header_name.lower() == "cf-connecting-ip":
+                stripped = header_value.strip()
+                if stripped:
+                    return stripped
+    host = (credentials.client_host or "").strip()
+    return host or "unknown"
+
+
 async def get_current_principal(
     request: Request,
     services: Annotated[AppServices, Depends(get_services)],
 ) -> AuthPrincipal:
-    """Authenticate caller credentials and enforce per-principal rate limiting."""
+    """Enforce pre-auth IP limits, authenticate caller, and enforce per-principal limits."""
     credentials = extract_request_credentials(request)
+    client_ip = _resolve_client_ip(
+        credentials,
+        trust_cf_header=services.settings.cf_access_enabled,
+    )
+    await services.ip_rate_limiter.acquire(f"ip:{client_ip}")
     principal = await services.authenticator.authenticate(credentials)
     await services.rate_limiter.acquire(principal.principal_id)
     request.state.principal = principal

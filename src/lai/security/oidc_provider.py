@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any
 
-import httpx
 import jwt
 from pydantic import Field
 
 from lai.domain.auth import ApiScope, AuthMethod, AuthPrincipal, RequestCredentials
 from lai.domain.base import StrictModel
 from lai.domain.errors import AuthenticationError, AuthorizationError
-from lai.domain.observability import AlertCategory
 from lai.observability.logging import get_component_logger
 from lai.ports.auth import AuthProviderPort
+from lai.security._jwks import JwksCache, JwksCachePolicy, JwksFetchSpec, fetch_jwks_payload
 from lai.security.keys import API_KEY_PREFIX
+
+if TYPE_CHECKING:
+    import httpx
 
 JwksFetcher = Callable[[str], Awaitable[dict[str, Any]]]
 _JWT_PART_COUNT = 3
@@ -44,6 +45,7 @@ class OidcProviderConfig(StrictModel):
     algorithms: tuple[str, ...] = ("RS256", "ES256")
     jwks_cache_ttl_seconds: float = Field(default=3600.0, gt=0.0)
     jwks_timeout_seconds: float = Field(default=5.0, gt=0.0)
+    min_jwks_refresh_interval_seconds: float = Field(default=30.0, ge=0.0)
     require_email_verified: bool = True
     leeway_seconds: float = Field(default=0.0, ge=0.0)
 
@@ -62,25 +64,6 @@ def _extract_jwt_bearer(credentials: RequestCredentials) -> str | None:
     if len(parts) != _JWT_PART_COUNT or not all(parts):
         return None
     return token
-
-
-def _find_jwk_for_kid(jwks: Mapping[str, Any], kid: str | None) -> jwt.PyJWK | None:
-    """Locate a signing PyJWK from a JWKS dictionary by `kid` (or sole key)."""
-    raw_keys = jwks.get("keys")
-    if not isinstance(raw_keys, list) or not raw_keys:
-        return None
-    keys_list = cast("list[object]", raw_keys)
-    dict_keys = [cast("dict[str, Any]", item) for item in keys_list if isinstance(item, dict)]
-    if not dict_keys:
-        return None
-    if kid is not None:
-        for entry in dict_keys:
-            if entry.get("kid") == kid:
-                return jwt.PyJWK.from_dict(entry)
-        return None
-    if len(dict_keys) == 1:
-        return jwt.PyJWK.from_dict(dict_keys[0])
-    return None
 
 
 def _validate_email_policy(config: OidcProviderConfig, claims: Mapping[str, Any]) -> str | None:
@@ -140,10 +123,16 @@ class OidcJwtAuthProvider(AuthProviderPort):
         self._config = config
         self._jwks_fetcher = jwks_fetcher
         self._http_client = http_client
-        self._clock = clock
-        self._jwks_cache: dict[str, Any] | None = None
-        self._jwks_expires_at: float = 0.0
-        self._jwks_lock = asyncio.Lock()
+        self._jwks_cache = JwksCache(
+            fetcher=self._fetch_jwks,
+            policy=JwksCachePolicy(
+                ttl_seconds=config.jwks_cache_ttl_seconds,
+                min_refresh_interval_seconds=config.min_jwks_refresh_interval_seconds,
+                can_fetch=True,
+                log_prefix="oidc",
+            ),
+            clock=clock,
+        )
 
     @property
     def name(self) -> str:
@@ -175,7 +164,7 @@ class OidcJwtAuthProvider(AuthProviderPort):
         claims = self._decode_and_verify(token, signing_key, alg)
 
         subject = claims.get("sub")
-        if not isinstance(subject, str) or not subject:
+        if not isinstance(subject, str) or not subject.strip():
             get_component_logger("security").warning("oidc_auth_failed", reason="missing_subject")
             msg = "OIDC token missing subject claim."
             raise AuthenticationError(msg)
@@ -218,84 +207,25 @@ class OidcJwtAuthProvider(AuthProviderPort):
         return alg, kid
 
     async def _resolve_signing_key(self, kid: str | None) -> jwt.PyJWK:
-        """Resolve signing key from cached JWKS, refreshing on expiry or unknown kid."""
-        now = self._clock()
-        if self._jwks_cache is not None and now < self._jwks_expires_at:
-            cached_key = _find_jwk_for_kid(self._jwks_cache, kid)
-            if cached_key is not None:
-                return cached_key
-
-        async with self._jwks_lock:
-            now = self._clock()
-            if self._jwks_cache is not None and now < self._jwks_expires_at:
-                cached_key = _find_jwk_for_kid(self._jwks_cache, kid)
-                if cached_key is not None:
-                    return cached_key
-
-            jwks = await self._fetch_jwks()
-            self._jwks_cache = jwks
-            self._jwks_expires_at = self._clock() + self._config.jwks_cache_ttl_seconds
-
-        refreshed_key = _find_jwk_for_kid(jwks, kid)
-        if refreshed_key is None:
-            get_component_logger("security").warning(
-                "oidc_auth_failed", reason="unknown_kid", kid=kid
-            )
-            msg = "No matching JWKS key found for token."
-            raise AuthenticationError(msg)
-        return refreshed_key
+        """Resolve signing key from cached JWKS, refreshing on expiry/unknown kid with cooldown."""
+        return await self._jwks_cache.resolve_key(
+            kid,
+            error_prefix="Invalid OIDC JWK",
+            missing_key_message="No matching JWKS key found for token.",
+        )
 
     async def _fetch_jwks(self) -> dict[str, Any]:
         """Fetch JWKS JSON from configured URL, logging timeouts as TIMEOUT alerts."""
-        try:
-            if self._jwks_fetcher is not None:
-                payload = await self._jwks_fetcher(self._config.jwks_url)
-            else:
-                payload = await self._http_get_jwks()
-        except (httpx.TimeoutException, TimeoutError) as exc:
-            get_component_logger("security").error(
-                "oidc_jwks_fetch_timeout",
-                jwks_url=self._config.jwks_url,
+        return await fetch_jwks_payload(
+            JwksFetchSpec(
+                url=self._config.jwks_url,
                 timeout_seconds=self._config.jwks_timeout_seconds,
-                alert_category=AlertCategory.TIMEOUT.value,
-                exception_type=type(exc).__name__,
-            )
-            msg = "Timed out fetching OIDC JWKS."
-            raise AuthenticationError(msg) from exc
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
-            get_component_logger("security").error(
-                "oidc_jwks_fetch_failed",
-                jwks_url=self._config.jwks_url,
-                error=str(exc),
-                exception_type=type(exc).__name__,
-            )
-            msg = f"Failed to fetch OIDC JWKS: {exc}"
-            raise AuthenticationError(msg) from exc
-
-        if not isinstance(payload.get("keys"), list):
-            get_component_logger("security").error(
-                "oidc_jwks_invalid_payload", jwks_url=self._config.jwks_url
-            )
-            msg = "Invalid OIDC JWKS payload: missing 'keys' list."
-            raise AuthenticationError(msg)
-        return payload
-
-    async def _http_get_jwks(self) -> dict[str, Any]:
-        """Fetch JWKS JSON via httpx using injected or short-lived AsyncClient."""
-        if self._http_client is not None:
-            response = await self._http_client.get(
-                self._config.jwks_url,
-                timeout=self._config.jwks_timeout_seconds,
-            )
-        else:
-            async with httpx.AsyncClient(timeout=self._config.jwks_timeout_seconds) as client:
-                response = await client.get(self._config.jwks_url)
-        response.raise_for_status()
-        parsed: object = response.json()
-        if not isinstance(parsed, dict):
-            msg = "JWKS endpoint did not return a JSON object."
-            raise TypeError(msg)
-        return cast("dict[str, Any]", parsed)
+                label="OIDC",
+                log_prefix="oidc",
+            ),
+            http_client=self._http_client,
+            custom_fetcher=self._jwks_fetcher,
+        )
 
     def _decode_and_verify(
         self,

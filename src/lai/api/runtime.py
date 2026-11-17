@@ -107,7 +107,7 @@ async def _build_authenticator(
             audience=settings.cf_access_aud,
         )
         edge_verifier = CloudflareEdgeVerifier(cf_cfg)
-        if cf_cfg.team_domain and not (cf_cfg.client_id and cf_cfg.client_secret):
+        if cf_cfg.team_domain:
             try:
                 await edge_verifier.refresh_jwks()
             except LaiError as exc:
@@ -177,6 +177,7 @@ async def build_app_services(
 
     authenticator = await _build_authenticator(settings, api_key_repo)
     rate_limiter = TokenBucketRateLimiter(requests_per_minute=settings.rate_limit_rpm)
+    ip_rate_limiter = TokenBucketRateLimiter(requests_per_minute=settings.ip_rate_limit_rpm)
 
     blob_store = LocalBlobStore(
         settings.data_dir / "blobs",
@@ -262,6 +263,7 @@ async def build_app_services(
         ingestion_pipeline=ingestion_pipeline,
         authenticator=authenticator,
         rate_limiter=rate_limiter,
+        ip_rate_limiter=ip_rate_limiter,
         inference_provider=inference_provider,
         guardrail_health_probe=guardrail_health_probe,
         spooler=spooler,
