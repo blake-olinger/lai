@@ -100,6 +100,8 @@ class TurnOutput(StrictModel):
     citations: tuple[Citation, ...] = ()
     usage: TokenUsage
     pending_approval_id: str | None = None
+    guardrail_blocked: bool = False
+    guardrail_policy: str | None = None
 
 
 class KeepaliveEvent(StrictModel):

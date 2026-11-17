@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from lai.ports.auth import AuthenticatorPort, AuthProviderPort, EdgeVerifierPort
+from lai.ports.guardrails import (
+    GuardrailPipelinePort,
+    GuardrailProviderPort,
+    GuardrailSupervisorPort,
+)
 from lai.ports.observability import AlertManagerPort, AlertSinkPort
 
 __all__ = [
@@ -11,4 +16,7 @@ __all__ = [
     "AuthProviderPort",
     "AuthenticatorPort",
     "EdgeVerifierPort",
+    "GuardrailPipelinePort",
+    "GuardrailProviderPort",
+    "GuardrailSupervisorPort",
 ]

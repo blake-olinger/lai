@@ -116,3 +116,20 @@ class ClientDisconnectedError(LaiError):
 
     default_code: ClassVar[str] = "client_disconnected"
     default_status_code: ClassVar[int] = 499
+
+
+class GuardrailBlockedError(LaiError):
+    """Raised when a prompt is rejected by the pre-flight safety guardrail."""
+
+    default_code: ClassVar[str] = "prompt_blocked_by_guardrail"
+    default_status_code: ClassVar[int] = 422
+
+    def __init__(
+        self,
+        message: str = "Prompt blocked by safety guardrail policy.",
+        *,
+        violated_policy: str | None = None,
+        details: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message, details=details)
+        self.violated_policy = violated_policy

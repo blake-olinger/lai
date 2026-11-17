@@ -10,6 +10,15 @@ from lai.domain.auth import (
     CreatedApiKey,
     RequestCredentials,
 )
+from lai.domain.errors import GuardrailBlockedError
+from lai.domain.guardrails import (
+    GuardrailBlockMode,
+    GuardrailConfig,
+    GuardrailDecision,
+    GuardrailVerdict,
+    PromptAuditEntry,
+    SafetyPrinciple,
+)
 from lai.domain.observability import (
     AlertCategory,
     AlertEvent,
@@ -26,6 +35,13 @@ __all__ = [
     "AuthMethod",
     "AuthPrincipal",
     "CreatedApiKey",
+    "GuardrailBlockMode",
+    "GuardrailBlockedError",
+    "GuardrailConfig",
+    "GuardrailDecision",
+    "GuardrailVerdict",
     "LoggingConfig",
+    "PromptAuditEntry",
     "RequestCredentials",
+    "SafetyPrinciple",
 ]
