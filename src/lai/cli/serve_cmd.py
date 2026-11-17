@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 from pathlib import Path  # noqa: TC003 - evaluated at runtime by Typer
-from typing import TYPE_CHECKING, Annotated, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 
 import typer
 import uvicorn
@@ -14,12 +14,13 @@ from lai.cli._common import resolve_llama_executable, resolve_log_dir, resolve_s
 from lai.config.profiles import get_model_profile
 from lai.domain.errors import LaiError
 from lai.guardrails import ShieldGemmaSupervisor
-from lai.inference import LlamaCppSupervisor
+from lai.inference import LlamaCppSupervisor, OllamaSupervisor
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp
 
     from lai.config.settings import LaiSettings
+    from lai.ports.inference import InferenceSupervisorPort
 
 
 class _AppFactory(Protocol):
@@ -35,11 +36,19 @@ def _load_create_app() -> _AppFactory:
 
 def build_supervisors(
     settings: LaiSettings,
-) -> tuple[LlamaCppSupervisor, ShieldGemmaSupervisor | None]:
-    """Construct primary Gemma 4 and optional CPU ShieldGemma supervisors."""
-    exe_path = resolve_llama_executable(settings.bin_dir)
+) -> tuple[InferenceSupervisorPort, ShieldGemmaSupervisor | None]:
+    """Construct primary inference supervisor and optional standalone ShieldGemma supervisor."""
     log_dir = resolve_log_dir(settings)
+    if settings.inference_backend == "ollama":
+        return (
+            OllamaSupervisor(
+                base_url=settings.ollama_base_url,
+                log_dir=log_dir,
+            ),
+            None,
+        )
 
+    exe_path = resolve_llama_executable(settings.bin_dir)
     llama_supervisor = LlamaCppSupervisor(
         executable_path=exe_path,
         models_dir=settings.models_dir,
@@ -61,8 +70,8 @@ def build_supervisors(
 
 
 async def serve_async(settings: LaiSettings, *, supervise: bool = True) -> None:
-    """Start supervised llama-server instances and run the Uvicorn API server."""
-    llama_supervisor: LlamaCppSupervisor | None = None
+    """Start supervised backend instances and run the Uvicorn API server."""
+    llama_supervisor: InferenceSupervisorPort | None = None
     guardrail_supervisor: ShieldGemmaSupervisor | None = None
 
     try:
@@ -92,7 +101,7 @@ async def serve_async(settings: LaiSettings, *, supervise: bool = True) -> None:
             await llama_supervisor.stop()
 
 
-def serve_command(
+def serve_command(  # noqa: PLR0913, PLR0917
     config: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Optional YAML configuration path."),
@@ -109,15 +118,19 @@ def serve_command(
         str | None,
         typer.Option("--profile", "-p", help="Override active model profile."),
     ] = None,
+    backend: Annotated[
+        Literal["llamacpp", "ollama"] | None,
+        typer.Option("--backend", "-b", help="Override inference backend (llamacpp or ollama)."),
+    ] = None,
     no_supervise: Annotated[
         bool,
         typer.Option(
             "--no-supervise",
-            help="Skip spawning local llama-server and ShieldGemma subprocesses.",
+            help="Skip spawning local inference/guardrail subprocesses.",
         ),
     ] = False,
 ) -> None:
-    """Start Gemma 4 (:8081), ShieldGemma-2B (:8082), and the FastAPI server (:8400)."""
+    """Start inference backend, CPU ShieldGemma-2B guardrail, and FastAPI server (:8400)."""
     overrides: dict[str, object] = {}
     if host is not None:
         overrides["host"] = host
@@ -125,6 +138,8 @@ def serve_command(
         overrides["port"] = port
     if profile is not None:
         overrides["default_model_profile"] = profile
+    if backend is not None:
+        overrides["inference_backend"] = backend
 
     settings = resolve_settings(config, **overrides)
     try:

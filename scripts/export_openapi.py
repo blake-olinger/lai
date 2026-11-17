@@ -21,8 +21,7 @@ class _OpenApiApp(Protocol):
 def _load_app() -> _OpenApiApp:
     """Construct the FastAPI application with default settings without entering lifespan."""
     module = importlib.import_module("lai.api.app")
-    create_app = getattr(module, "create_app")
-    app_obj: object = create_app(LaiSettings())
+    app_obj: object = module.create_app(LaiSettings())
     return cast("_OpenApiApp", app_obj)
 
 

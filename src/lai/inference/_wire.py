@@ -205,6 +205,8 @@ def serialize_chat_request(
         ]
     if include_enable_thinking_kwarg:
         payload["chat_template_kwargs"] = {"enable_thinking": request.enable_thinking}
+    elif not request.enable_thinking:
+        payload["reasoning_effort"] = "none"
     return payload
 
 

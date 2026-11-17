@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
 from huggingface_hub import hf_hub_download  # pyright: ignore[reportUnknownVariableType]
@@ -114,6 +114,15 @@ class ModelDownloader:
     ) -> list[tuple[str, str]]:
         suffix = f"tags/{tag}" if tag else "latest"
         url = f"{_GITHUB_API_BASE}/{self._github_repo}/releases/{suffix}"
+        payload = await self._get_github_json(client, url)
+        assets = parse_release_assets(payload)
+        if not assets:
+            msg = "GitHub release metadata contained no downloadable assets."
+            raise InferenceBackendError(msg)
+        return assets
+
+    async def _get_github_json(self, client: httpx.AsyncClient, url: str) -> object:
+        """Fetch JSON metadata from the GitHub Releases API with timeout alerting."""
         try:
             response = await client.get(
                 url,
@@ -136,12 +145,38 @@ class ModelDownloader:
         if response.status_code >= _HTTP_ERROR_THRESHOLD:
             msg = f"GitHub release lookup returned HTTP {response.status_code}"
             raise InferenceBackendError(msg)
+        return response.json()
 
-        assets = parse_release_assets(response.json())
-        if not assets:
-            msg = "GitHub release metadata contained no downloadable assets."
-            raise InferenceBackendError(msg)
-        return assets
+    async def _resolve_release_assets(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        tag: str | None,
+        cuda_version: str | None,
+    ) -> tuple[tuple[str, str], tuple[str, str] | None]:
+        """Resolve Windows CUDA assets from latest/tag release, falling back to recent releases."""
+        latest_assets = await self._fetch_release_assets(client, tag)
+        try:
+            return select_llama_cuda_assets(latest_assets, cuda_version=cuda_version)
+        except InferenceBackendError:
+            if tag is not None:
+                raise
+
+        list_url = f"{_GITHUB_API_BASE}/{self._github_repo}/releases?per_page=10"
+        raw_releases = await self._get_github_json(client, list_url)
+        if isinstance(raw_releases, list):
+            for release in cast("list[object]", raw_releases):
+                candidate_assets = parse_release_assets(release)
+                if not candidate_assets:
+                    continue
+                try:
+                    return select_llama_cuda_assets(
+                        candidate_assets,
+                        cuda_version=cuda_version,
+                    )
+                except InferenceBackendError:
+                    continue
+        return select_llama_cuda_assets(latest_assets, cuda_version=cuda_version)
 
     @staticmethod
     def _unlink_quietly(path: Path) -> None:
@@ -197,9 +232,9 @@ class ModelDownloader:
             return existing
 
         async with self._client_ctx() as client:
-            assets = await self._fetch_release_assets(client, tag)
-            (main_name, main_url), cudart = select_llama_cuda_assets(
-                assets,
+            (main_name, main_url), cudart = await self._resolve_release_assets(
+                client,
+                tag=tag,
                 cuda_version=cuda_version,
             )
             await self._download_and_extract(

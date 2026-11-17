@@ -24,9 +24,10 @@ from lai.domain.errors import LaiError
 from lai.guardrails import (
     AllowAllGuardrailProvider,
     CompositeGuardrailPipeline,
+    OllamaShieldGemmaProvider,
     ShieldGemmaCpuProvider,
 )
-from lai.inference import LlamaCppProvider
+from lai.inference import LlamaCppProvider, OpenAICompatProvider
 from lai.ingestion import (
     FastEmbedCpuAdapter,
     LanceDbVectorStore,
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from lai.domain.observability import LoggingConfig
     from lai.ports.auth import AuthProviderPort
     from lai.ports.guardrails import GuardrailProviderPort
+    from lai.ports.inference import InferenceProviderPort
     from lai.ports.orchestrator import OrchestratorPort
     from lai.ports.repositories import ApiKeyRepositoryPort
 
@@ -131,6 +133,39 @@ def _instantiate_orchestrator(**kwargs: object) -> OrchestratorPort:
     return orchestrator_cls(**kwargs)
 
 
+def _build_inference_provider(settings: LaiSettings) -> InferenceProviderPort:
+    """Construct the active inference provider from LaiSettings."""
+    if settings.inference_backend == "ollama":
+        return OpenAICompatProvider(settings.ollama_base_url, timeout_seconds=300.0)
+    return LlamaCppProvider(host=settings.llama_host, port=settings.llama_port)
+
+
+def _build_guardrail_providers(
+    settings: LaiSettings,
+) -> tuple[list[GuardrailProviderPort], Callable[[], Awaitable[BackendHealth]] | None]:
+    """Construct configured guardrail provider(s) and optional health probe."""
+    if not settings.guardrails.enabled:
+        return (
+            [
+                AllowAllGuardrailProvider(
+                    max_logged_prompt_chars=settings.guardrails.max_logged_prompt_chars,
+                )
+            ],
+            None,
+        )
+    if settings.guardrails.backend == "ollama" or settings.inference_backend == "ollama":
+        ollama_cfg = settings.guardrails
+        if settings.guardrails.backend != "ollama":
+            ollama_cfg = settings.guardrails.model_copy(
+                update={"backend": "ollama", "ollama_base_url": settings.ollama_base_url}
+            )
+        ollama_guard = OllamaShieldGemmaProvider(ollama_cfg)
+        return [ollama_guard], ollama_guard.health
+
+    shield_provider = ShieldGemmaCpuProvider(settings.guardrails)
+    return [shield_provider], shield_provider.health
+
+
 def _resolve_model_profile(settings: LaiSettings) -> ModelProfile:
     """Resolve the default ModelProfile from built-in or custom profiles."""
     return get_model_profile(settings.default_model_profile, settings.custom_profiles)
@@ -173,7 +208,7 @@ async def build_app_services(
         vector_store=vector_store,
     )
 
-    inference_provider = LlamaCppProvider(host=settings.llama_host, port=settings.llama_port)
+    inference_provider = _build_inference_provider(settings)
     spooler = InferenceSpooler(max_queued_jobs=settings.max_queued_jobs)
     session_gate = SessionGate()
 
@@ -182,18 +217,7 @@ async def build_app_services(
         retention_days=logging_cfg.error_retention_days,
         compress_rotated=logging_cfg.compress_rotated,
     )
-    guardrail_health_probe: Callable[[], Awaitable[BackendHealth]] | None = None
-    guardrail_providers: list[GuardrailProviderPort]
-    if settings.guardrails.enabled:
-        shield_provider = ShieldGemmaCpuProvider(settings.guardrails)
-        guardrail_providers = [shield_provider]
-        guardrail_health_probe = shield_provider.health
-    else:
-        guardrail_providers = [
-            AllowAllGuardrailProvider(
-                max_logged_prompt_chars=settings.guardrails.max_logged_prompt_chars,
-            )
-        ]
+    guardrail_providers, guardrail_health_probe = _build_guardrail_providers(settings)
 
     guardrail_pipeline = CompositeGuardrailPipeline(
         settings.guardrails,
@@ -225,6 +249,19 @@ async def build_app_services(
         model_profile=model_profile,
     )
 
+    close_callbacks: list[Callable[[], Awaitable[None] | None]] = []
+    aclose_fn = getattr(inference_provider, "aclose", None)
+    if callable(aclose_fn):
+        close_callbacks.append(cast("Callable[[], Awaitable[None]]", aclose_fn))
+    close_callbacks.extend(
+        [
+            audit_logger.close,
+            db.close,
+            alert_manager.flush,
+            alert_manager.close,
+        ]
+    )
+
     return AppServices(
         settings=settings,
         alert_manager=alert_manager,
@@ -247,13 +284,7 @@ async def build_app_services(
         tool_registry=tool_registry,
         tool_executor=tool_executor,
         orchestrator=resolved_orchestrator,
-        close_callbacks=[
-            inference_provider.aclose,
-            audit_logger.close,
-            db.close,
-            alert_manager.flush,
-            alert_manager.close,
-        ],
+        close_callbacks=close_callbacks,
     )
 
 

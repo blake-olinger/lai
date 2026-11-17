@@ -11,6 +11,7 @@ htmlcov/
 data/
 models/
 bin/
+config/config.yaml
 .env
 *.gguf
 *.db

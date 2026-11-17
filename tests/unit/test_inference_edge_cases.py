@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import subprocess
+import zipfile
 from typing import TYPE_CHECKING, cast
 
 import httpx
@@ -250,6 +251,12 @@ async def test_downloader_timeout_and_missing_cuda_asset(tmp_path: Path) -> None
                     ),
                 ]
             )
+            mock.get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10").mock(
+                return_value=httpx.Response(
+                    HTTP_OK,
+                    json=[{"assets": [{"name": "llama-src.tar.gz", "browser_download_url": "u"}]}],
+                )
+            )
             with pytest.raises(InferenceBackendError, match="timed out"):
                 await downloader.download_llama_binaries()
             with pytest.raises(InferenceBackendError, match="Windows CUDA"):
@@ -258,3 +265,41 @@ async def test_downloader_timeout_and_missing_cuda_asset(tmp_path: Path) -> None
         assert any(a.category is AlertCategory.TIMEOUT for a in manager.recent_alerts())
     finally:
         manager.close()
+
+
+async def test_downloader_falls_back_to_rolling_releases(tmp_path: Path) -> None:
+    """When /releases/latest lacks CUDA zips, download_llama_binaries scans /releases."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("llama-server.exe", b"MZ_FALLBACK")
+    zip_bytes = buf.getvalue()
+
+    downloader = ModelDownloader(bin_dir=tmp_path / "bin", models_dir=tmp_path / "models")
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest").mock(
+            return_value=httpx.Response(
+                HTTP_OK,
+                json={"assets": [{"name": "v1.0.0-source.tar.gz", "browser_download_url": "u"}]},
+            )
+        )
+        mock.get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10").mock(
+            return_value=httpx.Response(
+                HTTP_OK,
+                json=[
+                    {"assets": [{"name": "notes.txt", "browser_download_url": "n"}]},
+                    {
+                        "assets": [
+                            {
+                                "name": "llama-b12478-bin-win-cuda-13.5-x64.zip",
+                                "browser_download_url": "https://dl.test/b12478.zip",
+                            }
+                        ]
+                    },
+                ],
+            )
+        )
+        mock.get("https://dl.test/b12478.zip").mock(
+            return_value=httpx.Response(HTTP_OK, content=zip_bytes)
+        )
+        exe = await downloader.download_llama_binaries()
+    assert exe.read_bytes() == b"MZ_FALLBACK"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import yaml
 from pydantic import Field
@@ -54,8 +54,10 @@ class LaiSettings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = Field(default=8400, ge=1, le=65535)
+    inference_backend: Literal["llamacpp", "ollama"] = "llamacpp"
     llama_host: str = "127.0.0.1"
     llama_port: int = Field(default=8081, ge=1, le=65535)
+    ollama_base_url: str = "http://127.0.0.1:11434"
 
     data_dir: Path = Path("data")
     models_dir: Path = Path("models")

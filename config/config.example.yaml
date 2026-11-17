@@ -4,8 +4,11 @@
 
 host: "127.0.0.1"
 port: 8400
+# Inference backend: "llamacpp" (direct llama-server.exe) or "ollama" (signed Ollama daemon)
+inference_backend: "llamacpp"
 llama_host: "127.0.0.1"
 llama_port: 8081
+ollama_base_url: "http://127.0.0.1:11434"
 
 data_dir: "data"
 models_dir: "models"
@@ -55,17 +58,21 @@ custom_profiles: {}
 # CPU-only ShieldGemma-2B pre-flight prompt safety guardrail
 guardrails:
   enabled: true
+  backend: "llamacpp"
   block_mode: "refusal_message"
   refusal_text: "I cannot fulfill this request because the prompt was flagged by the safety guardrail policy."
   host: "127.0.0.1"
   port: 8082
+  ollama_base_url: "http://127.0.0.1:11434"
+  ollama_model: "lai-shieldgemma-2b"
   hf_repo: "QuantFactory/shieldgemma-2b-GGUF"
   fallback_hf_repo: "mradermacher/shieldgemma-2b-GGUF"
   hf_filename: "shieldgemma-2b.Q4_K_M.gguf"
   cpu_threads: 12
   ctx_size: 4096
   parallel_slots: 2
-  timeout_seconds: 10.0
+  timeout_seconds: 30.0
+  violation_threshold: 0.80
   fail_open: false
   max_logged_prompt_chars: 2000
 

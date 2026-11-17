@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Mapping
+from typing import cast
 
 from lai.domain.guardrails import SafetyPrinciple
 
@@ -99,3 +102,46 @@ def parse_shieldgemma_verdict(raw_output: str) -> bool:
         return False
     msg = f"Ambiguous ShieldGemma verdict output: {raw_output!r}"
     raise ValueError(msg)
+
+
+def _accumulate_yes_no_probs(
+    top_entries: list[object],
+) -> tuple[float, float]:
+    """Sum token probabilities matching 'yes' vs 'no' from top_logprobs entries."""
+    p_yes = 0.0
+    p_no = 0.0
+    for item in top_entries:
+        if not isinstance(item, Mapping):
+            continue
+        item_map = cast("Mapping[str, object]", item)
+        token = item_map.get("token")
+        logprob = item_map.get("logprob")
+        if not isinstance(token, str) or not isinstance(logprob, int | float):
+            continue
+        if isinstance(logprob, bool):
+            continue
+        stripped = token.strip().lower()
+        prob = math.exp(float(logprob))
+        if stripped == "yes":
+            p_yes += prob
+        elif stripped == "no":
+            p_no += prob
+    return p_yes, p_no
+
+
+def compute_yes_probability(logprobs_payload: object) -> float | None:
+    """Compute normalized P('Yes') over ('Yes','No') from Ollama logprobs if present."""
+    if not isinstance(logprobs_payload, list) or not logprobs_payload:
+        return None
+    first = cast("list[object]", logprobs_payload)[0]
+    if not isinstance(first, Mapping):
+        return None
+    first_map = cast("Mapping[str, object]", first)
+    raw_top = first_map.get("top_logprobs")
+    if not isinstance(raw_top, list):
+        return None
+    p_yes, p_no = _accumulate_yes_no_probs(cast("list[object]", raw_top))
+    total = p_yes + p_no
+    if total <= 0.0:
+        return None
+    return p_yes / total

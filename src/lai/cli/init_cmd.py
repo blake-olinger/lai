@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 import yaml
@@ -19,10 +19,11 @@ async def _init_database(db_path: Path) -> None:
     await db.close()
 
 
-def _build_initial_config_payload(
+def _build_initial_config_payload(  # noqa: PLR0913
     *,
     host: str,
     port: int,
+    backend: Literal["llamacpp", "ollama"],
     data_dir: Path,
     models_dir: Path,
     bin_dir: Path,
@@ -31,8 +32,10 @@ def _build_initial_config_payload(
     return {
         "host": host,
         "port": port,
+        "inference_backend": backend,
         "llama_host": "127.0.0.1",
         "llama_port": 8081,
+        "ollama_base_url": "http://127.0.0.1:11434",
         "data_dir": str(data_dir),
         "models_dir": str(models_dir),
         "bin_dir": str(bin_dir),
@@ -40,9 +43,11 @@ def _build_initial_config_payload(
         "auth_providers": ["api_key"],
         "guardrails": {
             "enabled": True,
+            "backend": backend,
             "block_mode": "refusal_message",
             "host": "127.0.0.1",
             "port": 8082,
+            "ollama_base_url": "http://127.0.0.1:11434",
         },
         "logging": {
             "log_dir": str(data_dir / "logs"),
@@ -75,6 +80,10 @@ def init_command(  # noqa: PLR0913, PLR0917
         typer.Option("--host", help="Bind host for the API server."),
     ] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8400,
+    backend: Annotated[
+        Literal["llamacpp", "ollama"],
+        typer.Option("--backend", "-b", help="Default inference backend (llamacpp or ollama)."),
+    ] = "llamacpp",
     force: Annotated[
         bool,
         typer.Option("--force", help="Overwrite existing config file if present."),
@@ -102,6 +111,7 @@ def init_command(  # noqa: PLR0913, PLR0917
         payload = _build_initial_config_payload(
             host=host,
             port=port,
+            backend=backend,
             data_dir=data_dir,
             models_dir=models_dir,
             bin_dir=bin_dir,

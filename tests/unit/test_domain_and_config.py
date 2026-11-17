@@ -81,7 +81,7 @@ EXPECTED_GEMMA4_FIELDS: dict[str, object] = {
     "kv_cache_type_v": "q8_0",
     "parallel_slots": 1,
     "n_gpu_layers": 999,
-    "cpu_moe_layers": 3,
+    "cpu_moe_layers": 8,
     "batch_size": 2048,
     "ubatch_size": 512,
     "jinja": True,

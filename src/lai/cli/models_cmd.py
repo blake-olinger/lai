@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path  # noqa: TC003 - evaluated at runtime by Typer
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 
 from lai.cli._common import resolve_settings
 from lai.config.profiles import BUILTIN_PROFILES, get_model_profile
 from lai.domain.errors import LaiError
-from lai.inference import ModelDownloader
+from lai.inference import ModelDownloader, setup_ollama_models
 
 if TYPE_CHECKING:
     from lai.config.settings import LaiSettings
@@ -67,6 +67,22 @@ async def _setup_models_async(  # noqa: PLR0913
     return results
 
 
+async def _setup_ollama_async(
+    settings: LaiSettings,
+    *,
+    profile_name: str,
+    skip_guardrail: bool,
+) -> dict[str, str]:
+    """Pull HF GGUFs via Ollama and create tuned local aliases."""
+    profile = get_model_profile(profile_name, settings.custom_profiles)
+    return await setup_ollama_models(
+        profile,
+        settings.guardrails,
+        base_url=settings.ollama_base_url,
+        skip_guardrail=skip_guardrail,
+    )
+
+
 @models_app.command("setup")
 def setup_models(  # noqa: PLR0913, PLR0917
     config: Annotated[
@@ -76,6 +92,10 @@ def setup_models(  # noqa: PLR0913, PLR0917
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Model profile name to download."),
+    ] = None,
+    backend: Annotated[
+        Literal["llamacpp", "ollama"] | None,
+        typer.Option("--backend", "-b", help="Override inference backend (llamacpp or ollama)."),
     ] = None,
     tag: Annotated[
         str | None,
@@ -102,28 +122,38 @@ def setup_models(  # noqa: PLR0913, PLR0917
         typer.Option("--force", help="Re-download artifacts even if already present."),
     ] = False,
 ) -> None:
-    """Download CUDA llama-server, primary Gemma 4 26B-A4B GGUF, and ShieldGemma-2B GGUF."""
+    """Download CUDA llama-server or pull Ollama models + ShieldGemma-2B."""
     settings = resolve_settings(config)
     target_profile = profile or settings.default_model_profile
+    effective_backend = backend or settings.inference_backend
     try:
-        resolved = asyncio.run(
-            _setup_models_async(
-                settings,
-                profile_name=target_profile,
-                tag=tag,
-                cuda_version=cuda_version,
-                hf_token=hf_token,
-                skip_binaries=skip_binaries,
-                skip_guardrail=skip_guardrail,
-                force=force,
+        if effective_backend == "ollama":
+            resolved: dict[str, Path] | dict[str, str] = asyncio.run(
+                _setup_ollama_async(
+                    settings,
+                    profile_name=target_profile,
+                    skip_guardrail=skip_guardrail,
+                )
             )
-        )
+        else:
+            resolved = asyncio.run(
+                _setup_models_async(
+                    settings,
+                    profile_name=target_profile,
+                    tag=tag,
+                    cuda_version=cuda_version,
+                    hf_token=hf_token,
+                    skip_binaries=skip_binaries,
+                    skip_guardrail=skip_guardrail,
+                    force=force,
+                )
+            )
     except LaiError as exc:
         typer.echo(f"Model setup failed ({exc.code}): {exc.message}", err=True)
         raise typer.Exit(code=1) from exc
 
-    for key, path in resolved.items():
-        typer.echo(f"{key}: {path}")
+    for key, val in resolved.items():
+        typer.echo(f"{key}: {val}")
 
 
 @models_app.command("list")

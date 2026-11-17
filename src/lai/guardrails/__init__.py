@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from lai.guardrails.ollama_provider import OllamaShieldGemmaProvider
 from lai.guardrails.passthrough import (
     DEFAULT_REGEX_RULES,
     AllowAllGuardrailProvider,
@@ -17,6 +18,7 @@ from lai.guardrails.prompts import (
     NO_PROMPT_INJECTION,
     NO_SEXUALLY_EXPLICIT_CONTENT,
     build_shieldgemma_prompt,
+    compute_yes_probability,
     parse_shieldgemma_verdict,
 )
 from lai.guardrails.shieldgemma import ShieldGemmaCpuProvider
@@ -32,11 +34,13 @@ __all__ = [
     "NO_SEXUALLY_EXPLICIT_CONTENT",
     "AllowAllGuardrailProvider",
     "CompositeGuardrailPipeline",
+    "OllamaShieldGemmaProvider",
     "RegexPolicyGuardrailProvider",
     "RegexPolicyRule",
     "ShieldGemmaCpuProvider",
     "ShieldGemmaSupervisor",
     "build_shieldgemma_prompt",
     "build_shieldgemma_server_args",
+    "compute_yes_probability",
     "parse_shieldgemma_verdict",
 ]
