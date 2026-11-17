@@ -1,0 +1,42 @@
+name: Security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    name: Bandit Lint & Dependency Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.13
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Sync locked dependencies
+        run: uv sync --locked
+
+      - name: Run ruff Bandit security checks
+        run: uv run python -m ruff check --select S src
+
+      - name: Export requirements for pip-audit
+        run: uv export --frozen --no-hashes --no-emit-project --format requirements.txt -o requirements.txt
+
+      - name: Audit dependencies with pip-audit
+        run: uv tool run pip-audit -r requirements.txt

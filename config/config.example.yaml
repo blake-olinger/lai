@@ -1,0 +1,87 @@
+# Local AI Platform (LAI) Example Configuration
+# Copy to config/config.yaml or set LAI_CONFIG_FILE=/path/to/config.yaml.
+# Precedence: CLI flags > LAI_* env vars > YAML config > defaults.
+
+host: "127.0.0.1"
+port: 8400
+llama_host: "127.0.0.1"
+llama_port: 8081
+
+data_dir: "data"
+models_dir: "models"
+bin_dir: "bin"
+
+# Upload, context windowing, spooler, and proxy keepalive tuning
+max_upload_bytes: 262144000
+direct_file_budget_tokens: 12000
+map_window_tokens: 9000
+map_window_overlap_tokens: 300
+max_queued_jobs: 64
+keepalive_interval_seconds: 10.0
+json_keepalive_threshold_seconds: 20.0
+rate_limit_rpm: 120
+
+# Authentication providers: ["api_key"] or ["api_key", "oidc"]
+auth_providers:
+  - "api_key"
+
+# Optional Google / OIDC JWT authentication
+oidc_enabled: false
+oidc_issuer_url: "https://accounts.google.com"
+oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
+oidc_audience: null
+oidc_allowed_emails: []
+oidc_allowed_domains: []
+oidc_default_scopes:
+  - "projects:read"
+  - "files:read"
+  - "files:write"
+  - "chat:read"
+  - "chat:write"
+  - "tools:safe"
+oidc_admin_emails: []
+
+# Optional Cloudflare Access edge verification (for Named Tunnel remote access)
+cf_access_enabled: false
+cf_access_client_id: null
+cf_access_client_secret: null
+cf_access_team_domain: null
+cf_access_aud: null
+
+# Primary model profile (Gemma 4 26B-A4B MoE)
+default_model_profile: "gemma4-26b-a4b"
+custom_profiles: {}
+
+# CPU-only ShieldGemma-2B pre-flight prompt safety guardrail
+guardrails:
+  enabled: true
+  block_mode: "refusal_message"
+  refusal_text: "I cannot fulfill this request because the prompt was flagged by the safety guardrail policy."
+  host: "127.0.0.1"
+  port: 8082
+  hf_repo: "QuantFactory/shieldgemma-2b-GGUF"
+  fallback_hf_repo: "mradermacher/shieldgemma-2b-GGUF"
+  hf_filename: "shieldgemma-2b.Q4_K_M.gguf"
+  cpu_threads: 12
+  ctx_size: 4096
+  parallel_slots: 2
+  timeout_seconds: 10.0
+  fail_open: false
+  max_logged_prompt_chars: 2000
+
+# 24-hour rotating structured logs & fatal/timeout alerting
+log_level: "INFO"
+log_json: false
+logging:
+  log_dir: "data/logs"
+  level: "INFO"
+  json_console: false
+  enable_file_logs: true
+  rotation_when: "midnight"
+  rotation_interval: 1
+  retention_days: 14
+  error_retention_days: 30
+  compress_rotated: true
+  alert_webhook_url: null
+  alert_cooldown_seconds: 60.0
+  alert_on_timeouts: true

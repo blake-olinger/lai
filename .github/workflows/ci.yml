@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }}, Python 3.13)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.13
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Sync locked dependencies
+        run: uv sync --locked
+
+      - name: Lint and file size budget
+        run: uv run python scripts/verify.py lint
+
+      - name: Typecheck (basedpyright + mypy)
+        run: uv run python scripts/verify.py typecheck
+
+      - name: Architectural boundary contracts
+        run: uv run python scripts/verify.py boundaries
+
+      - name: Validate OpenAPI 3.1 schema
+        run: uv run python scripts/verify.py schema
+
+      - name: Run unit and integration tests with coverage
+        run: uv run python scripts/verify.py test --cov-fail-under 85
+
+      - name: Run mutation tests
+        run: uv run python scripts/verify.py mutate
