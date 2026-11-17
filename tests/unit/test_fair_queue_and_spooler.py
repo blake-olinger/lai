@@ -140,68 +140,74 @@ def test_fair_priority_queue_round_robin_priority_capacity_and_evict() -> None:
 
 async def test_spooler_preemption_eviction_queue_full_and_log_binding(tmp_path: Path) -> None:
     """Spooler preempts MAP_REDUCE with INTERACTIVE, evicts cancelled jobs, and binds logs."""
-    configure_observability(
+    manager = configure_observability(
         LoggingConfig(log_dir=tmp_path, enable_file_logs=True, json_console=True)
     )
-    now = 10.0
-    spooler = InferenceSpooler(max_queued_jobs=MAX_QUEUE_TWO, clock=lambda: now)
-    assert isinstance(spooler, InferenceSpoolerPort)
+    try:
+        now = 10.0
+        spooler = InferenceSpooler(max_queued_jobs=MAX_QUEUE_TWO, clock=lambda: now)
+        assert isinstance(spooler, InferenceSpoolerPort)
 
-    active_started, release_active = asyncio.Event(), asyncio.Event()
-    execution_order: list[str] = []
+        active_started, release_active = asyncio.Event(), asyncio.Event()
+        execution_order: list[str] = []
 
-    async def hold(req: LeaseRequest, *, fail: bool = False) -> None:
-        async with spooler.lease(req):
-            execution_order.append(req.job_id)
-            get_component_logger("test").info("lease_body_ran")
-            if req.job_id == "job_mr_active":
-                active_started.set()
-                await release_active.wait()
-            if fail:
-                msg = "inference crash"
-                raise RuntimeError(msg)
+        async def hold(req: LeaseRequest, *, fail: bool = False) -> None:
+            async with spooler.lease(req):
+                execution_order.append(req.job_id)
+                get_component_logger("test").info("lease_body_ran")
+                if req.job_id == "job_mr_active":
+                    active_started.set()
+                    await release_active.wait()
+                if fail:
+                    msg = "inference crash"
+                    raise RuntimeError(msg)
 
-    with bind_log_context(request_id="req_trace"):
-        t_active = asyncio.create_task(hold(_req("job_mr_active", priority=JobPriority.MAP_REDUCE)))
-        await active_started.wait()
-        t_mr = asyncio.create_task(
-            hold(_req("job_mr_wait", session_id="s_mr", priority=JobPriority.MAP_REDUCE))
-        )
-        t_int = asyncio.create_task(
-            hold(_req("job_int_wait", session_id="s_int", priority=JobPriority.INTERACTIVE))
-        )
-        await asyncio.sleep(0)
-        assert spooler.snapshot().queued_count == MAX_QUEUE_TWO
-        with pytest.raises(QueueFullError):
-            async with spooler.lease(_req("job_rejected")):
-                pass
-        t_mr.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await t_mr
-        t_fail = asyncio.create_task(
-            hold(
-                _req("job_bg", session_id="s_bg", priority=JobPriority.BACKGROUND_INDEX), fail=True
+        with bind_log_context(request_id="req_trace"):
+            t_active = asyncio.create_task(
+                hold(_req("job_mr_active", priority=JobPriority.MAP_REDUCE))
             )
-        )
-        await asyncio.sleep(0)
-        now = 10.25
-        release_active.set()
-        await asyncio.gather(t_active, t_int)
-        with pytest.raises(RuntimeError, match="inference crash"):
-            await t_fail
+            await active_started.wait()
+            t_mr = asyncio.create_task(
+                hold(_req("job_mr_wait", session_id="s_mr", priority=JobPriority.MAP_REDUCE))
+            )
+            t_int = asyncio.create_task(
+                hold(_req("job_int_wait", session_id="s_int", priority=JobPriority.INTERACTIVE))
+            )
+            await asyncio.sleep(0)
+            assert spooler.snapshot().queued_count == MAX_QUEUE_TWO
+            with pytest.raises(QueueFullError):
+                async with spooler.lease(_req("job_rejected")):
+                    pass
+            t_mr.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await t_mr
+            t_fail = asyncio.create_task(
+                hold(
+                    _req("job_bg", session_id="s_bg", priority=JobPriority.BACKGROUND_INDEX),
+                    fail=True,
+                )
+            )
+            await asyncio.sleep(0)
+            now = 10.25
+            release_active.set()
+            await asyncio.gather(t_active, t_int)
+            with pytest.raises(RuntimeError, match="inference crash"):
+                await t_fail
 
-    snap = spooler.snapshot()
-    assert execution_order == ["job_mr_active", "job_int_wait", "job_bg"]
-    assert (snap.active_job_id, snap.queued_count) == (None, 0)
-    assert (snap.total_completed, snap.total_rejected, snap.total_evicted) == (TWO_TURNS, 1, 1)
-    assert snap.avg_wait_ms == pytest.approx((EXPECTED_WAIT_MS * 2) / THREE_TURNS)
-    entries = [
-        json.loads(line)
-        for line in (tmp_path / "lai.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    body_logs = [entry for entry in entries if entry.get("event") == "lease_body_ran"]
-    assert body_logs[1]["job_id"] == "job_int_wait"
-    assert body_logs[1]["request_id"] == "req_trace"
+        snap = spooler.snapshot()
+        assert execution_order == ["job_mr_active", "job_int_wait", "job_bg"]
+        assert (snap.active_job_id, snap.queued_count) == (None, 0)
+        assert (snap.total_completed, snap.total_rejected, snap.total_evicted) == (TWO_TURNS, 1, 1)
+        assert snap.avg_wait_ms == pytest.approx((EXPECTED_WAIT_MS * 2) / THREE_TURNS)
+        entries = [
+            json.loads(line)
+            for line in (tmp_path / "lai.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        body_logs = [entry for entry in entries if entry.get("event") == "lease_body_ran"]
+        assert body_logs[1]["job_id"] == "job_int_wait"
+        assert body_logs[1]["request_id"] == "req_trace"
+    finally:
+        manager.close()
 
 
 async def test_spooler_max_inflight_one() -> None:
