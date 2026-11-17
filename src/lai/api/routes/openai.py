@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from lai.api._streaming import build_guardrail_headers, prime_sse_stream
+from lai.api._streaming import (
+    build_guardrail_headers,
+    guard_openai_sse_frames,
+    prime_sse_stream,
+)
 from lai.api.deps import AppServices, get_services, require_scope_dep
 from lai.api.schemas.openai import (
     OpenAIChatChoice,
@@ -288,13 +292,15 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
             "X-Accel-Buffering": "no",
         }
         return StreamingResponse(
-            _format_openai_sse(
-                primed.events,
-                _StreamMeta(
-                    completion_id=completion_id,
-                    created=created,
-                    model_name=model_name,
-                ),
+            guard_openai_sse_frames(
+                _format_openai_sse(
+                    primed.events,
+                    _StreamMeta(
+                        completion_id=completion_id,
+                        created=created,
+                        model_name=model_name,
+                    ),
+                )
             ),
             media_type="text/event-stream",
             headers=headers,

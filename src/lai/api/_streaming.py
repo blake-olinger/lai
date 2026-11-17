@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from lai.api.schemas.common import ErrorDetail, ErrorResponse
 from lai.domain.chat import ContentDeltaEvent, KeepaliveEvent, OrchestratorEvent, TurnCompletedEvent
+from lai.domain.errors import LaiError
+from lai.observability.logging import get_request_id
 from lai.scheduler import stream_with_sse_keepalive
 
 if TYPE_CHECKING:
@@ -154,3 +158,44 @@ async def prime_sse_stream(
         guardrail_blocked=blocked,
         guardrail_policy=policy,
     )
+
+
+async def _guard_sse_frames(
+    frames: AsyncIterator[str],
+    on_error: Callable[[LaiError], str],
+) -> AsyncIterator[str]:
+    """Stream SSE frames and emit a formatted terminal frame if LaiError occurs mid-stream."""
+    try:
+        async for frame in frames:
+            yield frame
+    except LaiError as exc:
+        yield on_error(exc)
+
+
+def _format_orchestrator_error_frame(exc: LaiError) -> str:
+    payload = ErrorResponse(
+        error=ErrorDetail(
+            code=exc.code,
+            message=exc.message,
+            request_id=get_request_id(),
+            details=dict(exc.details),
+        )
+    )
+    return f"event: error\ndata: {payload.model_dump_json()}\n\n"
+
+
+def _format_openai_error_frame(exc: LaiError) -> str:
+    payload = json.dumps({"error": {"message": exc.message, "type": exc.code}})
+    return f"data: {payload}\n\ndata: [DONE]\n\n"
+
+
+async def guard_orchestrator_sse_frames(frames: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Convert mid-stream LaiErrors on orchestrator SSE streams into error events."""
+    async for frame in _guard_sse_frames(frames, _format_orchestrator_error_frame):
+        yield frame
+
+
+async def guard_openai_sse_frames(frames: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Convert mid-stream LaiErrors on OpenAI SSE streams into error chunks plus [DONE]."""
+    async for frame in _guard_sse_frames(frames, _format_openai_error_frame):
+        yield frame

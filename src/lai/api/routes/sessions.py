@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Annotated
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from lai.api._streaming import build_guardrail_headers, prime_sse_stream
+from lai.api._streaming import (
+    build_guardrail_headers,
+    guard_orchestrator_sse_frames,
+    prime_sse_stream,
+)
 from lai.api.deps import AppServices, get_services, require_scope_dep
 from lai.api.schemas.common import DeleteResponse
 from lai.api.schemas.sessions import (
@@ -144,7 +148,7 @@ async def post_session_message(
             "X-Accel-Buffering": "no",
         }
         return StreamingResponse(
-            _format_orchestrator_sse(primed.events),
+            guard_orchestrator_sse_frames(_format_orchestrator_sse(primed.events)),
             media_type="text/event-stream",
             headers=headers,
         )
