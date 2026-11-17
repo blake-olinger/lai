@@ -122,12 +122,11 @@ class TurnOrchestrator(OrchestratorPort):
                 project_id=turn_input.project_id,
                 principal_id=principal.principal_id,
             )
-            if decision.verdict is GuardrailVerdict.BLOCK:
-                async for event in self._handle_guardrail_block(turn_input, decision):
-                    yield event
-                return
-
             async with self._session_gate.acquire(turn_input.session_id):
+                if decision.verdict is GuardrailVerdict.BLOCK:
+                    async for event in self._handle_guardrail_block(turn_input, decision):
+                        yield event
+                    return
                 async for event in self._execute_allowed_turn(turn_input, principal):
                     yield event
 
@@ -145,6 +144,14 @@ class TurnOrchestrator(OrchestratorPort):
             msg = "Turn stream ended without emitting TurnCompletedEvent."
             raise InferenceBackendError(msg)
         return completed_output
+
+    async def _load_authorized_session(self, turn_input: TurnInput) -> Session | None:
+        """Fetch turn_input.session_id if present and verify project ownership."""
+        session = await self._session_repo.get_session(turn_input.session_id)
+        if session is not None and session.project_id != turn_input.project_id:
+            msg = f"Session {session.id!r} does not belong to project {turn_input.project_id!r}."
+            raise AuthorizationError(msg, details={"session_id": session.id})
+        return session
 
     async def _handle_guardrail_block(
         self,
@@ -165,7 +172,7 @@ class TurnOrchestrator(OrchestratorPort):
             )
 
         refusal_text = self._settings.guardrails.refusal_text
-        existing_session = await self._session_repo.get_session(turn_input.session_id)
+        existing_session = await self._load_authorized_session(turn_input)
         assistant_msg = Message(
             session_id=turn_input.session_id,
             project_id=turn_input.project_id,
@@ -205,10 +212,7 @@ class TurnOrchestrator(OrchestratorPort):
         principal: AuthPrincipal,
     ) -> AsyncGenerator[OrchestratorEvent]:
         """Load session/files, route context mode, stream inference, and persist messages."""
-        session = await self._session_repo.get_session(turn_input.session_id)
-        if session is not None and session.project_id != turn_input.project_id:
-            msg = f"Session {session.id!r} does not belong to project {turn_input.project_id!r}."
-            raise AuthorizationError(msg, details={"session_id": session.id})
+        session = await self._load_authorized_session(turn_input)
 
         existing_messages = (
             await self._session_repo.list_messages(session.id, limit=200)

@@ -42,7 +42,7 @@ from lai.domain.chat import (
     TurnInput,
     TurnOutput,
 )
-from lai.domain.errors import ValidationFailedError
+from lai.domain.errors import AuthorizationError, ValidationFailedError
 from lai.domain.ids import new_session_id
 from lai.scheduler import await_or_keepalive_json
 
@@ -114,18 +114,24 @@ def _parse_context_mode(
         raise ValidationFailedError(msg, details={"header": "X-LAI-Context-Mode"}) from exc
 
 
+@dataclass(frozen=True, slots=True)
+class _StreamMeta:
+    """Correlation metadata shared across chunks and JSON completion responses."""
+
+    completion_id: str
+    created: int
+    model_name: str
+
+
 def _build_completion_response(
     output: TurnOutput,
-    *,
-    completion_id: str,
-    created: int,
-    model_name: str,
+    meta: _StreamMeta,
 ) -> OpenAIChatCompletionResponse:
     """Convert TurnOutput into an OpenAI chat.completion JSON response."""
     return OpenAIChatCompletionResponse(
-        id=completion_id,
-        created=created,
-        model=model_name,
+        id=meta.completion_id,
+        created=meta.created,
+        model=meta.model_name,
         choices=[
             OpenAIChatChoice(
                 index=0,
@@ -144,13 +150,26 @@ def _build_completion_response(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _StreamMeta:
-    """Correlation metadata shared across chunks of a single OpenAI SSE stream."""
+async def _resolve_session_and_project(
+    services: AppServices,
+    *,
+    explicit_session_id: str,
+    explicit_project_id: str,
+) -> tuple[str, str]:
+    """Resolve (session_id, project_id) and enforce cross-project session ownership."""
+    if not explicit_session_id:
+        return new_session_id(), explicit_project_id or _DEFAULT_OPENAI_PROJECT_ID
 
-    completion_id: str
-    created: int
-    model_name: str
+    existing_session = await services.session_repo.get_session(explicit_session_id)
+    if existing_session is not None:
+        if explicit_project_id and explicit_project_id != existing_session.project_id:
+            msg = (
+                f"Session {existing_session.id!r} does not belong to "
+                f"project {explicit_project_id!r}."
+            )
+            raise AuthorizationError(msg, details={"session_id": existing_session.id})
+        return explicit_session_id, existing_session.project_id
+    return explicit_session_id, explicit_project_id or _DEFAULT_OPENAI_PROJECT_ID
 
 
 def _make_chunk_sse(
@@ -254,8 +273,13 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
     x_lai_context_mode: Annotated[str | None, Header(alias="X-LAI-Context-Mode")] = None,
 ) -> Response:
     """OpenAI-compatible chat completions supporting project/file context and keepalives."""
-    project_id = (body.project_id or x_lai_project_id or _DEFAULT_OPENAI_PROJECT_ID).strip()
-    session_id = (body.session_id or x_lai_session_id or "").strip() or new_session_id()
+    explicit_project_id = (body.project_id or x_lai_project_id or "").strip()
+    explicit_session_id = (body.session_id or x_lai_session_id or "").strip()
+    session_id, project_id = await _resolve_session_and_project(
+        services,
+        explicit_session_id=explicit_session_id,
+        explicit_project_id=explicit_project_id,
+    )
     file_ids = _parse_file_ids(body.file_ids, x_lai_file_ids)
     context_mode = _parse_context_mode(body.context_mode, x_lai_context_mode)
     user_message = _extract_user_prompt(body.messages)
@@ -263,7 +287,7 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
 
     turn_input = TurnInput(
         session_id=session_id,
-        project_id=project_id or _DEFAULT_OPENAI_PROJECT_ID,
+        project_id=project_id,
         user_message=user_message,
         attached_file_ids=file_ids,
         context_mode=context_mode,
@@ -273,9 +297,11 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
         temperature=body.temperature,
     )
 
-    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-    created = int(time.time())
-    model_name = body.model or services.settings.default_model_profile
+    meta = _StreamMeta(
+        completion_id=f"chatcmpl-{uuid.uuid4().hex}",
+        created=int(time.time()),
+        model_name=body.model or services.settings.default_model_profile,
+    )
 
     if body.stream:
         primed = await prime_sse_stream(
@@ -292,16 +318,7 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
             "X-Accel-Buffering": "no",
         }
         return StreamingResponse(
-            guard_openai_sse_frames(
-                _format_openai_sse(
-                    primed.events,
-                    _StreamMeta(
-                        completion_id=completion_id,
-                        created=created,
-                        model_name=model_name,
-                    ),
-                )
-            ),
+            guard_openai_sse_frames(_format_openai_sse(primed.events, meta)),
             media_type="text/event-stream",
             headers=headers,
         )
@@ -312,23 +329,11 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
         interval_seconds=services.settings.keepalive_interval_seconds,
         is_disconnected=request.is_disconnected,
         serializer=lambda output: (
-            _build_completion_response(
-                output,
-                completion_id=completion_id,
-                created=created,
-                model_name=model_name,
-            )
-            .model_dump_json()
-            .encode("utf-8")
+            _build_completion_response(output, meta).model_dump_json().encode("utf-8")
         ),
     )
     if isinstance(outcome, TurnOutput):
-        payload = _build_completion_response(
-            outcome,
-            completion_id=completion_id,
-            created=created,
-            model_name=model_name,
-        )
+        payload = _build_completion_response(outcome, meta)
         headers = build_guardrail_headers(
             guardrail_blocked=outcome.guardrail_blocked,
             guardrail_policy=outcome.guardrail_policy,
