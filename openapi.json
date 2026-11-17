@@ -1128,10 +1128,16 @@
             "type": "array"
           },
           "model": {
-            "default": "gemma4-26b-a4b",
-            "minLength": 1,
-            "title": "Model",
-            "type": "string"
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
           },
           "project_id": {
             "anyOf": [

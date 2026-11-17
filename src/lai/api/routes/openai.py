@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -16,236 +15,28 @@ from lai.api._streaming import (
     prime_sse_stream,
 )
 from lai.api.deps import AppServices, get_services, require_scope_dep
+from lai.api.routes._openai_helpers import (
+    StreamMeta,
+    build_completion_response,
+    format_openai_sse,
+    parse_context_mode,
+    parse_file_ids,
+    parse_openai_messages,
+    resolve_openai_model,
+    resolve_session_and_project,
+)
 from lai.api.schemas.openai import (
-    OpenAIChatChoice,
-    OpenAIChatChoiceMessage,
-    OpenAIChatCompletionChunk,
     OpenAIChatCompletionRequest,
     OpenAIChatCompletionResponse,
-    OpenAIChatMessageInput,
-    OpenAIDeltaPayload,
     OpenAIModelInfo,
     OpenAIModelListResponse,
-    OpenAIStreamChoice,
-    OpenAIUsage,
 )
 from lai.config.profiles import BUILTIN_PROFILES
 from lai.domain.auth import ApiScope, AuthPrincipal
-from lai.domain.chat import (
-    ApprovalRequiredEvent,
-    ContentDeltaEvent,
-    ContextMode,
-    KeepaliveEvent,
-    OrchestratorEvent,
-    ProgressEvent,
-    ThinkingDeltaEvent,
-    TurnInput,
-    TurnOutput,
-)
-from lai.domain.errors import AuthorizationError, ValidationFailedError
-from lai.domain.ids import new_session_id
+from lai.domain.chat import TurnInput, TurnOutput
 from lai.scheduler import await_or_keepalive_json
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
 router = APIRouter(tags=["openai"])
-
-_DEFAULT_OPENAI_PROJECT_ID = "default"
-
-
-def _extract_message_text(msg_input: OpenAIChatMessageInput) -> str:
-    """Extract plain text from string or OpenAI multimodal text-part list."""
-    raw = msg_input.content
-    if raw is None:
-        return ""
-    if isinstance(raw, str):
-        return raw
-    parts: list[str] = []
-    for item in raw:
-        if item.get("type") == "text":
-            text_val = item.get("text")
-            if isinstance(text_val, str) and text_val:
-                parts.append(text_val)
-    return "\n".join(parts)
-
-
-def _extract_user_prompt(messages: list[OpenAIChatMessageInput]) -> str:
-    """Resolve the prompt from the latest user message (or fallback to last message)."""
-    for message in reversed(messages):
-        if message.role == "user":
-            text = _extract_message_text(message).strip()
-            if text:
-                return text
-    for message in reversed(messages):
-        text = _extract_message_text(message).strip()
-        if text:
-            return text
-    msg = "At least one non-empty message content is required."
-    raise ValidationFailedError(msg, details={"field": "messages"})
-
-
-def _parse_file_ids(
-    body_file_ids: list[str] | None,
-    header_file_ids: str | None,
-) -> tuple[str, ...]:
-    """Resolve attached file IDs from request body or comma-separated X-LAI-File-Ids."""
-    if body_file_ids is not None:
-        return tuple(item.strip() for item in body_file_ids if item.strip())
-    if header_file_ids:
-        return tuple(item.strip() for item in header_file_ids.split(",") if item.strip())
-    return ()
-
-
-def _parse_context_mode(
-    body_mode: ContextMode | None,
-    header_mode: str | None,
-) -> ContextMode:
-    """Resolve ContextMode from request body or X-LAI-Context-Mode header."""
-    if body_mode is not None:
-        return body_mode
-    if header_mode is None or not header_mode.strip():
-        return ContextMode.AUTO
-    normalized = header_mode.strip().lower()
-    try:
-        return ContextMode(normalized)
-    except ValueError as exc:
-        msg = f"Invalid X-LAI-Context-Mode header: {header_mode!r}"
-        raise ValidationFailedError(msg, details={"header": "X-LAI-Context-Mode"}) from exc
-
-
-@dataclass(frozen=True, slots=True)
-class _StreamMeta:
-    """Correlation metadata shared across chunks and JSON completion responses."""
-
-    completion_id: str
-    created: int
-    model_name: str
-
-
-def _build_completion_response(
-    output: TurnOutput,
-    meta: _StreamMeta,
-) -> OpenAIChatCompletionResponse:
-    """Convert TurnOutput into an OpenAI chat.completion JSON response."""
-    return OpenAIChatCompletionResponse(
-        id=meta.completion_id,
-        created=meta.created,
-        model=meta.model_name,
-        choices=[
-            OpenAIChatChoice(
-                index=0,
-                message=OpenAIChatChoiceMessage(
-                    content=output.message.content,
-                    reasoning_content=output.message.thinking,
-                ),
-                finish_reason="stop",
-            )
-        ],
-        usage=OpenAIUsage(
-            prompt_tokens=output.usage.prompt_tokens,
-            completion_tokens=output.usage.completion_tokens,
-            total_tokens=output.usage.total_tokens,
-        ),
-    )
-
-
-async def _resolve_session_and_project(
-    services: AppServices,
-    *,
-    explicit_session_id: str,
-    explicit_project_id: str,
-) -> tuple[str, str]:
-    """Resolve (session_id, project_id) and enforce cross-project session ownership."""
-    if not explicit_session_id:
-        return new_session_id(), explicit_project_id or _DEFAULT_OPENAI_PROJECT_ID
-
-    existing_session = await services.session_repo.get_session(explicit_session_id)
-    if existing_session is not None:
-        if explicit_project_id and explicit_project_id != existing_session.project_id:
-            msg = (
-                f"Session {existing_session.id!r} does not belong to "
-                f"project {explicit_project_id!r}."
-            )
-            raise AuthorizationError(msg, details={"session_id": existing_session.id})
-        return explicit_session_id, existing_session.project_id
-    return explicit_session_id, explicit_project_id or _DEFAULT_OPENAI_PROJECT_ID
-
-
-def _make_chunk_sse(
-    meta: _StreamMeta,
-    delta: OpenAIDeltaPayload,
-    *,
-    finish_reason: str | None = None,
-    usage: OpenAIUsage | None = None,
-) -> str:
-    """Serialize one OpenAI chat.completion.chunk SSE data frame."""
-    chunk = OpenAIChatCompletionChunk(
-        id=meta.completion_id,
-        created=meta.created,
-        model=meta.model_name,
-        choices=[OpenAIStreamChoice(index=0, delta=delta, finish_reason=finish_reason)],
-        usage=usage,
-    )
-    return f"data: {chunk.model_dump_json()}\n\n"
-
-
-async def _format_openai_sse(
-    events: AsyncIterator[OrchestratorEvent],
-    meta: _StreamMeta,
-) -> AsyncIterator[str]:
-    """Translate OrchestratorEvents into OpenAI SSE chunks with : keepalive comments."""
-    sent_role = False
-    sent_content = False
-
-    async for event in events:
-        if isinstance(event, (KeepaliveEvent, ProgressEvent)):
-            yield ": keepalive\n\n"
-            continue
-
-        role_val: Literal["assistant"] | None = "assistant" if not sent_role else None
-        if isinstance(event, ThinkingDeltaEvent):
-            sent_role = True
-            yield _make_chunk_sse(
-                meta,
-                OpenAIDeltaPayload(role=role_val, reasoning_content=event.delta),
-            )
-        elif isinstance(event, ContentDeltaEvent):
-            sent_role = True
-            sent_content = True
-            yield _make_chunk_sse(
-                meta,
-                OpenAIDeltaPayload(role=role_val, content=event.delta),
-            )
-        elif isinstance(event, ApprovalRequiredEvent):
-            sent_role = True
-            sent_content = True
-            notice = f"\n[Tool approval required: {event.approval_id} ({event.tool_name})]\n"
-            yield _make_chunk_sse(
-                meta,
-                OpenAIDeltaPayload(role=role_val, content=notice),
-            )
-        else:
-            if not sent_content and event.output.message.content:
-                yield _make_chunk_sse(
-                    meta,
-                    OpenAIDeltaPayload(
-                        role=role_val,
-                        content=event.output.message.content,
-                    ),
-                )
-            yield _make_chunk_sse(
-                meta,
-                OpenAIDeltaPayload(),
-                finish_reason="stop",
-                usage=OpenAIUsage(
-                    prompt_tokens=event.output.usage.prompt_tokens,
-                    completion_tokens=event.output.usage.completion_tokens,
-                    total_tokens=event.output.usage.total_tokens,
-                ),
-            )
-
-    yield "data: [DONE]\n\n"
 
 
 @router.get("/v1/models", response_model=OpenAIModelListResponse)
@@ -275,32 +66,40 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
     """OpenAI-compatible chat completions supporting project/file context and keepalives."""
     explicit_project_id = (body.project_id or x_lai_project_id or "").strip()
     explicit_session_id = (body.session_id or x_lai_session_id or "").strip()
-    session_id, project_id = await _resolve_session_and_project(
+    session_id, project_id, existing_session = await resolve_session_and_project(
         services,
         explicit_session_id=explicit_session_id,
         explicit_project_id=explicit_project_id,
     )
-    file_ids = _parse_file_ids(body.file_ids, x_lai_file_ids)
-    context_mode = _parse_context_mode(body.context_mode, x_lai_context_mode)
-    user_message = _extract_user_prompt(body.messages)
+    resolved_model_name, turn_model_profile = resolve_openai_model(
+        services.settings,
+        body.model,
+        existing_session,
+    )
+    file_ids = parse_file_ids(body.file_ids, x_lai_file_ids)
+    context_mode = parse_context_mode(body.context_mode, x_lai_context_mode)
+    parsed = parse_openai_messages(body.messages, session_id=session_id, project_id=project_id)
     max_tokens = body.max_tokens if body.max_tokens is not None else body.max_completion_tokens
 
     turn_input = TurnInput(
         session_id=session_id,
         project_id=project_id,
-        user_message=user_message,
+        user_message=parsed.user_message,
         attached_file_ids=file_ids,
         context_mode=context_mode,
         enable_tools=body.enable_tools,
         enable_thinking=body.enable_thinking,
         max_tokens=max_tokens,
         temperature=body.temperature,
+        model_profile=turn_model_profile,
+        system_prompt=parsed.system_prompt,
+        prior_messages=parsed.prior_messages,
+        extra_guardrail_prompts=parsed.extra_guardrail_prompts,
     )
-
-    meta = _StreamMeta(
+    meta = StreamMeta(
         completion_id=f"chatcmpl-{uuid.uuid4().hex}",
         created=int(time.time()),
-        model_name=body.model or services.settings.default_model_profile,
+        model_name=resolved_model_name,
     )
 
     if body.stream:
@@ -318,7 +117,7 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
             "X-Accel-Buffering": "no",
         }
         return StreamingResponse(
-            guard_openai_sse_frames(_format_openai_sse(primed.events, meta)),
+            guard_openai_sse_frames(format_openai_sse(primed.events, meta)),
             media_type="text/event-stream",
             headers=headers,
         )
@@ -329,11 +128,11 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
         interval_seconds=services.settings.keepalive_interval_seconds,
         is_disconnected=request.is_disconnected,
         serializer=lambda output: (
-            _build_completion_response(output, meta).model_dump_json().encode("utf-8")
+            build_completion_response(output, meta).model_dump_json().encode("utf-8")
         ),
     )
     if isinstance(outcome, TurnOutput):
-        payload = _build_completion_response(outcome, meta)
+        payload = build_completion_response(outcome, meta)
         headers = build_guardrail_headers(
             guardrail_blocked=outcome.guardrail_blocked,
             guardrail_policy=outcome.guardrail_policy,

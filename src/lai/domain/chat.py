@@ -89,6 +89,10 @@ class TurnInput(StrictModel):
     enable_thinking: bool = True
     max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    model_profile: str | None = None
+    system_prompt: str | None = None
+    prior_messages: tuple[Message, ...] = ()
+    extra_guardrail_prompts: tuple[str, ...] = ()
 
 
 class TurnOutput(StrictModel):
