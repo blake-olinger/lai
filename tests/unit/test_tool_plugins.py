@@ -22,8 +22,9 @@ from lai.domain.files import (
     ScoredChunk,
 )
 from lai.domain.tools import PermissionTier, ToolExecutionContext
+from lai.ingestion.embedder import DeterministicHashEmbedder
 from lai.ports.repositories import FileRepositoryPort
-from lai.ports.storage import BlobStorePort, EmbedderPort, VectorStorePort
+from lai.ports.storage import BlobStorePort, VectorStorePort
 from lai.ports.tools import ToolPluginPort
 from lai.tools import (
     DEFAULT_MAX_LINES_PER_CALL,
@@ -40,13 +41,16 @@ EXPECTED_THREE = 3
 CLAMPED_LINE_COUNT = 250
 SHORT_SPAN_END = 15
 EXPECTED_TWO_RESULTS = 2
+DEFAULT_VECTOR_LIMIT = 20
 
 
-class _FakeFileRepo(FileRepositoryPort):
+class _RecordingFileRepo(FileRepositoryPort):
     def __init__(self) -> None:
         self.files: dict[str, FileRecord] = {}
+        self.chunks_by_file: dict[str, list[FileChunk]] = {}
         self.fts_results: list[ScoredChunk] = []
         self.fts_calls: list[tuple[str, str, tuple[str, ...] | None, int]] = []
+        self.list_calls: list[tuple[str, int, int]] = []
 
     async def upsert_file(self, record: FileRecord) -> FileRecord:
         self.files[record.id] = record
@@ -58,33 +62,36 @@ class _FakeFileRepo(FileRepositoryPort):
     async def list_files(
         self, project_id: str, limit: int = 200, offset: int = 0
     ) -> list[FileRecord]:
-        del limit, offset
-        return [f for f in self.files.values() if f.project_id == project_id]
+        self.list_calls.append((project_id, limit, offset))
+        return [f for f in self.files.values() if f.project_id == project_id][
+            offset : offset + limit
+        ]
 
     async def replace_chunks(self, file_id: str, chunks: Sequence[FileChunk]) -> None:
-        del file_id, chunks
+        self.chunks_by_file[file_id] = list(chunks)
 
     async def list_chunks(
         self, file_id: str, start_line: int | None = None, end_line: int | None = None
     ) -> list[FileChunk]:
-        del file_id, start_line, end_line
-        return []
+        return [
+            c
+            for c in self.chunks_by_file.get(file_id, [])
+            if (start_line is None or c.end_line >= start_line)
+            and (end_line is None or c.start_line <= end_line)
+        ]
 
     async def search_fts(
-        self,
-        project_id: str,
-        query: str,
-        file_ids: Sequence[str] | None = None,
-        limit: int = 20,
+        self, project_id: str, query: str, file_ids: Sequence[str] | None = None, limit: int = 20
     ) -> list[ScoredChunk]:
         self.fts_calls.append((project_id, query, tuple(file_ids) if file_ids else None, limit))
         return list(self.fts_results)
 
     async def delete_file(self, file_id: str) -> bool:
+        self.chunks_by_file.pop(file_id, None)
         return self.files.pop(file_id, None) is not None
 
 
-class _FakeBlobStore(BlobStorePort):
+class _RecordingBlobStore(BlobStorePort):
     def __init__(self) -> None:
         self.blobs: dict[Path, list[str]] = {}
         self.read_calls: list[tuple[Path, int, int | None]] = []
@@ -92,8 +99,10 @@ class _FakeBlobStore(BlobStorePort):
     async def write_stream(
         self, project_id: str, file_id: str, filename: str, chunks: AsyncIterator[bytes]
     ) -> tuple[Path, int, str]:
-        del project_id, file_id, filename, chunks
-        return Path("unused"), 0, "0" * 64
+        data = b"".join([chunk async for chunk in chunks])
+        path = Path("blobs") / project_id / f"{file_id}-{filename}"
+        self.blobs[path] = data.decode("utf-8").splitlines()
+        return path, len(data), "a" * 64
 
     async def read_text_range(
         self, blob_path: Path, start_line: int = 1, end_line: int | None = None
@@ -106,39 +115,25 @@ class _FakeBlobStore(BlobStorePort):
         return "\n".join(lines[start_line - 1 : upper])
 
     async def read_bytes(self, blob_path: Path) -> bytes:
-        del blob_path
-        return b""
+        if blob_path not in self.blobs:
+            raise FileNotFoundError(str(blob_path))
+        return "\n".join(self.blobs[blob_path]).encode("utf-8")
 
     async def delete_blob(self, blob_path: Path) -> bool:
         return self.blobs.pop(blob_path, None) is not None
 
 
-class _FakeEmbedder(EmbedderPort):
-    @property
-    def model_name(self) -> str:
-        return "fake-embed"
-
-    @property
-    def dimensions(self) -> int:
-        return EXPECTED_THREE
-
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        return [[0.1, 0.2, 0.3] for _ in texts]
-
-    async def embed_query(self, query: str) -> list[float]:
-        del query
-        return [0.1, 0.2, 0.3]
-
-
-class _FakeVectorStore(VectorStorePort):
+class _RecordingVectorStore(VectorStorePort):
     def __init__(self, results: list[ScoredChunk]) -> None:
         self.results = results
-        self.calls: list[tuple[str, tuple[str, ...] | None, int]] = []
+        self.calls: list[tuple[str, list[float], tuple[str, ...] | None, int]] = []
+        self.upserts: list[tuple[str, int, int]] = []
+        self.deletes: list[tuple[str, str]] = []
 
     async def upsert_chunks(
         self, project_id: str, chunks: Sequence[FileChunk], vectors: Sequence[Sequence[float]]
     ) -> None:
-        del project_id, chunks, vectors
+        self.upserts.append((project_id, len(chunks), len(vectors)))
 
     async def search_vectors(
         self,
@@ -147,12 +142,13 @@ class _FakeVectorStore(VectorStorePort):
         file_ids: Sequence[str] | None = None,
         limit: int = 20,
     ) -> list[ScoredChunk]:
-        del query_vector
-        self.calls.append((project_id, tuple(file_ids) if file_ids else None, limit))
+        self.calls.append(
+            (project_id, list(query_vector), tuple(file_ids) if file_ids else None, limit)
+        )
         return list(self.results)
 
     async def delete_file_vectors(self, project_id: str, file_id: str) -> None:
-        del project_id, file_id
+        self.deletes.append((project_id, file_id))
 
 
 def _file(file_id: str, project_id: str, filename: str, kind: FileKind) -> FileRecord:
@@ -195,7 +191,7 @@ def _ctx(project_id: str = "prj_1", allowed_file_ids: tuple[str, ...] = ()) -> T
 
 async def test_search_files_fts_hybrid_and_scoping() -> None:
     """SearchFilesPlugin enforces project/file scoping and fuses FTS + vector results."""
-    repo = _FakeFileRepo()
+    repo = _RecordingFileRepo()
     for rec in (
         _file("fil_1", "prj_1", "app.log", FileKind.LOG),
         _file("fil_2", "prj_1", "other.log", FileKind.LOG),
@@ -205,12 +201,15 @@ async def test_search_files_fts_hybrid_and_scoping() -> None:
 
     c1 = _chunk("chk_1", "fil_1", "prj_1", "ERROR timeout", 1)
     c2 = _chunk("chk_2", "fil_1", "prj_1", "WARN retry", 11)
+    spoofed_cross = _chunk("chk_spoof", "fil_3", "prj_1", "spoofed project chunk", 1)
     repo.fts_results = [
         ScoredChunk(chunk=c1, score=0.9, source="fts"),
         ScoredChunk(chunk=_chunk("chk_3", "fil_2", "prj_1", "other"), score=0.8, source="fts"),
         ScoredChunk(chunk=_chunk("chk_4", "fil_3", "prj_2", "cross"), score=0.7, source="fts"),
+        ScoredChunk(chunk=spoofed_cross, score=0.6, source="fts"),
     ]
-    vec = _FakeVectorStore(
+    embedder = DeterministicHashEmbedder(dimensions=EXPECTED_THREE)
+    vec = _RecordingVectorStore(
         [
             ScoredChunk(chunk=c1, score=0.95, source="vector"),
             ScoredChunk(chunk=c2, score=0.6, source="vector"),
@@ -219,30 +218,43 @@ async def test_search_files_fts_hybrid_and_scoping() -> None:
 
     fts_only = SearchFilesPlugin(repo)
     assert isinstance(fts_only, ToolPluginPort)
-    fts_res = await fts_only.execute({"query": "timeout", "limit": 10}, _ctx("prj_1", ("fil_1",)))
+    fts_res = await fts_only.execute(
+        {"query": "timeout", "file_ids": ["fil_1"], "limit": 10}, _ctx("prj_1")
+    )
     fts_data = json.loads(fts_res.output)
     assert repo.fts_calls[-1] == ("prj_1", "timeout", ("fil_1",), 10)
     assert (fts_data["count"], fts_data["results"][0]["filename"]) == (1, "app.log")
 
-    hybrid = SearchFilesPlugin(repo, embedder=_FakeEmbedder(), vector_store=vec)
+    # Verify spoofed project_id chunk matching fil_3 (owned by prj_2) is dropped when unrestricted
+    unrestricted = await fts_only.execute({"query": "timeout"}, _ctx("prj_1"))
+    assert all(r["file_id"] != "fil_3" for r in json.loads(unrestricted.output)["results"])
+
+    hybrid = SearchFilesPlugin(repo, embedder=embedder, vector_store=vec)
     hyb_res = await hybrid.execute({"query": "timeout"}, _ctx("prj_1", ("fil_1",)))
     hyb_data = json.loads(hyb_res.output)
-    assert vec.calls[-1] == ("prj_1", ("fil_1",), 20)
+    expected_vec = await embedder.embed_query("timeout")
+    assert vec.calls[-1] == ("prj_1", expected_vec, ("fil_1",), DEFAULT_VECTOR_LIMIT)
+    first = hyb_data["results"][0]
     assert hyb_data["count"] == EXPECTED_TWO_RESULTS
-    assert hyb_data["results"][0]["chunk_id"] == "chk_1"
-    assert hyb_data["results"][0]["source"] == "hybrid"
+    assert (first["chunk_id"], first["source"]) == ("chk_1", "hybrid")
     assert hyb_data["results"][1]["source"] == "vector"
 
     with pytest.raises(AuthorizationError):
         await hybrid.execute({"query": "timeout", "file_ids": ["fil_2"]}, _ctx("prj_1", ("fil_1",)))
-    for bad_args in ({"query": "   "}, {"query": "ok", "limit": 0}):
+    bad_arg_cases: tuple[dict[str, object], ...] = (
+        {"query": "   "},
+        {"query": "ok", "limit": 0},
+        {"query": "ok", "file_ids": "fil_1"},
+        {"query": "ok", "file_ids": ["   "]},
+    )
+    for bad_args in bad_arg_cases:
         with pytest.raises(ValidationFailedError):
             await hybrid.execute(bad_args, _ctx("prj_1"))
 
 
 async def test_read_file_lines_clamping_and_isolation() -> None:
     """ReadFileLinesPlugin clamps spans to 250 lines and blocks cross-project/scope reads."""
-    repo, blob = _FakeFileRepo(), _FakeBlobStore()
+    repo, blob = _RecordingFileRepo(), _RecordingBlobStore()
     f1 = _file("fil_1", "prj_1", "big.log", FileKind.LOG)
     f_other = _file("fil_2", "prj_2", "secret.py", FileKind.CODE)
     f_missing = _file("fil_3", "prj_1", "gone.log", FileKind.LOG)
@@ -265,6 +277,7 @@ async def test_read_file_lines_clamping_and_isolation() -> None:
         {"file_id": "fil_1", "start_line": 5, "end_line": SHORT_SPAN_END}, _ctx("prj_1")
     )
     assert short.truncated is False
+    assert blob.read_calls[-1] == (Path(f1.blob_path), 5, SHORT_SPAN_END)
     assert json.loads(short.output)["content"].splitlines()[0] == "line 5"
 
     for bad_args, ctx in (
@@ -286,46 +299,37 @@ async def test_read_file_lines_clamping_and_isolation() -> None:
 
 async def test_get_file_overview_and_default_registry() -> None:
     """GetFileOverviewPlugin returns summaries and default registry exposes READ tools."""
-    repo, blob = _FakeFileRepo(), _FakeBlobStore()
+    repo, blob = _RecordingFileRepo(), _RecordingBlobStore()
     fp = ExceptionFingerprint(
         fingerprint="fp1",
         exception_type="TimeoutError",
-        message_sample="timed out",
+        message_sample="t",
         count=3,
         first_line=12,
         last_line=99,
     )
+    log_sum = LogFileSummary(
+        total_lines=100, severity_counts={LogSeverity.ERROR: 3}, error_count=3, top_exceptions=(fp,)
+    )
+    code_sum = CodeFileSummary(
+        language="python", total_lines=40, symbols=("main",), imports=("json",)
+    )
     log_rec = _file("fil_log", "prj_1", "srv.log", FileKind.LOG).model_copy(
-        update={
-            "log_summary": LogFileSummary(
-                total_lines=100,
-                severity_counts={LogSeverity.ERROR: 3},
-                error_count=3,
-                top_exceptions=(fp,),
-            )
-        }
+        update={"log_summary": log_sum}
     )
     code_rec = _file("fil_code", "prj_1", "main.py", FileKind.CODE).model_copy(
-        update={
-            "code_summary": CodeFileSummary(
-                language="python", total_lines=40, symbols=("main",), imports=("json",)
-            )
-        }
+        update={"code_summary": code_sum}
     )
     for rec in (log_rec, code_rec, _file("fil_other", "prj_2", "other.py", FileKind.CODE)):
         await repo.upsert_file(rec)
 
     overview = GetFileOverviewPlugin(repo)
     log_out = json.loads((await overview.execute({"file_id": "fil_log"}, _ctx("prj_1"))).output)
-    assert (log_out["log_summary"]["error_count"], log_out["code_summary"]) == (
-        EXPECTED_THREE,
-        None,
-    )
+    assert log_out["log_summary"]["error_count"] == EXPECTED_THREE
+    assert log_out["code_summary"] is None
     code_out = json.loads((await overview.execute({"file_id": "fil_code"}, _ctx("prj_1"))).output)
-    assert (code_out["code_summary"]["language"], code_out["code_summary"]["symbols"]) == (
-        "python",
-        ["main"],
-    )
+    assert code_out["code_summary"]["language"] == "python"
+    assert code_out["code_summary"]["symbols"] == ["main"]
 
     for bad_args, ctx in (
         ({"file_id": "fil_other"}, _ctx("prj_1")),
@@ -336,8 +340,7 @@ async def test_get_file_overview_and_default_registry() -> None:
     with pytest.raises(NotFoundError):
         await overview.execute({"file_id": "fil_missing"}, _ctx("prj_1"))
 
-    registry = build_default_tool_registry(repo, blob)
-    specs = registry.list_specs()
+    specs = build_default_tool_registry(repo, blob).list_specs()
     assert {s.name for s in specs} == {"search_files", "read_file_lines", "get_file_overview"}
     assert all(
         s.permission_tier is PermissionTier.READ and not s.requires_approval_by_default

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -236,7 +237,7 @@ async def test_downloader_llama_cuda_binaries_and_zip_slip(tmp_path: Path) -> No
 
 async def test_downloader_gguf_model_and_shieldgemma_fallback(tmp_path: Path) -> None:
     """ModelDownloader supports ModelProfile, GuardrailConfig, and fallback repos."""
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, bool, str | None]] = []
 
     def _fake_hf(
         *,
@@ -246,8 +247,7 @@ async def test_downloader_gguf_model_and_shieldgemma_fallback(tmp_path: Path) ->
         force_download: bool,
         token: str | None,
     ) -> str:
-        del force_download, token
-        calls.append((repo_id, filename))
+        calls.append((repo_id, filename, force_download, token))
         if repo_id.startswith("QuantFactory/"):
             msg = "missing primary"
             req = httpx.Request("GET", "https://huggingface.co/QuantFactory/shieldgemma-2b-GGUF")
@@ -276,52 +276,51 @@ async def test_downloader_gguf_model_and_shieldgemma_fallback(tmp_path: Path) ->
     shield = GuardrailConfig()
     shield_path = await downloader.download_model(shield)
     assert shield_path.name == shield.hf_filename
-    assert (shield.hf_repo, shield.hf_filename) in calls
-    assert (shield.fallback_hf_repo, shield.hf_filename) in calls
+    assert (shield.hf_repo, shield.hf_filename, False, None) in calls
+    assert (shield.fallback_hf_repo, shield.hf_filename, False, None) in calls
 
     broken = profile.model_copy(
-        update={
-            "hf_repo": "broken/primary",
-            "fallback_hf_repo": "broken/fallback",
-            "hf_filename": "missing.gguf",
-        }
+        update={"hf_repo": "broken/a", "fallback_hf_repo": "broken/b", "hf_filename": "x.gguf"}
     )
     with pytest.raises(InferenceBackendError, match="Failed to download"):
         await downloader.download_model(broken)
 
 
 def test_query_gpu_telemetry_parsing_and_absence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """query_gpu_telemetry handles float temperatures and returns None when absent."""
+    """query_gpu_telemetry resolves nvidia-smi, parses float temps, and handles absence."""
+    seen_cmds: list[list[str]] = []
 
-    def _ok_run(
-        cmd: Sequence[str],
-        **_kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            cmd,
-            returncode=0,
-            stdout="NVIDIA GeForce RTX 5080, 2220, 16303, 11, 35.32\n",
-            stderr="",
-        )
+    def _ok_run(cmd: Sequence[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        seen_cmds.append(list(cmd))
+        out = "NVIDIA GeForce RTX 5080, 2220, 16303, 11, 35.32\n"
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=out, stderr="")
 
+    def _which_nvidia(name: str) -> str | None:
+        return "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None
+
+    def _which_none(_name: str) -> str | None:
+        return None
+
+    monkeypatch.setattr(shutil, "which", _which_nvidia)
     monkeypatch.setattr(subprocess, "run", _ok_run)
     info = query_gpu_telemetry()
+    assert seen_cmds[0][0] == "/usr/bin/nvidia-smi"
     assert info is not None
     assert info.gpu_name == "NVIDIA GeForce RTX 5080"
-    assert info.memory_used_mb == EXPECTED_GPU_USED_MB
-    assert info.memory_total_mb == EXPECTED_GPU_TOTAL_MB
-    assert info.utilization_percent == EXPECTED_GPU_UTIL
-    assert info.temperature_c == EXPECTED_GPU_TEMP
+    assert (info.memory_used_mb, info.memory_total_mb) == (
+        EXPECTED_GPU_USED_MB,
+        EXPECTED_GPU_TOTAL_MB,
+    )
+    assert (info.utilization_percent, info.temperature_c) == (EXPECTED_GPU_UTIL, EXPECTED_GPU_TEMP)
 
-    def _missing_run(
-        cmd: Sequence[str],
-        **_kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        del cmd
-        msg = "nvidia-smi not found"
-        raise FileNotFoundError(msg)
+    def _missing_run(cmd: Sequence[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        seen_cmds.append(list(cmd))
+        raise FileNotFoundError
 
     monkeypatch.setattr(subprocess, "run", _missing_run)
+    assert query_gpu_telemetry() is None
+    assert seen_cmds[-1][0] == "/usr/bin/nvidia-smi"
+    monkeypatch.setattr(shutil, "which", _which_none)
     assert query_gpu_telemetry() is None
 
 

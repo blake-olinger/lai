@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -106,8 +106,9 @@ def _run_ollama_cli(
     env: Mapping[str, str] | None = None,
 ) -> None:
     """Run an Ollama CLI command synchronously and fail loudly on non-zero exit."""
-    completed = subprocess.run(
-        [str(ollama_exe), *args], env=dict(env) if env else None, check=False
+    env_dict = dict(env) if env else None
+    completed = subprocess.run(  # noqa: S603
+        [str(ollama_exe), *args], env=env_dict, shell=False, check=False
     )
     if completed.returncode != 0:
         msg = f"ollama {' '.join(args)} failed with exit code {completed.returncode}"
@@ -144,27 +145,13 @@ async def setup_ollama_models(
     """Pull HuggingFace GGUFs into Ollama and create tuned local aliases."""
     exe = ollama_exe or resolve_ollama_executable()
     env = build_ollama_serve_env(base_url)
+    p = profile
     specs: list[tuple[str, str, str, str, int, int | None]] = [
-        (
-            "primary_model",
-            profile.hf_repo,
-            profile.hf_filename,
-            profile.name,
-            profile.ctx_size,
-            None,
-        )
+        ("primary_model", p.hf_repo, p.hf_filename, p.name, p.ctx_size, None)
     ]
     if guardrail.enabled and not skip_guardrail:
-        specs.append(
-            (
-                "guardrail_model",
-                guardrail.hf_repo,
-                guardrail.hf_filename,
-                guardrail.ollama_model,
-                guardrail.ctx_size,
-                0,
-            )
-        )
+        g = guardrail
+        specs.append(("guardrail_model", g.hf_repo, g.hf_filename, g.ollama_model, g.ctx_size, 0))
     resolved: dict[str, str] = {}
     for key, repo, filename, alias, num_ctx, num_gpu in specs:
         src = f"hf.co/{repo}:{derive_hf_quant_tag(filename)}"
@@ -174,6 +161,25 @@ async def setup_ollama_models(
         resolved[key] = f"{alias} <- {src}"
     _logger().info("ollama_models_ready", **resolved)
     return resolved
+
+
+def _extract_tag_models(response: httpx.Response) -> list[str] | None:
+    try:
+        payload: object = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_models = cast("dict[object, object]", payload).get("models")
+    if not isinstance(raw_models, list):
+        return None
+    return [
+        name
+        for entry in cast("list[object]", raw_models)
+        if isinstance(entry, dict)
+        and isinstance((name := cast("dict[object, object]", entry).get("name")), str)
+        and name
+    ]
 
 
 class OllamaSupervisor(InferenceSupervisorPort):
@@ -213,8 +219,8 @@ class OllamaSupervisor(InferenceSupervisorPort):
         latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
         return BackendHealth(healthy=False, status=status, latency_ms=latency_ms, error=error)
 
-    async def health(self) -> BackendHealth:
-        """Probe Ollama /api/tags endpoint."""
+    async def health(self, *, expected_model: str | None = None) -> BackendHealth:
+        """Probe Ollama /api/tags endpoint and verify model availability."""
         started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
@@ -223,43 +229,44 @@ class OllamaSupervisor(InferenceSupervisorPort):
             return self._unhealthy("unreachable", started, str(exc))
         if response.status_code != _HTTP_OK:
             return self._unhealthy(f"http_{response.status_code}", started, response.text.strip())
-        latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        models = _extract_tag_models(response)
+        if models is None:
+            return self._unhealthy("invalid_response", started, "Invalid /api/tags JSON payload.")
+        target = expected_model or (self._active_profile.name if self._active_profile else None)
+        matched = (
+            next((m for m in models if m == target or m.startswith(f"{target}:")), None)
+            if target is not None
+            else (models[0] if models else None)
+        )
+        if target is not None and matched is None:
+            return self._unhealthy("model_missing", started, f"Model {target!r} not in /api/tags.")
+        ms = round((time.perf_counter() - started) * 1000.0, 2)
         return BackendHealth(
             healthy=True,
             status="ok",
-            model_loaded=self._active_profile.name if self._active_profile else None,
+            model_loaded=matched,
             slots_total=1,
             slots_idle=1,
-            latency_ms=latency_ms,
+            latency_ms=ms,
         )
 
     @staticmethod
     def _popen_ollama_serve(cmd: list[str], env: dict[str, str]) -> subprocess.Popen[bytes]:
+        pipe, out = subprocess.PIPE, subprocess.STDOUT
         if sys.platform == "win32":
-            return subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=0,
-                env=env,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP
+            return subprocess.Popen(  # noqa: S603
+                cmd, stdout=pipe, stderr=out, bufsize=0, env=env, shell=False, creationflags=flags
             )
-        return subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            bufsize=0,
-            env=env,
-            start_new_session=True,
+        return subprocess.Popen(  # noqa: S603
+            cmd, stdout=pipe, stderr=out, bufsize=0, env=env, shell=False, start_new_session=True
         )
 
     def _spawn_process(self) -> subprocess.Popen[bytes]:
         exe = self._executable_path or resolve_ollama_executable()
         env = build_ollama_serve_env(self._base_url)
-        writer = DailyRotatingStreamWriter(
-            self._log_dir / "ollama-server.log",
-            logger_name="lai.inference.ollama_server",
-        )
+        log_path = self._log_dir / "ollama-server.log"
+        writer = DailyRotatingStreamWriter(log_path, logger_name="lai.inference.ollama_server")
         proc = self._popen_ollama_serve([str(exe), "serve"], env)
         self._process, self._owns_process, self._log_writer = proc, True, writer
         if sys.platform == "win32":
@@ -268,11 +275,9 @@ class OllamaSupervisor(InferenceSupervisorPort):
                 job.assign_pid(proc.pid)
                 self._job_object = job
         if proc.stdout is not None:
+            args = (proc.stdout, writer)
             thread = threading.Thread(
-                target=pump_stream,
-                args=(proc.stdout, writer),
-                daemon=True,
-                name="ollama-server-log-pump",
+                target=pump_stream, args=args, daemon=True, name="ollama-server-log-pump"
             )
             thread.start()
             self._output_thread = thread
@@ -280,23 +285,18 @@ class OllamaSupervisor(InferenceSupervisorPort):
         return proc
 
     async def _await_startup_ready(
-        self,
-        proc: subprocess.Popen[bytes],
-        profile: ModelProfile,
+        self, proc: subprocess.Popen[bytes], profile: ModelProfile
     ) -> BackendHealth:
         deadline = time.monotonic() + self._startup_timeout_seconds
         while True:
             rc = proc.poll()
             if rc is not None:
                 await self._cleanup_resources()
-                _logger().error(
-                    "ollama_server_crashed",
-                    returncode=rc,
-                    alert_category=AlertCategory.SUBPROCESS_CRASH.value,
-                )
+                cat = AlertCategory.SUBPROCESS_CRASH.value
+                _logger().error("ollama_server_crashed", returncode=rc, alert_category=cat)
                 msg = f"ollama serve exited unexpectedly with code {rc}"
                 raise InferenceBackendError(msg)
-            current = await self.health()
+            current = await self.health(expected_model=profile.name)
             if current.healthy:
                 self._active_profile = profile
                 return current.model_copy(update={"model_loaded": profile.name})
@@ -310,7 +310,7 @@ class OllamaSupervisor(InferenceSupervisorPort):
     async def ensure_running(self, profile: ModelProfile) -> BackendHealth:
         """Ensure an Ollama server is reachable, spawning one if needed."""
         async with self._lock:
-            existing = await self.health()
+            existing = await self.health(expected_model=profile.name)
             if existing.healthy:
                 self._active_profile = profile
                 return existing.model_copy(update={"model_loaded": profile.name})
