@@ -1,166 +1,130 @@
-"""End-to-end tests wiring GuardedToolExecutor with Phase 1 read plugins."""
+"""End-to-end unit tests wiring GuardedToolExecutor with SQLite repositories and LocalBlobStore."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
 from typing import TYPE_CHECKING
 
 import pytest
 
-from lai.domain.auth import ApiScope
-from lai.domain.errors import AuthorizationError
-from lai.domain.files import FileChunk, FileKind, FileRecord, FileStatus, ScoredChunk
-from lai.domain.tools import (
-    ApprovalStatus,
-    PolicyDecision,
-    ToolApprovalRecord,
-    ToolAuditRecord,
-    ToolExecutionContext,
+from lai.db import (
+    SqliteDatabase,
+    SqliteFileRepository,
+    SqliteProjectRepository,
+    SqliteSessionRepository,
+    SqliteToolAuditRepository,
 )
-from lai.ports.repositories import FileRepositoryPort, ToolAuditRepositoryPort
-from lai.ports.storage import BlobStorePort
+from lai.domain.auth import ApiScope
+from lai.domain.chat import Session
+from lai.domain.errors import AuthorizationError
+from lai.domain.files import FileChunk, FileKind, FileRecord, FileStatus
+from lai.domain.projects import Project
+from lai.domain.tools import PolicyDecision, ToolExecutionContext
+from lai.ingestion.blob_store import LocalBlobStore
 from lai.tools import GuardedToolExecutor, build_default_tool_registry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
+    from pathlib import Path
 
 EXPECTED_AUDITS = 4
 
 
-class _Repo(FileRepositoryPort):
-    def __init__(self, files: dict[str, FileRecord]) -> None:
-        self.files = files
-
-    async def upsert_file(self, record: FileRecord) -> FileRecord:
-        self.files[record.id] = record
-        return record
-
-    async def get_file(self, file_id: str) -> FileRecord | None:
-        return self.files.get(file_id)
-
-    async def list_files(
-        self, project_id: str, limit: int = 200, offset: int = 0
-    ) -> list[FileRecord]:
-        del project_id, limit, offset
-        return list(self.files.values())
-
-    async def replace_chunks(self, file_id: str, chunks: Sequence[FileChunk]) -> None:
-        del file_id, chunks
-
-    async def list_chunks(
-        self, file_id: str, start_line: int | None = None, end_line: int | None = None
-    ) -> list[FileChunk]:
-        del file_id, start_line, end_line
-        return []
-
-    async def search_fts(
-        self, project_id: str, query: str, file_ids: Sequence[str] | None = None, limit: int = 20
-    ) -> list[ScoredChunk]:
-        del project_id, query, file_ids, limit
-        return []
-
-    async def delete_file(self, file_id: str) -> bool:
-        return self.files.pop(file_id, None) is not None
+async def _bytes_stream(payload: bytes) -> AsyncIterator[bytes]:
+    yield payload
 
 
-class _Blobs(BlobStorePort):
-    def __init__(self, blobs: dict[Path, str]) -> None:
-        self.blobs = blobs
+async def test_executor_invokes_all_phase1_plugins_and_audits_isolation(tmp_path: Path) -> None:
+    """GuardedToolExecutor runs Phase 1 plugins against real SQLite + LocalBlobStore."""
+    blob_store = LocalBlobStore(tmp_path / "blobs")
+    async with SqliteDatabase(tmp_path / "lai.db") as db:
+        projects = SqliteProjectRepository(db)
+        sessions = SqliteSessionRepository(db)
+        file_repo = SqliteFileRepository(db)
+        audit_repo = SqliteToolAuditRepository(db)
 
-    async def write_stream(
-        self, project_id: str, file_id: str, filename: str, chunks: AsyncIterator[bytes]
-    ) -> tuple[Path, int, str]:
-        del project_id, file_id, filename, chunks
-        return Path("unused"), 0, "0" * 64
+        await projects.create(Project(id="prj_1", name="Project 1"))
+        await projects.create(Project(id="prj_2", name="Project 2"))
+        await sessions.create_session(Session(id="ses_1", project_id="prj_1", title="Session 1"))
 
-    async def read_text_range(
-        self, blob_path: Path, start_line: int = 1, end_line: int | None = None
-    ) -> str:
-        del start_line, end_line
-        return self.blobs[blob_path]
+        blob_1, size_1, sha_1 = await blob_store.write_stream(
+            "prj_1", "fil_1", "app.py", _bytes_stream(b"print('hi')\n")
+        )
+        blob_2, size_2, sha_2 = await blob_store.write_stream(
+            "prj_2", "fil_2", "secret.py", _bytes_stream(b"SECRET = 'x'\n")
+        )
+        await file_repo.upsert_file(
+            FileRecord(
+                id="fil_1",
+                project_id="prj_1",
+                filename="app.py",
+                size_bytes=size_1,
+                sha256=sha_1,
+                blob_path=str(blob_1),
+                kind=FileKind.CODE,
+                status=FileStatus.READY,
+                chunk_count=1,
+            )
+        )
+        await file_repo.replace_chunks(
+            "fil_1",
+            [
+                FileChunk(
+                    id="chk_1",
+                    file_id="fil_1",
+                    project_id="prj_1",
+                    chunk_index=0,
+                    start_line=1,
+                    end_line=1,
+                    token_count=4,
+                    text="print('hi')",
+                )
+            ],
+        )
+        await file_repo.upsert_file(
+            FileRecord(
+                id="fil_2",
+                project_id="prj_2",
+                filename="secret.py",
+                size_bytes=size_2,
+                sha256=sha_2,
+                blob_path=str(blob_2),
+                kind=FileKind.CODE,
+                status=FileStatus.READY,
+            )
+        )
 
-    async def read_bytes(self, blob_path: Path) -> bytes:
-        del blob_path
-        return b""
+        registry = build_default_tool_registry(file_repo, blob_store)
+        executor = GuardedToolExecutor(registry, audit_repo)
+        ctx = ToolExecutionContext(
+            project_id="prj_1",
+            session_id="ses_1",
+            principal_id="usr_1",
+            principal_scopes=(ApiScope.TOOLS_SAFE,),
+        )
 
-    async def delete_blob(self, blob_path: Path) -> bool:
-        return self.blobs.pop(blob_path, None) is not None
+        search_res = await executor.invoke("search_files", {"query": "hi"}, ctx)
+        assert search_res.success is True
+        assert json.loads(search_res.output)["results"][0]["chunk_id"] == "chk_1"
 
+        read_res = await executor.invoke("read_file_lines", {"file_id": "fil_1"}, ctx)
+        assert read_res.success is True
+        assert json.loads(read_res.output)["content"] == "print('hi')"
 
-class _Audits(ToolAuditRepositoryPort):
-    def __init__(self) -> None:
-        self.audits: list[ToolAuditRecord] = []
+        overview_res = await executor.invoke("get_file_overview", {"file_id": "fil_1"}, ctx)
+        assert overview_res.success is True
+        assert json.loads(overview_res.output)["filename"] == "app.py"
 
-    async def create_approval(self, record: ToolApprovalRecord) -> ToolApprovalRecord:
-        return record
+        with pytest.raises(AuthorizationError):
+            await executor.invoke("get_file_overview", {"file_id": "fil_2"}, ctx)
 
-    async def get_approval(self, approval_id: str) -> ToolApprovalRecord | None:
-        del approval_id
-        return None
-
-    async def list_pending_approvals(
-        self, project_id: str, session_id: str | None = None
-    ) -> list[ToolApprovalRecord]:
-        del project_id, session_id
-        return []
-
-    async def update_approval(self, record: ToolApprovalRecord) -> ToolApprovalRecord:
-        return record
-
-    async def transition_approval_status(
-        self, record: ToolApprovalRecord, *, expected_status: ApprovalStatus
-    ) -> bool:
-        del record, expected_status
-        return True
-
-    async def record_audit(self, record: ToolAuditRecord) -> ToolAuditRecord:
-        self.audits.append(record)
-        return record
-
-    async def list_audits(
-        self, project_id: str, session_id: str | None = None, limit: int = 100
-    ) -> list[ToolAuditRecord]:
-        del project_id, session_id, limit
-        return list(self.audits)
-
-
-async def test_executor_invokes_all_phase1_plugins_and_audits_isolation() -> None:
-    """GuardedToolExecutor runs Phase 1 plugins under READ scopes and audits failures."""
-    f_ok = FileRecord(
-        id="fil_1",
-        project_id="prj_1",
-        filename="app.py",
-        size_bytes=10,
-        sha256="a" * 64,
-        blob_path="blobs/app.py",
-        kind=FileKind.CODE,
-        status=FileStatus.READY,
-    )
-    f_other = f_ok.model_copy(update={"id": "fil_2", "project_id": "prj_2"})
-    registry = build_default_tool_registry(
-        _Repo({"fil_1": f_ok, "fil_2": f_other}),
-        _Blobs({Path("blobs/app.py"): "print('hi')"}),
-    )
-    audits = _Audits()
-    executor = GuardedToolExecutor(registry, audits)
-    ctx = ToolExecutionContext(
-        project_id="prj_1",
-        session_id="ses_1",
-        principal_id="usr_1",
-        principal_scopes=(ApiScope.TOOLS_SAFE,),
-    )
-
-    for tool_name, args in (
-        ("search_files", {"query": "hi"}),
-        ("read_file_lines", {"file_id": "fil_1"}),
-        ("get_file_overview", {"file_id": "fil_1"}),
-    ):
-        result = await executor.invoke(tool_name, args, ctx)
-        assert result.success is True
-
-    with pytest.raises(AuthorizationError):
-        await executor.invoke("get_file_overview", {"file_id": "fil_2"}, ctx)
-
-    assert len(audits.audits) == EXPECTED_AUDITS
-    assert all(a.policy_decision is PolicyDecision.ALLOW for a in audits.audits)
-    assert [a.success for a in audits.audits] == [True, True, True, False]
+        audits = await audit_repo.list_audits("prj_1", "ses_1")
+        assert len(audits) == EXPECTED_AUDITS
+        assert all(a.policy_decision is PolicyDecision.ALLOW for a in audits)
+        assert [a.success for a in reversed(audits)] == [True, True, True, False]
+        assert [a.tool_name for a in reversed(audits)] == [
+            "search_files",
+            "read_file_lines",
+            "get_file_overview",
+            "get_file_overview",
+        ]

@@ -47,17 +47,21 @@ def _logger() -> structlog.stdlib.BoundLogger:
 
 def query_gpu_telemetry() -> GpuTelemetry | None:
     """Query GPU memory and utilization via nvidia-smi, returning None if unavailable."""
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        return None
     cmd = [
-        "nvidia-smi",
+        nvidia_smi,
         "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
         "--format=csv,noheader,nounits",
     ]
     try:
-        completed = subprocess.run(
+        completed = subprocess.run(  # noqa: S603
             cmd,
             capture_output=True,
             text=True,
             timeout=_GPU_QUERY_TIMEOUT_SECONDS,
+            shell=False,
             check=False,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
@@ -177,18 +181,20 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
     @staticmethod
     def _popen_process(cmd: list[str]) -> subprocess.Popen[bytes]:
         if sys.platform == "win32":
-            return subprocess.Popen(
+            return subprocess.Popen(  # noqa: S603
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=0,
+                shell=False,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
-        return subprocess.Popen(
+        return subprocess.Popen(  # noqa: S603
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=0,
+            shell=False,
             start_new_session=True,
         )
 

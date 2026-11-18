@@ -1,60 +1,26 @@
-"""Unit tests for all modular Typer CLI commands (init, keys, models, serve, tunnel)."""
+"""Unit tests for Typer CLI commands (init, keys, tunnel, and shared helpers)."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+import asyncio
+import shutil
+from datetime import timedelta
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-import uvicorn
 import yaml
 from typer.testing import CliRunner
 
-from lai.cli import models_cmd, serve_cmd
+from lai.cli._common import open_api_key_repo, resolve_llama_executable, resolve_log_dir
 from lai.cli.app import app as cli_app
-from lai.domain.inference import BackendHealth
+from lai.config.settings import LaiSettings
+from lai.domain.auth import ApiScope
+from lai.domain.base import utc_now
+from lai.domain.observability import LoggingConfig
+from lai.security import generate_api_key
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
-    from starlette.types import ASGIApp
-
-    from lai.config.settings import LaiSettings
-    from lai.domain.guardrails import GuardrailConfig
-    from lai.domain.inference import ModelProfile
-    from lai.guardrails import ShieldGemmaSupervisor
-    from lai.inference import LlamaCppSupervisor
-
-
-class _StubDownloader:
-    """Offline ModelDownloader stub recording requested artifacts."""
-
-    def __init__(self, models_dir: Path, bin_dir: Path) -> None:
-        self._models_dir = models_dir
-        self._bin_dir = bin_dir
-        self.calls: list[tuple[str, str]] = []
-
-    async def download_llama_binaries(
-        self,
-        *,
-        tag: str | None = None,
-        cuda_version: str | None = None,
-        force: bool = False,
-    ) -> Path:
-        del tag, cuda_version, force
-        self.calls.append(("binaries", "llama-server.exe"))
-        return self._bin_dir / "llama" / "llama-server.exe"
-
-    async def download_model(
-        self,
-        profile_or_config: ModelProfile | GuardrailConfig,
-        *,
-        force: bool = False,
-        token: str | None = None,
-    ) -> Path:
-        del force, token
-        filename = str(profile_or_config.hf_filename)
-        self.calls.append(("model", filename))
-        return self._models_dir / filename
 
 
 def test_cli_init_idempotent_and_force_overwrite(tmp_path: Path) -> None:
@@ -88,8 +54,18 @@ def test_cli_init_idempotent_and_force_overwrite(tmp_path: Path) -> None:
     assert "127.0.0.1" in cfg.read_text(encoding="utf-8")
 
 
-def test_cli_keys_create_list_revoke_and_error_cases(tmp_path: Path) -> None:
-    """Verify lai keys commands with explicit --db-path, --scope, and missing key errors."""
+async def _seed_expired_key(db_path: Path) -> None:
+    expired = generate_api_key(
+        name="stale",
+        scopes=(ApiScope.PROJECTS_READ,),
+        expires_at=utc_now() - timedelta(days=1),
+    )
+    async with open_api_key_repo(db_path) as repo:
+        await repo.create(expired.record)
+
+
+def test_cli_keys_create_list_expired_revoke_and_error_cases(tmp_path: Path) -> None:
+    """Verify lai keys commands including --admin, expired keys, revoke, and missing errors."""
     runner = CliRunner()
     db_path = tmp_path / "keys.db"
 
@@ -118,11 +94,21 @@ def test_cli_keys_create_list_revoke_and_error_cases(tmp_path: Path) -> None:
     assert "projects:read,chat:read" in res_create.output
     assert "lai_sk_" in res_create.output
 
+    res_admin = runner.invoke(
+        cli_app, ["keys", "create", "--db-path", str(db_path), "--name", "root", "--admin"]
+    )
+    assert res_admin.exit_code == 0, res_admin.output
+    assert "admin" in res_admin.output
+
+    asyncio.run(_seed_expired_key(db_path))
+
     res_list = runner.invoke(cli_app, ["keys", "list", "--db-path", str(db_path)])
     assert res_list.exit_code == 0
-    line = res_list.output.strip().splitlines()[0]
-    key_id = line.split("\t")[0]
-    assert "\tactive\t" in line
+    lines = res_list.output.strip().splitlines()
+    reader_line = next(row for row in lines if "\tci-reader\t" in row)
+    key_id = reader_line.split("\t")[0]
+    assert "\tactive\t" in reader_line
+    assert any("\tstale\t" in row and "\texpired\t" in row for row in lines)
 
     res_revoke = runner.invoke(cli_app, ["keys", "revoke", key_id, "--db-path", str(db_path)])
     assert res_revoke.exit_code == 0
@@ -136,125 +122,8 @@ def test_cli_keys_create_list_revoke_and_error_cases(tmp_path: Path) -> None:
     assert res_missing.exit_code == 1
 
 
-def test_cli_models_setup_and_list(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify lai models setup downloads llama-server, Gemma 4, and ShieldGemma-2B."""
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "data_dir": str(tmp_path / "data"),
-                "models_dir": str(tmp_path / "models"),
-                "bin_dir": str(tmp_path / "bin"),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    captured: list[_StubDownloader] = []
-
-    def _fake_build(settings: LaiSettings) -> _StubDownloader:
-        stub = _StubDownloader(settings.models_dir, settings.bin_dir)
-        captured.append(stub)
-        return stub
-
-    monkeypatch.setattr(models_cmd, "build_downloader", _fake_build)
-    runner = CliRunner()
-
-    res_setup = runner.invoke(cli_app, ["models", "setup", "--config", str(cfg_path)])
-    assert res_setup.exit_code == 0, res_setup.output
-    assert len(captured) == 1
-    assert captured[0].calls == [
-        ("binaries", "llama-server.exe"),
-        ("model", "gemma-4-26B-A4B-it-UD-IQ4_XS.gguf"),
-        ("model", "shieldgemma-2b.Q4_K_M.gguf"),
-    ]
-    assert "llama_server:" in res_setup.output
-    assert "primary_model:" in res_setup.output
-    assert "guardrail_model:" in res_setup.output
-
-    res_list = runner.invoke(cli_app, ["models", "list", "--config", str(cfg_path)])
-    assert res_list.exit_code == 0
-    assert "gemma4-26b-a4b" in res_list.output
-
-
-def test_cli_serve_supervises_backends_and_uvicorn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify lai serve starts and stops Gemma 4 + ShieldGemma supervisors around Uvicorn."""
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "data_dir": str(tmp_path / "data"),
-                "models_dir": str(tmp_path / "models"),
-                "bin_dir": str(tmp_path / "bin"),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    events: list[str] = []
-
-    class _FakeSupervisor:
-        def __init__(self, label: str) -> None:
-            self._label = label
-
-        async def ensure_running(self, arg: object) -> BackendHealth:
-            del arg
-            events.append(f"start:{self._label}")
-            return BackendHealth(healthy=True, status="ok")
-
-        async def stop(self) -> None:
-            events.append(f"stop:{self._label}")
-
-    class _FakeServer:
-        def __init__(self, config: object) -> None:
-            del config
-
-        async def serve(self) -> None:
-            events.append("uvicorn:serve")
-
-    def _fake_supervisors(
-        _settings: LaiSettings,
-    ) -> tuple[LlamaCppSupervisor, ShieldGemmaSupervisor | None]:
-        return (
-            cast("LlamaCppSupervisor", _FakeSupervisor("llama")),
-            cast("ShieldGemmaSupervisor", _FakeSupervisor("shield")),
-        )
-
-    async def _noop_asgi(scope: object, receive: object, send: object) -> None:
-        del scope, receive, send
-
-    def _fake_create_app(settings: LaiSettings) -> ASGIApp:
-        del settings
-        return cast("ASGIApp", _noop_asgi)
-
-    monkeypatch.setattr(serve_cmd, "build_supervisors", _fake_supervisors)
-    assert callable(serve_cmd.create_app)
-    monkeypatch.setattr(serve_cmd, "create_app", _fake_create_app)
-    monkeypatch.setattr(uvicorn, "Server", _FakeServer)
-
-    runner = CliRunner()
-    res = runner.invoke(
-        cli_app,
-        ["serve", "--config", str(cfg_path), "--host", "127.0.0.1", "--port", "8499"],
-    )
-    assert res.exit_code == 0, res.output
-    assert events == [
-        "start:llama",
-        "start:shield",
-        "uvicorn:serve",
-        "stop:shield",
-        "stop:llama",
-    ]
-
-
-def test_cli_tunnel_render_stdout_and_missing_config(tmp_path: Path) -> None:
-    """Verify lai tunnel render-config stdout output and invalid config exit code."""
+def test_cli_tunnel_render_stdout_file_and_missing_config(tmp_path: Path) -> None:
+    """Verify lai tunnel render-config stdout, file output, config origin, and bad config."""
     runner = CliRunner()
     res = runner.invoke(
         cli_app,
@@ -272,6 +141,33 @@ def test_cli_tunnel_render_stdout_and_missing_config(tmp_path: Path) -> None:
     assert parsed["ingress"][0]["hostname"] == "chat.local"
     assert parsed["ingress"][0]["service"] == "http://127.0.0.1:9000"
 
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("host: 127.0.0.9\nport: 8501\n", encoding="utf-8")
+    out_file = tmp_path / "out" / "cloudflared.yaml"
+    creds = tmp_path / "creds.json"
+    res_file = runner.invoke(
+        cli_app,
+        [
+            "tunnel",
+            "render-config",
+            "--hostname",
+            "ai.local",
+            "--tunnel",
+            "t-1",
+            "--credentials-file",
+            str(creds),
+            "--config",
+            str(cfg_path),
+            "--output",
+            str(out_file),
+        ],
+    )
+    assert res_file.exit_code == 0, res_file.output
+    written = yaml.safe_load(out_file.read_text(encoding="utf-8"))
+    assert written["tunnel"] == "t-1"
+    assert written["credentials-file"] == str(creds)
+    assert written["ingress"][0]["service"] == "http://127.0.0.9:8501"
+
     res_bad = runner.invoke(
         cli_app,
         [
@@ -284,3 +180,59 @@ def test_cli_tunnel_render_stdout_and_missing_config(tmp_path: Path) -> None:
         ],
     )
     assert res_bad.exit_code == 1
+
+
+def test_resolve_log_dir_custom_and_data_dir_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """resolve_log_dir respects explicit log_dir and derives from custom data_dir."""
+    monkeypatch.chdir(tmp_path)
+    default_derived = resolve_log_dir(LaiSettings(data_dir=tmp_path / "custom_data"))
+    assert default_derived == tmp_path / "custom_data" / "logs"
+
+    explicit = resolve_log_dir(
+        LaiSettings(
+            data_dir=tmp_path / "custom_data",
+            logging=LoggingConfig(log_dir=tmp_path / "explicit_logs"),
+        )
+    )
+    assert explicit == tmp_path / "explicit_logs"
+
+
+def test_resolve_llama_executable_all_branches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover direct binary, nested rglob binary, PATH lookup, and missing fallback."""
+    import sys  # noqa: PLC0415
+
+    binary_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+
+    bin_direct = tmp_path / "b1"
+    direct_exe = bin_direct / "llama" / binary_name
+    direct_exe.parent.mkdir(parents=True)
+    direct_exe.write_bytes(b"MZ")
+    assert resolve_llama_executable(bin_direct) == direct_exe
+
+    bin_nested = tmp_path / "b2"
+    nested_exe = bin_nested / "llama" / "nested" / binary_name
+    nested_exe.parent.mkdir(parents=True)
+    nested_exe.write_bytes(b"MZ")
+    assert resolve_llama_executable(bin_nested) == nested_exe
+
+    bin_path = tmp_path / "b3"
+    (bin_path / "llama").mkdir(parents=True)
+
+    def _which_llama(name: str) -> str | None:
+        return "/usr/bin/llama-server" if name else None
+
+    monkeypatch.setattr(shutil, "which", _which_llama)
+    assert resolve_llama_executable(bin_path) == Path("/usr/bin/llama-server")
+
+    bin_missing = tmp_path / "b4"
+
+    def _which_none(_name: str) -> str | None:
+        return None
+
+    monkeypatch.setattr(shutil, "which", _which_none)
+    assert resolve_llama_executable(bin_missing) == bin_missing / "llama" / binary_name

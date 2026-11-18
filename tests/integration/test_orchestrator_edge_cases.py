@@ -62,6 +62,7 @@ LARGE_FINDING_REPEATS = 5500
 
 class _ApprovalPlugin(ToolPluginPort):
     def __init__(self) -> None:
+        self.executed: list[tuple[dict[str, Any], str]] = []
         self._spec = ToolSpec(
             name="deploy_patch",
             description="Requires human approval",
@@ -75,7 +76,7 @@ class _ApprovalPlugin(ToolPluginPort):
         return self._spec
 
     async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
-        del arguments, context
+        self.executed.append((dict(arguments), context.project_id))
         return ToolResult(tool_name=self._spec.name, success=True, output="ok")
 
 
@@ -103,7 +104,7 @@ class _AsyncInference(InferenceProviderPort):
         return BackendHealth(healthy=True, status="ok")
 
 
-async def _ingest_oversized(
+async def _ingest_file(
     tmp_path: Path,
     db: SqliteDatabase,
     filename: str,
@@ -123,9 +124,7 @@ async def _ingest_oversized(
         yield text.encode("utf-8")
 
     rec = await pipe.ingest_upload("prj_1", filename, "text/plain", _gen())
-    oversized = rec.model_copy(update={"token_count": 5000})
-    await file_repo.upsert_file(oversized)
-    return oversized, file_repo, blobs, vec_store, embedder
+    return rec, file_repo, blobs, vec_store, embedder
 
 
 async def test_retrieval_rrf_approval_and_bounded_tool_loop(tmp_path: Path) -> None:
@@ -137,9 +136,14 @@ async def test_retrieval_rrf_approval_and_bounded_tool_loop(tmp_path: Path) -> N
         await SqliteProjectRepository(db).create(Project(id="prj_1", name="P1"))
         session_repo = SqliteSessionRepository(db)
         await session_repo.create_session(Session(id="ses_1", project_id="prj_1", title="S1"))
-        rec, file_repo, blobs, vec_store, embedder = await _ingest_oversized(
-            tmp_path, db, "svc.py", "def run():\n    return 42\n"
+        helpers = "\n".join(
+            f"def helper_{i}(v: int) -> int:\n    return v + {i}" for i in range(1, 35)
         )
+        rec, file_repo, blobs, vec_store, embedder = await _ingest_file(
+            tmp_path, db, "svc.py", f"def run():\n    return 42\n\n{helpers}\n"
+        )
+        settings = LaiSettings(data_dir=tmp_path, direct_file_budget_tokens=256)
+        assert rec.token_count > settings.direct_file_budget_tokens
         reg = build_default_tool_registry(file_repo, blobs)
         reg.register(_ApprovalPlugin())
         exe = GuardedToolExecutor(reg, SqliteToolAuditRepository(db))
@@ -148,7 +152,6 @@ async def test_retrieval_rrf_approval_and_bounded_tool_loop(tmp_path: Path) -> N
             providers=[AllowAllGuardrailProvider()],
             audit_logger=audit_log,
         )
-        settings = LaiSettings(data_dir=tmp_path, direct_file_budget_tokens=256)
         principal = AuthPrincipal(
             principal_id="usr_1",
             auth_method=AuthMethod.API_KEY,
@@ -194,7 +197,9 @@ async def test_retrieval_rrf_approval_and_bounded_tool_loop(tmp_path: Path) -> N
         assert done_ev.output.pending_approval_id == appr_ev.approval_id
 
         spooler_loop = InferenceSpooler()
-        orch_loop = TurnOrchestrator(
+        args_json = json.dumps({"file_id": rec.id, "start_line": 1})
+        tc_loop = InferenceToolCall(id="tc_l", name="read_file_lines", arguments_json=args_json)
+        loop_out = await TurnOrchestrator(
             settings,
             session_repo,
             file_repo,
@@ -204,18 +209,7 @@ async def test_retrieval_rrf_approval_and_bounded_tool_loop(tmp_path: Path) -> N
                 stream_fn=lambda req: (
                     [InferenceChunk(content_delta="Loop capped answer.")]
                     if not req.tools
-                    else [
-                        InferenceChunk(
-                            tool_calls=(
-                                InferenceToolCall(
-                                    id="tc_l",
-                                    name="read_file_lines",
-                                    arguments_json=json.dumps({"file_id": rec.id, "start_line": 1}),
-                                ),
-                            ),
-                            finish_reason="tool_calls",
-                        )
-                    ]
+                    else [InferenceChunk(tool_calls=(tc_loop,), finish_reason="tool_calls")]
                 ),
             ),
             spooler_loop,
@@ -223,8 +217,7 @@ async def test_retrieval_rrf_approval_and_bounded_tool_loop(tmp_path: Path) -> N
             pipeline,
             tool_registry=reg,
             tool_executor=exe,
-        )
-        loop_out = await orch_loop.run_turn(
+        ).run_turn(
             TurnInput(session_id="ses_1", project_id="prj_1", user_message="Inspect svc.py"),
             principal,
         )
@@ -244,10 +237,18 @@ async def test_map_reduce_compression_and_interactive_interleaving(tmp_path: Pat
         await SqliteProjectRepository(db).create(Project(id="prj_1", name="P1"))
         session_repo = SqliteSessionRepository(db)
         await session_repo.create_session(Session(id="ses_1", project_id="prj_1", title="S1"))
-        lines = [f"2026-11-17T10:00:{i:02d}Z ERROR worker_{i} timeout" for i in range(1, 35)]
-        _, file_repo, blobs, _, _ = await _ingest_oversized(
-            tmp_path, db, "big.log", "\n".join(lines)
+        lines = [
+            f"2026-11-17T10:00:{i:02d}Z ERROR worker_{i} timeout connecting to db pool"
+            for i in range(1, 35)
+        ]
+        rec, file_repo, blobs, _, _ = await _ingest_file(tmp_path, db, "big.log", "\n".join(lines))
+        settings = LaiSettings(
+            data_dir=tmp_path,
+            direct_file_budget_tokens=256,
+            map_window_tokens=260,
+            map_window_overlap_tokens=30,
         )
+        assert rec.token_count > settings.direct_file_budget_tokens
 
         first_started, allow_finish = asyncio.Event(), asyncio.Event()
         order: list[JobPriority] = []
@@ -274,12 +275,6 @@ async def test_map_reduce_compression_and_interactive_interleaving(tmp_path: Pat
             order.append(JobPriority.MAP_REDUCE)
             return [InferenceChunk(content_delta="Done [big.log:L1-L34].")]
 
-        settings = LaiSettings(
-            data_dir=tmp_path,
-            direct_file_budget_tokens=256,
-            map_window_tokens=260,
-            map_window_overlap_tokens=30,
-        )
         pipeline = CompositeGuardrailPipeline(
             GuardrailConfig(enabled=True),
             providers=[AllowAllGuardrailProvider()],

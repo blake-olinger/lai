@@ -9,16 +9,19 @@ import pytest
 
 from lai.domain.errors import ValidationFailedError
 from lai.domain.files import FileChunk, ScoredChunk
+from lai.ingestion import embedder as embedder_mod
 from lai.ingestion.embedder import DeterministicHashEmbedder, FastEmbedCpuAdapter
 from lai.ingestion.rrf import reciprocal_rank_fusion
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
+    from pathlib import Path
 
 TEST_DIM = 64
 EXPECTED_RRF_K = 60
 EXPECTED_TWO = 2
 EXPECTED_THREE = 3
+EXPECTED_BATCH_SIZE = 64
 
 
 def _make_scored_chunk(
@@ -74,32 +77,37 @@ def test_reciprocal_rank_fusion_limits_and_validation() -> None:
 class _FakeTextEmbeddingBackend:
     """In-memory fake TextEmbedding backend verifying CPU-only adapter delegation."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, empty_query: bool = False) -> None:
         self.embedded_batches: list[list[str]] = []
+        self.batch_sizes: list[int] = []
         self.queries: list[str] = []
+        self._empty_query = empty_query
 
     def embed(
         self,
         documents: Sequence[str],
         batch_size: int = 256,
     ) -> Iterable[Iterable[float]]:
-        del batch_size
+        self.batch_sizes.append(batch_size)
         self.embedded_batches.append(list(documents))
         return [[0.25, 0.75, 0.0, 0.5] for _ in documents]
 
     def query_embed(self, query: str) -> Iterable[Iterable[float]]:
         self.queries.append(query)
+        if self._empty_query:
+            return []
         return [[0.5, 0.5, 0.5, 0.5]]
 
 
 async def test_deterministic_and_fastembed_cpu_adapters() -> None:
     """DeterministicHashEmbedder and FastEmbedCpuAdapter implement EmbedderPort cleanly."""
     hash_embedder = DeterministicHashEmbedder(dimensions=TEST_DIM)
+    assert hash_embedder.model_name == "deterministic-hash-384"
     assert hash_embedder.dimensions == TEST_DIM
     vecs = await hash_embedder.embed_texts(
-        ["database connection timeout", "css margin padding", ""]
+        ["database connection timeout", "css margin padding", "a", ""]
     )
-    assert len(vecs) == EXPECTED_THREE
+    assert len(vecs) == 4  # noqa: PLR2004
     for vec in vecs:
         assert len(vec) == TEST_DIM
         assert math.isclose(math.sqrt(sum(v * v for v in vec)), 1.0, rel_tol=1e-6)
@@ -114,6 +122,8 @@ async def test_deterministic_and_fastembed_cpu_adapters() -> None:
         dimensions=4,
         backend_factory=lambda: fake_backend,
     )
+    assert cpu_adapter.model_name == "BAAI/bge-small-en-v1.5"
+    assert cpu_adapter.dimensions == 4  # noqa: PLR2004
     assert await cpu_adapter.embed_texts([]) == []
     assert fake_backend.embedded_batches == []
 
@@ -122,4 +132,60 @@ async def test_deterministic_and_fastembed_cpu_adapters() -> None:
     assert doc_vecs == [[0.25, 0.75, 0.0, 0.5], [0.25, 0.75, 0.0, 0.5]]
     assert q_vec == [0.5, 0.5, 0.5, 0.5]
     assert fake_backend.embedded_batches == [["alpha", "beta"]]
+    assert fake_backend.batch_sizes == [EXPECTED_BATCH_SIZE]
     assert fake_backend.queries == ["alpha"]
+
+
+async def test_fastembed_cpu_adapter_backend_init_validation_and_zero_norm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover _get_backend CPUExecutionProvider, local_files_only, validation, and zero-norm."""
+    with pytest.raises(ValidationFailedError):
+        FastEmbedCpuAdapter(dimensions=0)
+    with pytest.raises(ValidationFailedError):
+        FastEmbedCpuAdapter(batch_size=0)
+    with pytest.raises(ValidationFailedError):
+        DeterministicHashEmbedder(dimensions=0)
+
+    init_calls: list[dict[str, object]] = []
+
+    def _fake_text_embedding(**kwargs: object) -> _FakeTextEmbeddingBackend:
+        init_calls.append(dict(kwargs))
+        return _FakeTextEmbeddingBackend()
+
+    monkeypatch.setattr(embedder_mod, "TextEmbedding", _fake_text_embedding)
+
+    local_only = FastEmbedCpuAdapter(
+        "custom/embed",
+        dimensions=4,
+        cache_dir=tmp_path / "cache",
+        threads=2,
+        batch_size=16,
+        local_files_only=True,
+    )
+    assert await local_only.embed_texts(["doc"]) == [[0.25, 0.75, 0.0, 0.5]]
+    assert await local_only.embed_query("doc") == [0.5, 0.5, 0.5, 0.5]
+    assert len(init_calls) == 1
+    assert init_calls[0] == {
+        "model_name": "custom/embed",
+        "cache_dir": str(tmp_path / "cache"),
+        "threads": 2,
+        "providers": ["CPUExecutionProvider"],
+        "local_files_only": True,
+    }
+
+    online_fallback = FastEmbedCpuAdapter(local_files_only=False)
+    assert await online_fallback.embed_query("hello") == [0.5, 0.5, 0.5, 0.5]
+    assert len(init_calls) == EXPECTED_TWO
+    assert init_calls[1]["providers"] == ["CPUExecutionProvider"]
+    assert "local_files_only" not in init_calls[1]
+
+    empty_query_adapter = FastEmbedCpuAdapter(
+        backend_factory=lambda: _FakeTextEmbeddingBackend(empty_query=True)
+    )
+    with pytest.raises(RuntimeError, match="no vectors"):
+        await empty_query_adapter.embed_query("empty")
+
+    l2_norm: Callable[[list[float]], list[float]] = vars(embedder_mod)["_l2_normalize"]
+    assert l2_norm([0.0, 0.0, 0.0, 0.0]) == [1.0, 0.0, 0.0, 0.0]

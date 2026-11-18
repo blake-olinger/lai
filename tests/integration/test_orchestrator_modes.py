@@ -132,15 +132,11 @@ class _Stack:
             tool_executor=exe,
         )
 
-    async def seed(self, filename: str, text: str, *, min_tokens: int | None = None) -> FileRecord:
+    async def seed(self, filename: str, text: str) -> FileRecord:
         async def _gen() -> AsyncIterator[bytes]:
             yield text.encode("utf-8")
 
-        rec = await self.ingest.ingest_upload("prj_1", filename, "text/plain", _gen())
-        if min_tokens is not None and rec.token_count < min_tokens:
-            rec = rec.model_copy(update={"token_count": min_tokens})
-            await self.files.upsert_file(rec)
-        return rec
+        return await self.ingest.ingest_upload("prj_1", filename, "text/plain", _gen())
 
 
 @asynccontextmanager
@@ -267,9 +263,13 @@ async def test_direct_mode_and_stateless_turn(tmp_path: Path) -> None:
 async def test_retrieval_mode_with_read_file_lines_tool_call(tmp_path: Path) -> None:
     """RETRIEVAL executes read_file_lines via GuardedToolExecutor and cites lines."""
     async with _open_stack(tmp_path, budget=256) as s:
-        rec = await s.seed(
-            "db.py", "def connect():\n    raise TimeoutError('db timeout')\n", min_tokens=4000
+        helpers = "\n".join(
+            f"def helper_{i}(value: int) -> int:\n    return value + {i}" for i in range(1, 35)
         )
+        rec = await s.seed(
+            "db.py", f"def connect():\n    raise TimeoutError('db timeout')\n\n{helpers}\n"
+        )
+        assert rec.token_count > s.settings.direct_file_budget_tokens
         step = 0
 
         def _stream(req: InferenceRequest) -> list[InferenceChunk]:
@@ -306,9 +306,11 @@ async def test_map_reduce_mode_multiple_leases_and_unified_synthesis(tmp_path: P
     """MAP_REDUCE emits map_window progress, uses MAP_REDUCE leases, and synthesizes one answer."""
     async with _open_stack(tmp_path, budget=256) as s:
         lines = [
-            f"2026-11-17T10:00:{i:02d}Z ERROR worker_{i} upstream timeout" for i in range(1, 35)
+            f"2026-11-17T10:00:{i:02d}Z ERROR worker_{i} upstream timeout connecting to db pool"
+            for i in range(1, 35)
         ]
-        rec = await s.seed("cluster.log", "\n".join(lines), min_tokens=5000)
+        rec = await s.seed("cluster.log", "\n".join(lines))
+        assert rec.token_count > s.settings.direct_file_budget_tokens
 
         def _complete(req: InferenceRequest) -> InferenceResponse:
             assert req.enable_thinking is False
