@@ -10,9 +10,10 @@ if TYPE_CHECKING:
 
     from lai.domain.auth import ApiKeyRecord
     from lai.domain.chat import Message, Session
+    from lai.domain.client_apps import ClientAppRecord
     from lai.domain.files import FileChunk, FileRecord, ScoredChunk
     from lai.domain.projects import Project
-    from lai.domain.tools import ToolApprovalRecord, ToolAuditRecord
+    from lai.domain.tools import ApprovalStatus, ToolApprovalRecord, ToolAuditRecord
 
 
 @runtime_checkable
@@ -41,6 +42,31 @@ class ApiKeyRepositoryPort(Protocol):
 
     async def revoke(self, key_id: str, revoked_at: datetime) -> bool:
         """Mark an API key as revoked, returning True if found."""
+        ...
+
+
+@runtime_checkable
+class ClientAppRepositoryPort(Protocol):
+    """Persistence contract for registered external client applications."""
+
+    async def create(self, record: ClientAppRecord) -> ClientAppRecord:
+        """Persist a new client application record."""
+        ...
+
+    async def get_by_id(self, app_id: str) -> ClientAppRecord | None:
+        """Fetch a client application record by ID."""
+        ...
+
+    async def list_all(self) -> list[ClientAppRecord]:
+        """List all persisted client application records."""
+        ...
+
+    async def touch_last_used(self, app_id: str, used_at: datetime) -> None:
+        """Update the last_used_at timestamp for a client application."""
+        ...
+
+    async def revoke(self, app_id: str, revoked_at: datetime) -> bool:
+        """Mark a client application as revoked, returning True if found."""
         ...
 
 
@@ -175,6 +201,15 @@ class ToolAuditRepositoryPort(Protocol):
 
     async def update_approval(self, record: ToolApprovalRecord) -> ToolApprovalRecord:
         """Persist an updated approval decision state."""
+        ...
+
+    async def transition_approval_status(
+        self,
+        record: ToolApprovalRecord,
+        *,
+        expected_status: ApprovalStatus,
+    ) -> bool:
+        """Atomically update approval state only when current status matches expected_status."""
         ...
 
     async def record_audit(self, record: ToolAuditRecord) -> ToolAuditRecord:

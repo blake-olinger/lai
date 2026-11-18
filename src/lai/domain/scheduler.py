@@ -17,7 +17,6 @@ class JobPriority(IntEnum):
     INTERACTIVE = 10
     APPROVAL_RESUME = 20
     MAP_REDUCE = 30
-    BACKGROUND_INDEX = 40
 
 
 class SpoolerSnapshot(StrictModel):

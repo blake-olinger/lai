@@ -11,6 +11,7 @@ from lai.domain.auth import ApiScope
 from lai.domain.errors import AuthorizationError
 from lai.domain.files import FileChunk, FileKind, FileRecord, FileStatus, ScoredChunk
 from lai.domain.tools import (
+    ApprovalStatus,
     PolicyDecision,
     ToolApprovalRecord,
     ToolAuditRecord,
@@ -105,6 +106,12 @@ class _Audits(ToolAuditRepositoryPort):
 
     async def update_approval(self, record: ToolApprovalRecord) -> ToolApprovalRecord:
         return record
+
+    async def transition_approval_status(
+        self, record: ToolApprovalRecord, *, expected_status: ApprovalStatus
+    ) -> bool:
+        del record, expected_status
+        return True
 
     async def record_audit(self, record: ToolAuditRecord) -> ToolAuditRecord:
         self.audits.append(record)

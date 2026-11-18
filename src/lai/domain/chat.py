@@ -10,6 +10,7 @@ from pydantic import Field
 
 from lai.domain.base import StrictModel, utc_now
 from lai.domain.ids import new_message_id, new_session_id
+from lai.domain.tools import PermissionTier, ToolSpec
 
 
 class MessageRole(StrEnum):
@@ -49,6 +50,14 @@ class TokenUsage(StrictModel):
     total_tokens: int = Field(default=0, ge=0)
 
 
+class InferenceToolCall(StrictModel):
+    """Tool invocation emitted by the inference model."""
+
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    arguments_json: str
+
+
 class Message(StrictModel):
     """Persisted message within a chat session."""
 
@@ -59,6 +68,7 @@ class Message(StrictModel):
     content: str
     thinking: str | None = None
     citations: tuple[Citation, ...] = ()
+    tool_calls: tuple[InferenceToolCall, ...] = ()
     tool_call_id: str | None = None
     tool_name: str | None = None
     usage: TokenUsage | None = None
@@ -93,6 +103,21 @@ class TurnInput(StrictModel):
     system_prompt: str | None = None
     prior_messages: tuple[Message, ...] = ()
     extra_guardrail_prompts: tuple[str, ...] = ()
+    client_tools: tuple[ToolSpec, ...] = ()
+    client_app_id: str | None = None
+    client_allowed_tiers: tuple[PermissionTier, ...] = ()
+
+
+class ClientToolCallEvent(StrictModel):
+    """Event emitted when a client-executed tool invocation pauses for caller execution."""
+
+    event_type: Literal["client_tool_call"] = "client_tool_call"
+    approval_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1)
+    arguments_json: str
+    requires_approval: bool
+    expires_at: datetime | None = None
 
 
 class TurnOutput(StrictModel):
@@ -104,6 +129,7 @@ class TurnOutput(StrictModel):
     citations: tuple[Citation, ...] = ()
     usage: TokenUsage
     pending_approval_id: str | None = None
+    pending_client_tool_call: ClientToolCallEvent | None = None
     guardrail_blocked: bool = False
     guardrail_policy: str | None = None
 
@@ -162,6 +188,7 @@ OrchestratorEvent = Annotated[
     | ThinkingDeltaEvent
     | ContentDeltaEvent
     | ApprovalRequiredEvent
+    | ClientToolCallEvent
     | TurnCompletedEvent,
     Field(discriminator="event_type"),
 ]

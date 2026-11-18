@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from lai.api.schemas.client_apps import (
+    ClientAppListResponse,
+    ClientAppResponse,
+    CreateClientAppRequest,
+    CreatedClientAppResponse,
+)
 from lai.api.schemas.common import (
     AlertsListResponse,
     DeleteResponse,
@@ -36,6 +42,10 @@ from lai.api.schemas.tools import ResolveApprovalRequest, ToolListResponse
 
 __all__ = [
     "AlertsListResponse",
+    "ClientAppListResponse",
+    "ClientAppResponse",
+    "CreateClientAppRequest",
+    "CreatedClientAppResponse",
     "DeleteResponse",
     "ErrorDetail",
     "ErrorResponse",

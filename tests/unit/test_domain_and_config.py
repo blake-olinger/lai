@@ -20,52 +20,14 @@ from lai.config.profiles import (
     get_model_profile,
 )
 from lai.config.settings import LaiSettings, load_settings
-from lai.domain import (
-    ApiScope,
-    AuthMethod,
-    AuthPrincipal,
-    RequestCredentials,
-)
+from lai.domain import ApiScope, AuthMethod, AuthPrincipal, RequestCredentials
+from lai.domain import errors as derr
+from lai.domain import ids as did
 from lai.domain.base import MutableStateModel, StrictModel, utc_now
-from lai.domain.errors import (
-    AuthenticationError,
-    AuthorizationError,
-    ClientDisconnectedError,
-    InferenceBackendError,
-    LaiError,
-    NotFoundError,
-    PayloadTooLargeError,
-    QueueFullError,
-    RateLimitExceededError,
-    ToolApprovalRequiredError,
-    ValidationFailedError,
-)
-from lai.domain.ids import (
-    API_KEY_ID_PREFIX,
-    APPROVAL_ID_PREFIX,
-    AUDIT_ID_PREFIX,
-    CHUNK_ID_PREFIX,
-    FILE_ID_PREFIX,
-    JOB_ID_PREFIX,
-    MESSAGE_ID_PREFIX,
-    PROJECT_ID_PREFIX,
-    SESSION_ID_PREFIX,
-    generate_prefixed_id,
-    new_api_key_id,
-    new_approval_id,
-    new_audit_id,
-    new_chunk_id,
-    new_file_id,
-    new_job_id,
-    new_message_id,
-    new_project_id,
-    new_session_id,
-    validate_prefixed_id,
-)
 from lai.domain.inference import ModelProfile
 from lai.domain.projects import CreateProjectInput, Project
 from lai.domain.scheduler import JobPriority, LeaseRequest, SpoolerSnapshot
-from lai.domain.tools import ToolExecutionContext
+from lai.domain.tools import PermissionTier, ToolExecutionContext
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -134,7 +96,7 @@ def test_strict_model_forbids_extra_and_is_immutable() -> None:
     """StrictModel subclasses reject extra keys and forbid post-init mutation."""
     project = Project(name="alpha")
     assert isinstance(project, StrictModel)
-    assert project.id.startswith(PROJECT_ID_PREFIX)
+    assert project.id.startswith(did.PROJECT_ID_PREFIX)
 
     with pytest.raises(ValidationError):
         CreateProjectInput.model_validate({"name": "beta", "unknown_field": 123})
@@ -161,57 +123,76 @@ def test_utc_now_is_timezone_aware_utc() -> None:
 def test_prefixed_id_generators_and_validation() -> None:
     """All ID helpers produce expected prefixes and validate non-empty suffixes."""
     pairs = [
-        (new_project_id(), PROJECT_ID_PREFIX),
-        (new_session_id(), SESSION_ID_PREFIX),
-        (new_file_id(), FILE_ID_PREFIX),
-        (new_chunk_id(), CHUNK_ID_PREFIX),
-        (new_message_id(), MESSAGE_ID_PREFIX),
-        (new_api_key_id(), API_KEY_ID_PREFIX),
-        (new_job_id(), JOB_ID_PREFIX),
-        (new_approval_id(), APPROVAL_ID_PREFIX),
-        (new_audit_id(), AUDIT_ID_PREFIX),
+        (did.new_project_id(), did.PROJECT_ID_PREFIX),
+        (did.new_session_id(), did.SESSION_ID_PREFIX),
+        (did.new_file_id(), did.FILE_ID_PREFIX),
+        (did.new_chunk_id(), did.CHUNK_ID_PREFIX),
+        (did.new_message_id(), did.MESSAGE_ID_PREFIX),
+        (did.new_api_key_id(), did.API_KEY_ID_PREFIX),
+        (did.new_job_id(), did.JOB_ID_PREFIX),
+        (did.new_approval_id(), did.APPROVAL_ID_PREFIX),
+        (did.new_audit_id(), did.AUDIT_ID_PREFIX),
+        (did.new_alert_id(), did.ALERT_ID_PREFIX),
+        (did.new_client_app_id(), did.CLIENT_APP_ID_PREFIX),
     ]
+    assert did.CLIENT_APP_ID_PREFIX in did.ALL_ID_PREFIXES
+    assert len(pairs) == len(did.ALL_ID_PREFIXES)
     seen: set[str] = set()
     for generated, prefix in pairs:
         assert generated.startswith(prefix)
         assert len(generated) > len(prefix)
-        assert validate_prefixed_id(generated, prefix) == generated
+        assert did.validate_prefixed_id(generated, prefix) == generated
         seen.add(generated)
     assert len(seen) == len(pairs)
 
     for bad_prefix in ("bad", ""):
         with pytest.raises(ValueError, match="prefix"):
-            generate_prefixed_id(bad_prefix)
+            did.generate_prefixed_id(bad_prefix)
 
     for bad_id in ("prj_", "ses_abc"):
         with pytest.raises(ValueError, match="Expected identifier"):
-            validate_prefixed_id(bad_id, "prj_")
+            did.validate_prefixed_id(bad_id, "prj_")
 
 
 def test_error_hierarchy_codes_and_statuses() -> None:
     """Domain error classes carry distinct codes, HTTP statuses, and metadata."""
-    approval_err = ToolApprovalRequiredError(
+    approval_err = derr.ToolApprovalRequiredError(
         "needs approval", approval_id="apr_1", tool_name="exec"
     )
-    expected: list[tuple[LaiError, int, str]] = [
-        (AuthenticationError("bad token"), 401, "authentication_failed"),
-        (AuthorizationError("forbidden"), 403, "authorization_denied"),
-        (RateLimitExceededError("slow down", retry_after_seconds=5.0), 429, "rate_limit_exceeded"),
-        (QueueFullError("busy"), 503, "queue_full"),
-        (NotFoundError("missing"), 404, "not_found"),
-        (ValidationFailedError("invalid"), 422, "validation_failed"),
-        (PayloadTooLargeError("too big"), 413, "payload_too_large"),
-        (InferenceBackendError("llama down"), 502, "inference_backend_error"),
+    dispatch_err = derr.ClientToolDispatchError(
+        "dispatch",
+        approval_id="apr_2",
+        tool_call_id="tc_1",
+        tool_name="run_local",
+        arguments_json="{}",
+        requires_approval=True,
+    )
+    expected: list[tuple[derr.LaiError, int, str]] = [
+        (derr.AuthenticationError("bad token"), 401, "authentication_failed"),
+        (derr.AuthorizationError("forbidden"), 403, "authorization_denied"),
+        (
+            derr.RateLimitExceededError("slow down", retry_after_seconds=5.0),
+            429,
+            "rate_limit_exceeded",
+        ),
+        (derr.QueueFullError("busy"), 503, "queue_full"),
+        (derr.NotFoundError("missing"), 404, "not_found"),
+        (derr.ValidationFailedError("invalid"), 422, "validation_failed"),
+        (derr.PayloadTooLargeError("too big"), 413, "payload_too_large"),
+        (derr.InferenceBackendError("llama down"), 502, "inference_backend_error"),
         (approval_err, 409, "tool_approval_required"),
-        (ClientDisconnectedError("gone"), 499, "client_disconnected"),
+        (dispatch_err, 409, "client_tool_dispatch"),
+        (derr.ClientDisconnectedError("gone"), 499, "client_disconnected"),
     ]
     for err, status_code, code in expected:
-        assert isinstance(err, LaiError)
+        assert isinstance(err, derr.LaiError)
         assert err.status_code == status_code
         assert err.code == code
 
-    assert approval_err.approval_id == "apr_1"
-    assert approval_err.tool_name == "exec"
+    assert (approval_err.approval_id, approval_err.tool_name) == ("apr_1", "exec")
+    assert (dispatch_err.approval_id, dispatch_err.tool_call_id) == ("apr_2", "tc_1")
+    assert (dispatch_err.tool_name, dispatch_err.arguments_json) == ("run_local", "{}")
+    assert (dispatch_err.requires_approval, dispatch_err.expires_at) == (True, None)
 
 
 def test_gemma4_profile_defaults_and_resolution() -> None:
@@ -225,7 +206,7 @@ def test_gemma4_profile_defaults_and_resolution() -> None:
     custom = ModelProfile(name="custom", hf_repo="example/model", hf_filename="model.gguf")
     assert get_model_profile("custom", custom_profiles={"custom": custom}) == custom
 
-    with pytest.raises(NotFoundError):
+    with pytest.raises(derr.NotFoundError):
         get_model_profile("nonexistent-profile")
 
 
@@ -255,12 +236,12 @@ def test_settings_defaults_yaml_and_env_precedence(
     assert loaded.rate_limit_rpm == YAML_RATE_LIMIT
     assert load_settings(cfg_file, port=OVERRIDDEN_PORT_ARG).port == OVERRIDDEN_PORT_ARG
 
-    with pytest.raises(ValidationFailedError):
+    with pytest.raises(derr.ValidationFailedError):
         load_settings(tmp_path / "missing.yaml")
 
     bad_root = tmp_path / "bad.yaml"
     bad_root.write_text("- not-a-mapping\n", encoding="utf-8")
-    with pytest.raises(ValidationFailedError):
+    with pytest.raises(derr.ValidationFailedError):
         load_settings(bad_root)
 
 
@@ -287,7 +268,7 @@ def test_pluggable_auth_scopes_credentials_and_context_fields() -> None:
         AuthMethod.LOCAL_CLI,
     }
 
-    sample_bearer = new_job_id()
+    sample_bearer = did.new_job_id()
     creds = RequestCredentials(
         authorization_scheme="Bearer",
         bearer_token=sample_bearer,
@@ -314,9 +295,22 @@ def test_pluggable_auth_scopes_credentials_and_context_fields() -> None:
         principal_id=principal.principal_id,
         principal_scopes=principal.scopes,
         allowed_file_ids=("fil_1", "fil_2"),
+        client_app_id="app_1",
+        client_allowed_tiers=(PermissionTier.READ,),
+        tool_call_id="tc_1",
     )
     assert ctx.principal_scopes == (ApiScope.CHAT_READ, ApiScope.TOOLS_SAFE)
     assert ctx.allowed_file_ids == ("fil_1", "fil_2")
+    assert (ctx.client_app_id, ctx.client_allowed_tiers, ctx.tool_call_id) == (
+        "app_1",
+        (PermissionTier.READ,),
+        "tc_1",
+    )
+    assert set(JobPriority) == {
+        JobPriority.INTERACTIVE,
+        JobPriority.APPROVAL_RESUME,
+        JobPriority.MAP_REDUCE,
+    }
 
     lease = LeaseRequest(session_id="ses_1", project_id="prj_1")
     assert lease.principal_id == "anonymous"

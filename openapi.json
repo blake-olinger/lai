@@ -157,6 +157,23 @@
         "title": "AlertsListResponse",
         "type": "object"
       },
+      "ApiScope": {
+        "description": "Fine-grained permission scopes granted to API keys and principals.",
+        "enum": [
+          "projects:read",
+          "projects:write",
+          "files:read",
+          "files:write",
+          "chat:read",
+          "chat:write",
+          "tools:safe",
+          "tools:exec",
+          "tools:approve",
+          "admin"
+        ],
+        "title": "ApiScope",
+        "type": "string"
+      },
       "ApprovalStatus": {
         "description": "Lifecycle status of an explicit human tool approval request.",
         "enum": [
@@ -333,6 +350,62 @@
           "filename"
         ],
         "title": "Citation",
+        "type": "object"
+      },
+      "ClientToolCallEvent": {
+        "additionalProperties": false,
+        "description": "Event emitted when a client-executed tool invocation pauses for caller execution.",
+        "properties": {
+          "approval_id": {
+            "minLength": 1,
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "arguments_json": {
+            "title": "Arguments Json",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "client_tool_call",
+            "default": "client_tool_call",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "requires_approval": {
+            "title": "Requires Approval",
+            "type": "boolean"
+          },
+          "tool_call_id": {
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          },
+          "tool_name": {
+            "minLength": 1,
+            "title": "Tool Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "tool_call_id",
+          "tool_name",
+          "arguments_json",
+          "requires_approval"
+        ],
+        "title": "ClientToolCallEvent",
         "type": "object"
       },
       "CodeFileSummary": {
@@ -800,13 +873,39 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "InferenceToolCall": {
+        "additionalProperties": false,
+        "description": "Tool invocation emitted by the inference model.",
+        "properties": {
+          "arguments_json": {
+            "title": "Arguments Json",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "arguments_json"
+        ],
+        "title": "InferenceToolCall",
+        "type": "object"
+      },
       "JobPriority": {
         "description": "Priority order for inference spooler scheduling (lower runs first).",
         "enum": [
           10,
           20,
-          30,
-          40
+          30
         ],
         "title": "JobPriority",
         "type": "integer"
@@ -951,6 +1050,14 @@
               }
             ],
             "title": "Tool Call Id"
+          },
+          "tool_calls": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/InferenceToolCall"
+            },
+            "title": "Tool Calls",
+            "type": "array"
           },
           "tool_name": {
             "anyOf": [
@@ -1894,9 +2001,28 @@
         "additionalProperties": false,
         "description": "Persisted approval gate record for a high-risk tool call.",
         "properties": {
+          "allowed_file_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed File Ids",
+            "type": "array"
+          },
           "arguments_json": {
             "title": "Arguments Json",
             "type": "string"
+          },
+          "client_app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client App Id"
           },
           "created_at": {
             "format": "date-time",
@@ -1937,12 +2063,46 @@
             ],
             "title": "Decision Note"
           },
+          "execution_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_target": {
+            "$ref": "#/components/schemas/ToolExecutionTarget",
+            "default": "server_attachment"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
           "id": {
             "title": "Id",
             "type": "string"
           },
           "permission_tier": {
             "$ref": "#/components/schemas/PermissionTier"
+          },
+          "principal_scopes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiScope"
+            },
+            "title": "Principal Scopes",
+            "type": "array"
           },
           "project_id": {
             "minLength": 1,
@@ -1967,6 +2127,17 @@
             "$ref": "#/components/schemas/ApprovalStatus",
             "default": "pending"
           },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
           "tool_name": {
             "minLength": 1,
             "title": "Tool Name",
@@ -1984,6 +2155,15 @@
         ],
         "title": "ToolApprovalRecord",
         "type": "object"
+      },
+      "ToolExecutionTarget": {
+        "description": "Execution plane responsible for running a tool plugin.",
+        "enum": [
+          "server_attachment",
+          "client"
+        ],
+        "title": "ToolExecutionTarget",
+        "type": "string"
       },
       "ToolListResponse": {
         "additionalProperties": false,
@@ -2009,6 +2189,54 @@
         "title": "ToolListResponse",
         "type": "object"
       },
+      "ToolResult": {
+        "additionalProperties": false,
+        "description": "Normalized output returned by a tool execution.",
+        "properties": {
+          "duration_ms": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Duration Ms",
+            "type": "number"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "output": {
+            "title": "Output",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "tool_name": {
+            "minLength": 1,
+            "title": "Tool Name",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tool_name",
+          "success",
+          "output"
+        ],
+        "title": "ToolResult",
+        "type": "object"
+      },
       "ToolSpec": {
         "additionalProperties": false,
         "description": "Declarative specification for a registered tool plugin.",
@@ -2016,6 +2244,10 @@
           "description": {
             "title": "Description",
             "type": "string"
+          },
+          "execution_target": {
+            "$ref": "#/components/schemas/ToolExecutionTarget",
+            "default": "server_attachment"
           },
           "name": {
             "minLength": 1,
@@ -2094,6 +2326,16 @@
               }
             ],
             "title": "Pending Approval Id"
+          },
+          "pending_client_tool_call": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClientToolCallEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_id": {
             "minLength": 1,

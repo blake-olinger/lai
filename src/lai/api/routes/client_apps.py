@@ -1,0 +1,82 @@
+"""Admin REST routes for managing registered client applications."""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, status
+
+from lai.api.deps import AppServices, get_services, require_scope_dep
+from lai.api.schemas.client_apps import (
+    ClientAppListResponse,
+    ClientAppResponse,
+    CreateClientAppRequest,
+    CreatedClientAppResponse,
+)
+from lai.api.schemas.common import DeleteResponse
+from lai.domain.auth import ApiScope, AuthPrincipal
+from lai.domain.base import utc_now
+from lai.domain.errors import LaiError, NotFoundError
+from lai.ports.repositories import ClientAppRepositoryPort
+from lai.security import generate_client_app
+
+router = APIRouter(prefix="/v1/client-apps", tags=["client-apps"])
+
+
+def _get_client_app_repo(services: AppServices) -> ClientAppRepositoryPort:
+    """Resolve ClientAppRepositoryPort from AppServices cleanly."""
+    repo = getattr(services, "client_app_repo", None)
+    if not isinstance(repo, ClientAppRepositoryPort):
+        msg = "Client app repository is not configured."
+        raise LaiError(msg, code="service_unavailable", status_code=503)
+    return repo
+
+
+@router.post("", response_model=CreatedClientAppResponse, status_code=status.HTTP_201_CREATED)
+async def create_client_app(
+    body: CreateClientAppRequest,
+    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.ADMIN))],
+    services: Annotated[AppServices, Depends(get_services)],
+) -> CreatedClientAppResponse:
+    """Register a new client application and return its one-time plaintext secret."""
+    repo = _get_client_app_repo(services)
+    created = generate_client_app(
+        name=body.name,
+        allowed_tiers=body.allowed_tiers,
+        registered_tools=body.registered_tools,
+        allowed_project_ids=body.allowed_project_ids,
+        expires_at=body.expires_at,
+    )
+    saved = await repo.create(created.record)
+    return CreatedClientAppResponse(
+        app=ClientAppResponse.from_record(saved),
+        client_secret=created.plaintext_secret,
+    )
+
+
+@router.get("", response_model=ClientAppListResponse)
+async def list_client_apps(
+    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.ADMIN))],
+    services: Annotated[AppServices, Depends(get_services)],
+) -> ClientAppListResponse:
+    """List all registered client applications without exposing secret hashes."""
+    repo = _get_client_app_repo(services)
+    records = await repo.list_all()
+    now = utc_now()
+    items = [ClientAppResponse.from_record(record, now=now) for record in records]
+    return ClientAppListResponse(items=items, count=len(items))
+
+
+@router.delete("/{app_id}", response_model=DeleteResponse)
+async def revoke_client_app(
+    app_id: str,
+    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.ADMIN))],
+    services: Annotated[AppServices, Depends(get_services)],
+) -> DeleteResponse:
+    """Revoke an existing client application by ID."""
+    repo = _get_client_app_repo(services)
+    revoked = await repo.revoke(app_id, utc_now())
+    if not revoked:
+        msg = f"Client app {app_id!r} not found."
+        raise NotFoundError(msg, details={"app_id": app_id})
+    return DeleteResponse(id=app_id, deleted=True)

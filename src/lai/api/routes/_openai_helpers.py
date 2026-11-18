@@ -17,6 +17,7 @@ from lai.api.schemas.openai import (
 from lai.config.profiles import get_model_profile
 from lai.domain.chat import (
     ApprovalRequiredEvent,
+    ClientToolCallEvent,
     ContentDeltaEvent,
     ContextMode,
     KeepaliveEvent,
@@ -272,6 +273,14 @@ async def format_openai_sse(
             sent_role = True
             sent_content = True
             notice = f"\n[Tool approval required: {event.approval_id} ({event.tool_name})]\n"
+            yield make_chunk_sse(
+                meta,
+                OpenAIDeltaPayload(role=role_val, content=notice),
+            )
+        elif isinstance(event, ClientToolCallEvent):
+            sent_role = True
+            sent_content = True
+            notice = f"\n[Client tool call: {event.tool_call_id} ({event.tool_name})]\n"
             yield make_chunk_sse(
                 meta,
                 OpenAIDeltaPayload(role=role_val, content=notice),

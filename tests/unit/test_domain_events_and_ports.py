@@ -10,8 +10,10 @@ from pydantic import TypeAdapter, ValidationError
 from lai.domain.auth import ApiKeyRecord, ApiScope, AuthMethod, AuthPrincipal
 from lai.domain.chat import (
     ApprovalRequiredEvent,
+    ClientToolCallEvent,
     ContentDeltaEvent,
     ContextMode,
+    InferenceToolCall,
     KeepaliveEvent,
     Message,
     MessageRole,
@@ -35,7 +37,7 @@ from lai.domain.files import (
     ScoredChunk,
 )
 from lai.domain.scheduler import JobPriority, LeaseRequest, SpoolerSnapshot
-from lai.domain.tools import PermissionTier, ToolSpec
+from lai.domain.tools import PermissionTier, ToolExecutionTarget, ToolSpec
 from lai.ports import (
     AuthenticatorPort,
     AuthProviderPort,
@@ -45,6 +47,7 @@ from lai.ports.inference import InferenceProviderPort, InferenceSupervisorPort
 from lai.ports.orchestrator import OrchestratorPort
 from lai.ports.repositories import (
     ApiKeyRepositoryPort,
+    ClientAppRepositoryPort,
     FileRepositoryPort,
     ProjectRepositoryPort,
     SessionRepositoryPort,
@@ -100,8 +103,15 @@ def test_auth_models_scope_and_expiry_checks() -> None:
 
 
 def test_orchestrator_event_discriminated_union() -> None:
-    """OrchestratorEvent validates all six event variants cleanly."""
+    """OrchestratorEvent validates all seven event variants cleanly."""
     adapter: TypeAdapter[OrchestratorEvent] = TypeAdapter(OrchestratorEvent)
+    client_ev = ClientToolCallEvent(
+        approval_id="apr_1",
+        tool_call_id="tc_1",
+        tool_name="local_exec",
+        arguments_json='{"cmd":"ls"}',
+        requires_approval=True,
+    )
     turn_output = TurnOutput(
         session_id="ses_1",
         message=Message(
@@ -109,9 +119,11 @@ def test_orchestrator_event_discriminated_union() -> None:
             project_id="prj_1",
             role=MessageRole.ASSISTANT,
             content="done",
+            tool_calls=(InferenceToolCall(id="tc_1", name="local_exec", arguments_json="{}"),),
         ),
         context_mode_used=ContextMode.DIRECT,
         usage=TokenUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+        pending_client_tool_call=client_ev,
     )
     events: list[OrchestratorEvent] = [
         KeepaliveEvent(),
@@ -124,6 +136,7 @@ def test_orchestrator_event_discriminated_union() -> None:
             arguments_preview="{}",
             reason="write tier",
         ),
+        client_ev,
         TurnCompletedEvent(output=turn_output),
     ]
     for event in events:
@@ -180,12 +193,19 @@ def test_file_and_scheduler_domain_models() -> None:
         parameters_schema={"type": "object"},
     )
     assert spec.requires_approval_by_default is False
+    assert spec.execution_target is ToolExecutionTarget.SERVER_ATTACHMENT
     assert LeaseRequest(session_id="ses_1", project_id="prj_1").priority == JobPriority.INTERACTIVE
     assert SpoolerSnapshot().max_queued_jobs == DEFAULT_MAX_QUEUED_JOBS
-    assert (
-        TurnInput(session_id="ses_1", project_id="prj_1", user_message="Hi").context_mode
-        == ContextMode.AUTO
+    turn_in = TurnInput(
+        session_id="ses_1",
+        project_id="prj_1",
+        user_message="Hi",
+        client_tools=(spec.model_copy(update={"execution_target": ToolExecutionTarget.CLIENT}),),
+        client_app_id="app_1",
+        client_allowed_tiers=(PermissionTier.READ,),
     )
+    assert turn_in.context_mode == ContextMode.AUTO
+    assert turn_in.client_tools[0].execution_target is ToolExecutionTarget.CLIENT
 
 
 def test_ports_are_runtime_checkable_protocols() -> None:
@@ -195,6 +215,7 @@ def test_ports_are_runtime_checkable_protocols() -> None:
         EdgeVerifierPort,
         AuthenticatorPort,
         ApiKeyRepositoryPort,
+        ClientAppRepositoryPort,
         ProjectRepositoryPort,
         SessionRepositoryPort,
         FileRepositoryPort,

@@ -183,7 +183,7 @@ async def test_spooler_preemption_eviction_queue_full_and_log_binding(tmp_path: 
                 await t_mr
             t_fail = asyncio.create_task(
                 hold(
-                    _req("job_bg", session_id="s_bg", priority=JobPriority.BACKGROUND_INDEX),
+                    _req("job_bg", session_id="s_bg", priority=JobPriority.MAP_REDUCE),
                     fail=True,
                 )
             )

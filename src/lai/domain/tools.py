@@ -40,6 +40,13 @@ class ApprovalStatus(StrEnum):
     EXECUTED = "executed"
 
 
+class ToolExecutionTarget(StrEnum):
+    """Execution plane responsible for running a tool plugin."""
+
+    SERVER_ATTACHMENT = "server_attachment"
+    CLIENT = "client"
+
+
 class ToolSpec(StrictModel):
     """Declarative specification for a registered tool plugin."""
 
@@ -49,6 +56,7 @@ class ToolSpec(StrictModel):
     parameters_schema: dict[str, Any] = Field(default_factory=dict)
     requires_approval_by_default: bool = False
     timeout_seconds: float = Field(default=30.0, gt=0.0)
+    execution_target: ToolExecutionTarget = ToolExecutionTarget.SERVER_ATTACHMENT
 
 
 class ToolExecutionContext(StrictModel):
@@ -62,6 +70,9 @@ class ToolExecutionContext(StrictModel):
     workspace_root: str | None = None
     approved_approval_id: str | None = None
     request_id: str | None = None
+    client_app_id: str | None = None
+    client_allowed_tiers: tuple[PermissionTier, ...] = ()
+    tool_call_id: str | None = None
 
 
 class ToolResult(StrictModel):
@@ -91,6 +102,13 @@ class ToolApprovalRecord(StrictModel):
     decision_note: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     decided_at: datetime | None = None
+    execution_target: ToolExecutionTarget = ToolExecutionTarget.SERVER_ATTACHMENT
+    client_app_id: str | None = None
+    tool_call_id: str | None = None
+    allowed_file_ids: tuple[str, ...] = ()
+    principal_scopes: tuple[ApiScope, ...] = ()
+    expires_at: datetime | None = None
+    execution_result: ToolResult | None = None
 
 
 class ToolAuditRecord(StrictModel):

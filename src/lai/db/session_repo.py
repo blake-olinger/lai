@@ -6,7 +6,14 @@ import json
 from typing import TYPE_CHECKING, cast
 
 from lai.db._codecs import clamp_limit, clamp_offset, format_dt, parse_dt
-from lai.domain.chat import Citation, Message, MessageRole, Session, TokenUsage
+from lai.domain.chat import (
+    Citation,
+    InferenceToolCall,
+    Message,
+    MessageRole,
+    Session,
+    TokenUsage,
+)
 from lai.ports.repositories import SessionRepositoryPort
 
 if TYPE_CHECKING:
@@ -17,7 +24,7 @@ if TYPE_CHECKING:
 _SESSION_COLUMNS = "id, project_id, title, model_profile, system_prompt, created_at, updated_at"
 _MESSAGE_COLUMNS = (
     "id, session_id, project_id, role, content, thinking, citations_json, "
-    "tool_call_id, tool_name, usage_json, created_at"
+    "tool_calls_json, tool_call_id, tool_name, usage_json, created_at"
 )
 
 
@@ -38,6 +45,8 @@ def _row_to_message(row: aiosqlite.Row) -> Message:
     """Map a messages SQLite row to a Message domain model."""
     raw_citations = cast("list[object]", json.loads(str(row["citations_json"])))
     citations = tuple(Citation.model_validate(item) for item in raw_citations)
+    raw_tool_calls = cast("list[object]", json.loads(str(row["tool_calls_json"])))
+    tool_calls = tuple(InferenceToolCall.model_validate(item) for item in raw_tool_calls)
     raw_usage = cast("str | None", row["usage_json"])
     usage = TokenUsage.model_validate_json(raw_usage) if raw_usage is not None else None
     return Message(
@@ -48,6 +57,7 @@ def _row_to_message(row: aiosqlite.Row) -> Message:
         content=str(row["content"]),
         thinking=cast("str | None", row["thinking"]),
         citations=citations,
+        tool_calls=tool_calls,
         tool_call_id=cast("str | None", row["tool_call_id"]),
         tool_name=cast("str | None", row["tool_name"]),
         usage=usage,
@@ -116,6 +126,7 @@ class SqliteSessionRepository(SessionRepositoryPort):
         citations_json = json.dumps(
             [citation.model_dump(mode="json") for citation in message.citations]
         )
+        tool_calls_json = json.dumps([tc.model_dump(mode="json") for tc in message.tool_calls])
         usage_json = message.usage.model_dump_json() if message.usage is not None else None
         created_iso = format_dt(message.created_at)
 
@@ -124,8 +135,9 @@ class SqliteSessionRepository(SessionRepositoryPort):
                 """
                 INSERT INTO messages (
                     id, session_id, project_id, role, content, thinking,
-                    citations_json, tool_call_id, tool_name, usage_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    citations_json, tool_calls_json, tool_call_id, tool_name,
+                    usage_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     message.id,
@@ -135,6 +147,7 @@ class SqliteSessionRepository(SessionRepositoryPort):
                     message.content,
                     message.thinking,
                     citations_json,
+                    tool_calls_json,
                     message.tool_call_id,
                     message.tool_name,
                     usage_json,

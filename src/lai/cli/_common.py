@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import typer
 
 from lai.config.settings import LaiSettings, load_settings
-from lai.db import SqliteApiKeyRepository, SqliteDatabase
+from lai.db import SqliteApiKeyRepository, SqliteClientAppRepository, SqliteDatabase
 from lai.domain.errors import LaiError
 
 if TYPE_CHECKING:
@@ -66,5 +66,16 @@ async def open_api_key_repo(db_path: Path) -> AsyncGenerator[SqliteApiKeyReposit
     await db.initialize()
     try:
         yield SqliteApiKeyRepository(db)
+    finally:
+        await db.close()
+
+
+@asynccontextmanager
+async def open_client_app_repo(db_path: Path) -> AsyncGenerator[SqliteClientAppRepository]:
+    """Open and initialize SQLite database and yield SqliteClientAppRepository."""
+    db = SqliteDatabase(db_path)
+    await db.initialize()
+    try:
+        yield SqliteClientAppRepository(db)
     finally:
         await db.close()

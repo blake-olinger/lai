@@ -14,6 +14,7 @@ JOB_ID_PREFIX = "job_"
 APPROVAL_ID_PREFIX = "apr_"
 AUDIT_ID_PREFIX = "aud_"
 ALERT_ID_PREFIX = "alt_"
+CLIENT_APP_ID_PREFIX = "app_"
 
 ALL_ID_PREFIXES: tuple[str, ...] = (
     PROJECT_ID_PREFIX,
@@ -26,6 +27,7 @@ ALL_ID_PREFIXES: tuple[str, ...] = (
     APPROVAL_ID_PREFIX,
     AUDIT_ID_PREFIX,
     ALERT_ID_PREFIX,
+    CLIENT_APP_ID_PREFIX,
 )
 
 
@@ -93,3 +95,8 @@ def new_audit_id() -> str:
 def new_alert_id() -> str:
     """Return a new observability alert identifier."""
     return generate_prefixed_id(ALERT_ID_PREFIX)
+
+
+def new_client_app_id() -> str:
+    """Return a new registered client application identifier."""
+    return generate_prefixed_id(CLIENT_APP_ID_PREFIX)

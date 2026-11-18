@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class LaiError(Exception):
@@ -109,6 +112,33 @@ class ToolApprovalRequiredError(LaiError):
         super().__init__(message, details=details)
         self.approval_id = approval_id
         self.tool_name = tool_name
+
+
+class ClientToolDispatchError(LaiError):
+    """Raised when a tool invocation must be dispatched to the client application."""
+
+    default_code: ClassVar[str] = "client_tool_dispatch"
+    default_status_code: ClassVar[int] = 409
+
+    def __init__(  # noqa: PLR0913
+        self,
+        message: str,
+        *,
+        approval_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        arguments_json: str,
+        requires_approval: bool,
+        expires_at: datetime | None = None,
+        details: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message, details=details)
+        self.approval_id = approval_id
+        self.tool_call_id = tool_call_id
+        self.tool_name = tool_name
+        self.arguments_json = arguments_json
+        self.requires_approval = requires_approval
+        self.expires_at = expires_at
 
 
 class ClientDisconnectedError(LaiError):

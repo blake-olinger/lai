@@ -111,7 +111,7 @@ async def test_fair_queue_and_session_gate_exact_boundaries() -> None:
     assert ("j1" in queue) is False
     assert (_NON_STR_JOB_ID in queue) is False
 
-    req = _lease("j1", priority=JobPriority.BACKGROUND_INDEX)
+    req = _lease("j1", priority=JobPriority.MAP_REDUCE)
     queue.enqueue(req)
     assert queue.is_empty() is False
     assert ("j1" in queue) is True

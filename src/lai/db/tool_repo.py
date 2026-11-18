@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, cast
 
 from lai.db._codecs import clamp_limit, format_dt, format_opt_dt, parse_dt, parse_opt_dt
+from lai.domain.auth import ApiScope
 from lai.domain.errors import NotFoundError
 from lai.domain.tools import (
     ApprovalStatus,
@@ -12,6 +14,8 @@ from lai.domain.tools import (
     PolicyDecision,
     ToolApprovalRecord,
     ToolAuditRecord,
+    ToolExecutionTarget,
+    ToolResult,
 )
 from lai.ports.repositories import ToolAuditRepositoryPort
 
@@ -22,7 +26,9 @@ if TYPE_CHECKING:
 
 _APPROVAL_COLUMNS = (
     "id, project_id, session_id, tool_name, arguments_json, permission_tier, reason, "
-    "status, requested_by, decided_by, decision_note, created_at, decided_at"
+    "status, requested_by, decided_by, decision_note, created_at, decided_at, "
+    "execution_target, client_app_id, tool_call_id, allowed_file_ids_json, "
+    "principal_scopes_json, expires_at, execution_result_json"
 )
 _AUDIT_COLUMNS = (
     "id, project_id, session_id, principal_id, tool_name, permission_tier, "
@@ -33,6 +39,12 @@ _AUDIT_COLUMNS = (
 
 def _row_to_approval(row: aiosqlite.Row) -> ToolApprovalRecord:
     """Map a tool_approvals SQLite row to a ToolApprovalRecord domain model."""
+    raw_file_ids = cast("list[object]", json.loads(str(row["allowed_file_ids_json"])))
+    raw_scopes = cast("list[str]", json.loads(str(row["principal_scopes_json"])))
+    raw_result = cast("str | None", row["execution_result_json"])
+    execution_result = (
+        ToolResult.model_validate_json(raw_result) if raw_result is not None else None
+    )
     return ToolApprovalRecord(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -47,6 +59,30 @@ def _row_to_approval(row: aiosqlite.Row) -> ToolApprovalRecord:
         decision_note=cast("str | None", row["decision_note"]),
         created_at=parse_dt(str(row["created_at"])),
         decided_at=parse_opt_dt(cast("str | None", row["decided_at"])),
+        execution_target=ToolExecutionTarget(str(row["execution_target"])),
+        client_app_id=cast("str | None", row["client_app_id"]),
+        tool_call_id=cast("str | None", row["tool_call_id"]),
+        allowed_file_ids=tuple(str(item) for item in raw_file_ids),
+        principal_scopes=tuple(ApiScope(item) for item in raw_scopes),
+        expires_at=parse_opt_dt(cast("str | None", row["expires_at"])),
+        execution_result=execution_result,
+    )
+
+
+def _approval_mutation_params(
+    record: ToolApprovalRecord,
+) -> tuple[str, str | None, str | None, str | None, str | None, str | None]:
+    """Build parameter tuple for updating mutable approval decision and result columns."""
+    result_json = (
+        record.execution_result.model_dump_json() if record.execution_result is not None else None
+    )
+    return (
+        record.status.value,
+        record.decided_by,
+        record.decision_note,
+        format_opt_dt(record.decided_at),
+        format_opt_dt(record.expires_at),
+        result_json,
     )
 
 
@@ -78,13 +114,22 @@ class SqliteToolAuditRepository(ToolAuditRepositoryPort):
 
     async def create_approval(self, record: ToolApprovalRecord) -> ToolApprovalRecord:
         """Persist a pending tool approval request."""
+        file_ids_json = json.dumps(list(record.allowed_file_ids))
+        scopes_json = json.dumps([scope.value for scope in record.principal_scopes])
+        result_json = (
+            record.execution_result.model_dump_json()
+            if record.execution_result is not None
+            else None
+        )
         await self._db.execute_write(
             """
             INSERT INTO tool_approvals (
                 id, project_id, session_id, tool_name, arguments_json,
                 permission_tier, reason, status, requested_by,
-                decided_by, decision_note, created_at, decided_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                decided_by, decision_note, created_at, decided_at,
+                execution_target, client_app_id, tool_call_id, allowed_file_ids_json,
+                principal_scopes_json, expires_at, execution_result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 record.id,
@@ -100,6 +145,13 @@ class SqliteToolAuditRepository(ToolAuditRepositoryPort):
                 record.decision_note,
                 format_dt(record.created_at),
                 format_opt_dt(record.decided_at),
+                record.execution_target.value,
+                record.client_app_id,
+                record.tool_call_id,
+                file_ids_json,
+                scopes_json,
+                format_opt_dt(record.expires_at),
+                result_json,
             ),
         )
         return record
@@ -132,21 +184,34 @@ class SqliteToolAuditRepository(ToolAuditRepositoryPort):
         updated = await self._db.execute_write(
             """
             UPDATE tool_approvals
-            SET status = ?, decided_by = ?, decision_note = ?, decided_at = ?
+            SET status = ?, decided_by = ?, decision_note = ?, decided_at = ?,
+                expires_at = ?, execution_result_json = ?
             WHERE id = ?;
             """,
-            (
-                record.status.value,
-                record.decided_by,
-                record.decision_note,
-                format_opt_dt(record.decided_at),
-                record.id,
-            ),
+            (*_approval_mutation_params(record), record.id),
         )
         if updated == 0:
             msg = f"Tool approval record not found: {record.id}"
             raise NotFoundError(msg, details={"approval_id": record.id})
         return record
+
+    async def transition_approval_status(
+        self,
+        record: ToolApprovalRecord,
+        *,
+        expected_status: ApprovalStatus,
+    ) -> bool:
+        """Atomically update approval state only when current status matches expected_status."""
+        updated = await self._db.execute_write(
+            """
+            UPDATE tool_approvals
+            SET status = ?, decided_by = ?, decision_note = ?, decided_at = ?,
+                expires_at = ?, execution_result_json = ?
+            WHERE id = ? AND status = ?;
+            """,
+            (*_approval_mutation_params(record), record.id, expected_status.value),
+        )
+        return updated == 1
 
     async def record_audit(self, record: ToolAuditRecord) -> ToolAuditRecord:
         """Append an immutable tool execution audit entry."""

@@ -7,7 +7,18 @@ from typing import Any
 from pydantic import Field
 
 from lai.domain.base import StrictModel
-from lai.domain.chat import MessageRole, TokenUsage
+from lai.domain.chat import InferenceToolCall, MessageRole, TokenUsage
+
+__all__ = [
+    "BackendHealth",
+    "InferenceChunk",
+    "InferenceMessage",
+    "InferenceRequest",
+    "InferenceResponse",
+    "InferenceToolCall",
+    "InferenceToolDef",
+    "ModelProfile",
+]
 
 
 class ModelProfile(StrictModel):
@@ -31,14 +42,6 @@ class ModelProfile(StrictModel):
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
     max_tokens: int = Field(default=4096, ge=1)
-
-
-class InferenceToolCall(StrictModel):
-    """Tool invocation emitted by the inference model."""
-
-    id: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    arguments_json: str
 
 
 class InferenceMessage(StrictModel):

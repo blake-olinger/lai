@@ -22,6 +22,25 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS client_apps (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        secret_prefix TEXT NOT NULL,
+        secret_hash TEXT NOT NULL UNIQUE,
+        allowed_tiers_json TEXT NOT NULL,
+        registered_tools_json TEXT NOT NULL DEFAULT '[]',
+        allowed_project_ids_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        last_used_at TEXT,
+        expires_at TEXT,
+        revoked_at TEXT
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_client_apps_active
+        ON client_apps(revoked_at, created_at DESC);
+    """,
+    """
     CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -56,6 +75,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         content TEXT NOT NULL,
         thinking TEXT,
         citations_json TEXT NOT NULL DEFAULT '[]',
+        tool_calls_json TEXT NOT NULL DEFAULT '[]',
         tool_call_id TEXT,
         tool_name TEXT,
         usage_json TEXT,
@@ -138,7 +158,14 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         decided_by TEXT,
         decision_note TEXT,
         created_at TEXT NOT NULL,
-        decided_at TEXT
+        decided_at TEXT,
+        execution_target TEXT NOT NULL DEFAULT 'server_attachment',
+        client_app_id TEXT,
+        tool_call_id TEXT,
+        allowed_file_ids_json TEXT NOT NULL DEFAULT '[]',
+        principal_scopes_json TEXT NOT NULL DEFAULT '[]',
+        expires_at TEXT,
+        execution_result_json TEXT
     );
     """,
     """
@@ -170,7 +197,70 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
+_MESSAGES_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    (
+        "tool_calls_json",
+        "ALTER TABLE messages ADD COLUMN tool_calls_json TEXT NOT NULL DEFAULT '[]';",
+    ),
+)
+
+_TOOL_APPROVALS_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    (
+        "execution_target",
+        "ALTER TABLE tool_approvals ADD COLUMN "
+        "execution_target TEXT NOT NULL DEFAULT 'server_attachment';",
+    ),
+    (
+        "client_app_id",
+        "ALTER TABLE tool_approvals ADD COLUMN client_app_id TEXT;",
+    ),
+    (
+        "tool_call_id",
+        "ALTER TABLE tool_approvals ADD COLUMN tool_call_id TEXT;",
+    ),
+    (
+        "allowed_file_ids_json",
+        "ALTER TABLE tool_approvals ADD COLUMN allowed_file_ids_json TEXT NOT NULL DEFAULT '[]';",
+    ),
+    (
+        "principal_scopes_json",
+        "ALTER TABLE tool_approvals ADD COLUMN principal_scopes_json TEXT NOT NULL DEFAULT '[]';",
+    ),
+    (
+        "expires_at",
+        "ALTER TABLE tool_approvals ADD COLUMN expires_at TEXT;",
+    ),
+    (
+        "execution_result_json",
+        "ALTER TABLE tool_approvals ADD COLUMN execution_result_json TEXT;",
+    ),
+)
+
+
+async def _migrate_table_columns(
+    conn: aiosqlite.Connection,
+    pragma_sql: str,
+    migrations: tuple[tuple[str, str], ...],
+) -> None:
+    """Add any missing columns to an existing SQLite table idempotently."""
+    cursor = await conn.execute(pragma_sql)
+    rows = await cursor.fetchall()
+    existing = {str(row[1]) for row in rows}
+    for col_name, alter_sql in migrations:
+        if col_name not in existing:
+            await conn.execute(alter_sql)
+
+
+async def _migrate_existing_tables(conn: aiosqlite.Connection) -> None:
+    """Apply backward-compatible column migrations to pre-existing SQLite databases."""
+    await _migrate_table_columns(conn, "PRAGMA table_info(messages);", _MESSAGES_MIGRATIONS)
+    await _migrate_table_columns(
+        conn, "PRAGMA table_info(tool_approvals);", _TOOL_APPROVALS_MIGRATIONS
+    )
+
+
 async def apply_schema(conn: aiosqlite.Connection) -> None:
-    """Execute all idempotent DDL statements on an open SQLite connection."""
+    """Execute all idempotent DDL statements and column migrations on an open connection."""
     for statement in SCHEMA_STATEMENTS:
         await conn.execute(statement)
+    await _migrate_existing_tables(conn)

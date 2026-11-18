@@ -10,7 +10,9 @@ from lai.domain.auth import (
     CreatedApiKey,
     RequestCredentials,
 )
-from lai.domain.errors import GuardrailBlockedError
+from lai.domain.chat import ClientToolCallEvent, InferenceToolCall
+from lai.domain.client_apps import ClientAppRecord, CreatedClientApp
+from lai.domain.errors import ClientToolDispatchError, GuardrailBlockedError
 from lai.domain.guardrails import (
     GuardrailBlockMode,
     GuardrailConfig,
@@ -34,12 +36,17 @@ __all__ = [
     "ApiScope",
     "AuthMethod",
     "AuthPrincipal",
+    "ClientAppRecord",
+    "ClientToolCallEvent",
+    "ClientToolDispatchError",
     "CreatedApiKey",
+    "CreatedClientApp",
     "GuardrailBlockMode",
     "GuardrailBlockedError",
     "GuardrailConfig",
     "GuardrailDecision",
     "GuardrailVerdict",
+    "InferenceToolCall",
     "LoggingConfig",
     "PromptAuditEntry",
     "RequestCredentials",

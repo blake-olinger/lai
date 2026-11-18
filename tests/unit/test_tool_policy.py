@@ -91,6 +91,15 @@ class _FakeToolAuditRepo(ToolAuditRepositoryPort):
         self.approvals[record.id] = record
         return record
 
+    async def transition_approval_status(
+        self, record: ToolApprovalRecord, *, expected_status: ApprovalStatus
+    ) -> bool:
+        existing = self.approvals.get(record.id)
+        if existing is None or existing.status is not expected_status:
+            return False
+        self.approvals[record.id] = record
+        return True
+
     async def record_audit(self, record: ToolAuditRecord) -> ToolAuditRecord:
         self.audits.append(record)
         return record
@@ -153,18 +162,15 @@ def _cleanup_logging() -> Generator[None]:
 def test_registry_and_port_conformance() -> None:
     """InMemoryToolRegistry registers, replaces, looks up, and lists ToolSpecs."""
     read_v1 = _FakePlugin(_spec("read_a", PermissionTier.READ))
-    read_v2 = _FakePlugin(
-        ToolSpec(name="read_a", description="v2", permission_tier=PermissionTier.READ)
-    )
+    read_v2 = _FakePlugin(_spec("read_a", PermissionTier.READ))
     registry = InMemoryToolRegistry(plugins=(read_v1,))
     assert isinstance(registry, ToolRegistryPort)
     assert isinstance(DefaultToolPolicy(), ToolPolicyPort)
     assert isinstance(GuardedToolExecutor(registry, _FakeToolAuditRepo()), ToolExecutorPort)
-    assert registry.get("read_a") is read_v1
-    assert registry.get("missing") is None
+    assert (registry.get("read_a"), registry.get("missing")) == (read_v1, None)
     registry.register(read_v2)
     assert registry.get("read_a") is read_v2
-    assert [s.description for s in registry.list_specs()] == ["v2"]
+    assert [s.name for s in registry.list_specs()] == ["read_a"]
 
 
 def test_read_and_privileged_tier_policy_matrix() -> None:
@@ -177,19 +183,16 @@ def test_read_and_privileged_tier_policy_matrix() -> None:
         expected = PolicyDecision.ALLOW if scope in read_allowed else PolicyDecision.DENY
         assert policy.evaluate(read_spec, {}, _ctx(scope)) is expected
 
+    deny, req = PolicyDecision.DENY, PolicyDecision.REQUIRE_APPROVAL
     for tier in (PermissionTier.WRITE, PermissionTier.EXEC, PermissionTier.NETWORK):
         gated, ungated = _spec("g", tier, gated=True), _spec("u", tier, gated=False)
         for scope in ApiScope:
             if scope not in {ApiScope.ADMIN, ApiScope.TOOLS_EXEC}:
-                assert policy.evaluate(gated, {}, _ctx(scope, approval_id="a")) is (
-                    PolicyDecision.DENY
-                )
-                assert policy.evaluate(ungated, {}, _ctx(scope)) is PolicyDecision.DENY
+                assert policy.evaluate(gated, {}, _ctx(scope, approval_id="a")) is deny
+                assert policy.evaluate(ungated, {}, _ctx(scope)) is deny
                 continue
-            assert policy.evaluate(gated, {}, _ctx(scope)) is PolicyDecision.REQUIRE_APPROVAL
-            assert policy.evaluate(gated, {}, _ctx(scope, approval_id="  ")) is (
-                PolicyDecision.REQUIRE_APPROVAL
-            )
+            assert policy.evaluate(gated, {}, _ctx(scope)) is req
+            assert policy.evaluate(gated, {}, _ctx(scope, approval_id="  ")) is req
             assert policy.evaluate(gated, {}, _ctx(scope, approval_id="a")) is PolicyDecision.ALLOW
             assert policy.evaluate(ungated, {}, _ctx(scope)) is PolicyDecision.ALLOW
 
@@ -280,14 +283,14 @@ async def test_approval_deny_mismatch_and_fallback_context() -> None:
     )
     await repo.create_approval(rec)
     rid = rec.id
-    for bad_tool, bad_ctx in (
+    for err_tool, err_ctx in (
         ("write_file", _ctx(ApiScope.TOOLS_EXEC, approval_id="apr_missing")),
         ("write_file", _ctx(ApiScope.TOOLS_EXEC, project_id="prj_other", approval_id=rid)),
         ("write_file", _ctx(ApiScope.TOOLS_EXEC, session_id="ses_other", approval_id=rid)),
         ("run_cmd", _ctx(ApiScope.TOOLS_EXEC, approval_id=rid)),
     ):
         with pytest.raises(AuthorizationError):
-            await executor.invoke(bad_tool, {}, bad_ctx)
+            await executor.invoke(err_tool, {}, err_ctx)
 
     ok_res = await executor.invoke("write_file", {}, _ctx(ApiScope.TOOLS_EXEC, approval_id=rid))
     assert ok_res.success is True
