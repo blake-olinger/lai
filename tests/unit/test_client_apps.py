@@ -251,8 +251,10 @@ async def test_admin_client_apps_router_and_schemas(tmp_path: Path) -> None:
                 "allowed_project_ids": ["prj_1"],
             }
             assert (
-                await client.post("/v1/client-apps", headers=user_hdrs, json=payload)
-            ).status_code == S.FORBIDDEN
+                (await client.post("/v1/client-apps", headers=user_hdrs, json=payload)).status_code,
+                (await client.get("/v1/client-apps")).status_code,
+                (await client.get("/v1/client-apps", headers=user_hdrs)).status_code,
+            ) == (S.FORBIDDEN, S.UNAUTHORIZED, S.FORBIDDEN)
 
             r_bad = await client.post(
                 "/v1/client-apps",

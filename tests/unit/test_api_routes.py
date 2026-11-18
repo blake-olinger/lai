@@ -203,6 +203,9 @@ async def test_health_status_alerts_and_files_lifecycle(env: _Env) -> None:
     hdrs = _auth(toks["writer"])
     pid = (await client.post("/v1/projects", headers=hdrs, json={"name": "logs"})).json()["id"]
     assert (await client.get("/v1/projects", headers=hdrs)).json()["count"] == 1
+    assert (await client.get(f"/v1/projects/{pid}", headers=hdrs)).json()["id"] == pid
+    assert (await client.get("/v1/projects/prj_nope", headers=hdrs)).status_code == S.NOT_FOUND
+    assert (await client.delete("/v1/projects/prj_nope", headers=hdrs)).status_code == S.NOT_FOUND
 
     r_up = await client.post(
         "/v1/files?wait=true",
@@ -260,6 +263,7 @@ async def test_sessions_and_openai_compat(env: _Env) -> None:
     assert "event: turn_completed" in r_sse.text
 
     orch.blocked, orch.policy = False, None
+    assert (await client.get("/v1/models")).status_code == S.UNAUTHORIZED
     models = (await client.get("/v1/models", headers=hdrs)).json()["data"]
     assert "gemma4-26b-a4b" in [m["id"] for m in models]
     oai_hdrs = {**hdrs, "X-LAI-Project-Id": "prj_1", "X-LAI-File-Ids": "fil_a, fil_b"}

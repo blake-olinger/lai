@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from lai.api.routes._openai_helpers import StreamMeta, build_completion_response
+from lai.config.settings import LaiSettings
 from lai.domain.auth import ApiScope
 from lai.domain.chat import (
     ClientToolCallEvent,
@@ -16,9 +17,12 @@ from lai.domain.chat import (
     InferenceToolCall,
     Message,
     MessageRole,
+    Session,
     TokenUsage,
     TurnOutput,
 )
+from lai.domain.errors import ValidationFailedError
+from lai.domain.inference import ModelProfile
 from lai.domain.observability import AlertCategory, AlertEvent, AlertSeverity, LoggingConfig
 from lai.domain.tools import (
     ApprovalStatus,
@@ -31,11 +35,18 @@ from lai.domain.tools import (
     ToolSpec,
 )
 from lai.observability import AlertManager, configure_observability
-from lai.orchestrator._helpers import build_inference_tool_defs, trim_history_to_budget
+from lai.orchestrator._helpers import (
+    build_inference_tool_defs,
+    compute_history_budget,
+    parse_tool_arguments,
+    resolve_model_profile,
+    trim_history_to_budget,
+)
 from lai.ports.observability import AlertSinkPort
 from lai.ports.repositories import ToolAuditRepositoryPort
 from lai.ports.tools import ToolPluginPort
 from lai.tools import GuardedToolExecutor, InMemoryToolRegistry
+from lai.tools._audit import deserialize_arguments, validate_approval_match
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -199,7 +210,9 @@ async def test_timeout_emits_alert_and_records_audit(tmp_path: Path) -> None:
 
 def test_history_trimming_tool_defs_and_openai_completion_client_tool() -> None:
     """Verify TOOL history retention, orphan stripping, tool defs filter, and OpenAI JSON DTO."""
-    tc1 = InferenceToolCall(id="tc_1", name="read_local", arguments_json="{}")
+    tc1 = InferenceToolCall(
+        id="tc_1", name="read_local", arguments_json='{"p":"' + ("word " * 30) + '"}'
+    )
     tc2 = InferenceToolCall(id="tc_2", name="run_local", arguments_json="{}")
     history = [
         Message(session_id="s", project_id="p", role=MessageRole.USER, content="old " * 40),
@@ -235,7 +248,7 @@ def test_history_trimming_tool_defs_and_openai_completion_client_tool() -> None:
             tool_name="run_local",
         ),
     ]
-    trimmed = trim_history_to_budget(history, max_history_tokens=24)
+    trimmed = trim_history_to_budget(history, max_history_tokens=45)
     assert [(m.role, m.tool_call_id, len(m.tool_calls)) for m in trimmed] == [
         (MessageRole.ASSISTANT, None, 0),
         (MessageRole.ASSISTANT, None, 1),
@@ -295,3 +308,35 @@ def test_history_trimming_tool_defs_and_openai_completion_client_tool() -> None:
     assert resp.choices[0].message.tool_calls is not None
     assert resp.choices[0].message.tool_calls[0].id == "tc_9"
     assert resp.lai_client_tool_call == ev
+
+    tiny_p = ModelProfile(name="m", hf_repo="r/r", hf_filename="m.gguf", ctx_size=512)
+    ses_u = Session(project_id="p", model_profile="unknown-custom")
+    assert resolve_model_profile(LaiSettings(), ses_u, tiny_p) is tiny_p
+    assert compute_history_budget(tiny_p, reserved_prompt_tokens=400, max_output_tokens=200) == 0
+    dedup = build_inference_tool_defs(
+        None, enable_tools=True, client_tools=(cli_spec, cli_spec), client_app_id="app_1"
+    )
+    assert [d.name for d in dedup] == ["cli_turn"]
+    assert parse_tool_arguments("   ") == {}
+    with pytest.raises(TypeError):
+        parse_tool_arguments("[1]")
+
+
+def test_audit_argument_and_approval_match_helpers() -> None:
+    """Verify deserialize_arguments and validate_approval_match error branches."""
+    for bad_json in ("{not-json", "[1, 2]"):
+        with pytest.raises(ValidationFailedError):
+            deserialize_arguments(bad_json)
+
+    assert validate_approval_match(None, _ctx(), "t") == "approval_not_found"
+    apr = ToolApprovalRecord(
+        project_id="prj_1",
+        session_id="ses_other",
+        tool_name="t",
+        arguments_json="{}",
+        permission_tier=PermissionTier.READ,
+        reason="needed",
+        status=ApprovalStatus.APPROVED,
+        requested_by="usr_1",
+    )
+    assert validate_approval_match(apr, _ctx(), "t") == "approval_context_mismatch"
