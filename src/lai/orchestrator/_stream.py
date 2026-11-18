@@ -16,7 +16,8 @@ from lai.domain.chat import (
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    from lai.domain.inference import InferenceRequest, InferenceToolCall
+    from lai.domain.chat import ClientToolCallEvent
+    from lai.domain.inference import InferenceMessage, InferenceRequest, InferenceToolCall
     from lai.domain.scheduler import LeaseRequest
     from lai.ports.inference import InferenceProviderPort
     from lai.ports.scheduler import InferenceSpoolerPort
@@ -31,6 +32,9 @@ class TurnOutcome:
     citations: tuple[Citation, ...]
     usage: TokenUsage
     pending_approval_id: str | None = None
+    pending_client_tool_call: ClientToolCallEvent | None = None
+    pending_tool_call: InferenceToolCall | None = None
+    intermediate_messages: tuple[InferenceMessage, ...] = ()
 
 
 @dataclass(slots=True)

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from lai.api._client_auth import resolve_turn_client_context
 from lai.api._streaming import (
     build_guardrail_headers,
+    format_orchestrator_sse,
     guard_orchestrator_sse_frames,
     prime_sse_stream,
 )
@@ -21,22 +23,11 @@ from lai.api.schemas.sessions import (
     SessionMessageRequest,
 )
 from lai.domain.auth import ApiScope, AuthPrincipal
-from lai.domain.chat import OrchestratorEvent, Session, TurnInput, TurnOutput
+from lai.domain.chat import Session, TurnInput, TurnOutput
 from lai.domain.errors import NotFoundError
 from lai.scheduler import await_or_keepalive_json
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
-
-
-async def _format_orchestrator_sse(
-    events: AsyncIterator[OrchestratorEvent],
-) -> AsyncIterator[str]:
-    """Serialize OrchestratorEvents as Server-Sent Events frames."""
-    async for event in events:
-        yield f"event: {event.event_type}\ndata: {event.model_dump_json()}\n\n"
 
 
 @router.post("", response_model=Session, status_code=status.HTTP_201_CREATED)
@@ -108,12 +99,14 @@ async def delete_session(
 
 
 @router.post("/{session_id}/messages", response_model=TurnOutput)
-async def post_session_message(
+async def post_session_message(  # noqa: PLR0913, PLR0917
     session_id: str,
     body: SessionMessageRequest,
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_WRITE))],
     services: Annotated[AppServices, Depends(get_services)],
+    x_lai_client_id: Annotated[str | None, Header(alias="X-LAI-Client-Id")] = None,
+    x_lai_client_secret: Annotated[str | None, Header(alias="X-LAI-Client-Secret")] = None,
 ) -> Response:
     """Run a user turn in session_id as JSON (with keepalive) or SSE stream."""
     session = await services.session_repo.get_session(session_id)
@@ -121,6 +114,13 @@ async def post_session_message(
         msg = f"Session {session_id!r} not found."
         raise NotFoundError(msg, details={"session_id": session_id})
 
+    client_ctx = await resolve_turn_client_context(
+        services,
+        project_id=session.project_id,
+        requested_tools=body.client_tools,
+        client_id=x_lai_client_id,
+        client_secret=x_lai_client_secret,
+    )
     turn_input = TurnInput(
         session_id=session.id,
         project_id=session.project_id,
@@ -131,6 +131,9 @@ async def post_session_message(
         enable_thinking=body.enable_thinking,
         max_tokens=body.max_tokens,
         temperature=body.temperature,
+        client_tools=client_ctx.client_tools,
+        client_app_id=client_ctx.client_app_id,
+        client_allowed_tiers=client_ctx.client_allowed_tiers,
     )
 
     if body.stream:
@@ -148,7 +151,7 @@ async def post_session_message(
             "X-Accel-Buffering": "no",
         }
         return StreamingResponse(
-            guard_orchestrator_sse_frames(_format_orchestrator_sse(primed.events)),
+            guard_orchestrator_sse_frames(format_orchestrator_sse(primed.events)),
             media_type="text/event-stream",
             headers=headers,
         )

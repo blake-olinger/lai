@@ -12,6 +12,7 @@ from lai.api.deps import AppServices
 from lai.config.profiles import get_model_profile
 from lai.db import (
     SqliteApiKeyRepository,
+    SqliteClientAppRepository,
     SqliteDatabase,
     SqliteFileRepository,
     SqliteProjectRepository,
@@ -170,6 +171,7 @@ async def build_app_services(
     await db.initialize()
 
     api_key_repo = SqliteApiKeyRepository(db)
+    client_app_repo = SqliteClientAppRepository(db)
     project_repo = SqliteProjectRepository(db)
     session_repo = SqliteSessionRepository(db)
     file_repo = SqliteFileRepository(db)
@@ -217,7 +219,11 @@ async def build_app_services(
         embedder=embedder,
         vector_store=vector_store,
     )
-    tool_executor = GuardedToolExecutor(tool_registry, tool_audit_repo)
+    tool_executor = GuardedToolExecutor(
+        tool_registry,
+        tool_audit_repo,
+        guardrail_pipeline=guardrail_pipeline,
+    )
     model_profile = _resolve_model_profile(settings)
 
     resolved_orchestrator = orchestrator or TurnOrchestrator(
@@ -234,6 +240,7 @@ async def build_app_services(
         embedder=embedder,
         vector_store=vector_store,
         model_profile=model_profile,
+        client_app_repo=client_app_repo,
     )
 
     close_callbacks: list[Callable[[], Awaitable[None] | None]] = []
@@ -253,6 +260,7 @@ async def build_app_services(
         settings=settings,
         alert_manager=alert_manager,
         api_key_repo=api_key_repo,
+        client_app_repo=client_app_repo,
         project_repo=project_repo,
         session_repo=session_repo,
         file_repo=file_repo,

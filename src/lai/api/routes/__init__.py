@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from lai.api.routes.client_apps import router as client_apps_router
 from lai.api.routes.files import router as files_router
 from lai.api.routes.health import router as health_router
 from lai.api.routes.openai import router as openai_router
@@ -13,6 +14,7 @@ from lai.api.routes.tools import router as tools_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
+api_router.include_router(client_apps_router)
 api_router.include_router(projects_router)
 api_router.include_router(files_router)
 api_router.include_router(sessions_router)
@@ -21,6 +23,7 @@ api_router.include_router(tools_router)
 
 __all__ = [
     "api_router",
+    "client_apps_router",
     "files_router",
     "health_router",
     "openai_router",

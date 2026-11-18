@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from lai.api.deps import AppServices
     from lai.domain.chat import OrchestratorEvent, TurnInput, TurnOutput
+    from lai.domain.tools import ToolApprovalRecord, ToolResult
 
 _LLAMA_PORT = 18081
 _SHIELD_PORT = 18082
@@ -48,6 +49,19 @@ class _CrashingOrchestrator(OrchestratorPort):
         del turn_input, principal
         msg = "unhandled stream crash"
         raise RuntimeError(msg)
+        yield  # pragma: no cover
+
+    async def resume_client_tool(
+        self, approval: ToolApprovalRecord, tool_result: ToolResult, principal: AuthPrincipal
+    ) -> TurnOutput:
+        del approval, tool_result, principal
+        raise NotImplementedError
+
+    async def resume_client_tool_stream(
+        self, approval: ToolApprovalRecord, tool_result: ToolResult, principal: AuthPrincipal
+    ) -> AsyncIterator[OrchestratorEvent]:
+        del approval, tool_result, principal
+        raise NotImplementedError
         yield  # pragma: no cover
 
 

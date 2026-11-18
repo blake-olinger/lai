@@ -62,12 +62,11 @@ class _StubOrchestrator(OrchestratorPort):
             role=dc.MessageRole.ASSISTANT,
             content=f"hello:{principal.principal_id}",
         )
-        usage = dc.TokenUsage(prompt_tokens=2, completion_tokens=2, total_tokens=4)
         return dc.TurnOutput(
             session_id=turn_input.session_id,
             message=msg,
             context_mode_used=turn_input.context_mode,
-            usage=usage,
+            usage=dc.TokenUsage(prompt_tokens=2, completion_tokens=2, total_tokens=4),
         )
 
     async def run_turn_stream(
@@ -76,6 +75,15 @@ class _StubOrchestrator(OrchestratorPort):
         out = await self.run_turn(turn_input, principal)
         yield dc.ContentDeltaEvent(delta=out.message.content)
         yield dc.TurnCompletedEvent(output=out)
+
+    async def resume_client_tool(self, *_: object, **__: object) -> dc.TurnOutput:
+        raise NotImplementedError
+
+    async def resume_client_tool_stream(
+        self, *_: object, **__: object
+    ) -> AsyncIterator[dc.OrchestratorEvent]:
+        raise NotImplementedError
+        yield  # pragma: no cover
 
 
 @pytest.fixture(autouse=True)
@@ -168,25 +176,20 @@ async def test_composite_auth_api_key_google_oidc_and_cloudflare_edge(tmp_path: 
 
     async with _asgi_client(app) as client:
         plaintext, key_id = await _mint_key(
-            app, "ci-key", (ApiScope.PROJECTS_READ, ApiScope.CHAT_WRITE)
+            app, "ci", (ApiScope.PROJECTS_READ, ApiScope.CHAT_WRITE)
         )
         cf_hdrs = {"CF-Access-Client-Id": _CF_ID, "CF-Access-Client-Secret": cf_secret}
 
         with respx.mock(assert_all_called=True) as mock:
             mock.get(_JWKS_URL).respond(S.OK, json={"keys": [rsa_jwk]})
             for extra in ({}, {"CF-Access-Client-Id": _CF_ID, "CF-Access-Client-Secret": "bad"}):
-                assert (
-                    await _get_code(client, {"Authorization": f"Bearer {plaintext}", **extra})
-                    == S.UNAUTHORIZED
-                )
+                hdr = {"Authorization": f"Bearer {plaintext}", **extra}
+                assert await _get_code(client, hdr) == S.UNAUTHORIZED
 
             key_hdrs = {**cf_hdrs, "Authorization": f"Bearer {plaintext}"}
             assert await _get_code(client, key_hdrs) == S.OK
-            chat_res = await client.post(
-                "/v1/chat/completions",
-                headers=key_hdrs,
-                json={"model": "gemma4-26b-a4b", "messages": [{"role": "user", "content": "hi"}]},
-            )
+            oai_body = {"model": "gemma4-26b-a4b", "messages": [{"role": "user", "content": "hi"}]}
+            chat_res = await client.post("/v1/chat/completions", headers=key_hdrs, json=oai_body)
             assert chat_res.status_code == S.OK
             assert key_id in chat_res.json()["choices"][0]["message"]["content"]
             assert await _get_code(client, key_hdrs, "/v1/system/alerts") == S.FORBIDDEN
@@ -216,9 +219,8 @@ async def test_composite_auth_api_key_google_oidc_and_cloudflare_edge(tmp_path: 
                 (_sign_jwt(rsa_priv, email_verified=False), S.UNAUTHORIZED),
                 (_sign_jwt(rsa_priv, email="stranger@external.org"), S.FORBIDDEN),
             ):
-                assert (
-                    await _get_code(client, {**cf_hdrs, "Authorization": f"Bearer {tok}"}) == code
-                )
+                h_tok = {**cf_hdrs, "Authorization": f"Bearer {tok}"}
+                assert await _get_code(client, h_tok) == code
 
 
 async def test_oidc_custom_jwks_fetcher_integration(tmp_path: Path) -> None:
@@ -242,26 +244,19 @@ async def test_oidc_custom_jwks_fetcher_integration(tmp_path: Path) -> None:
         allowed_domains=("acme.test",),
         admin_emails=("boss@acme.test",),
     )
+    p_oidc = OidcJwtAuthProvider(oidc_cfg, jwks_fetcher=fake_jwks_fetcher)
+    cf_cfg = CloudflareEdgeConfig(enabled=True, client_id=_CF_ID, client_secret=cf_secret)
     svc.authenticator = CompositeAuthenticator(
-        providers=[
-            ApiKeyAuthProvider(svc.api_key_repo),
-            OidcJwtAuthProvider(oidc_cfg, jwks_fetcher=fake_jwks_fetcher),
-        ],
-        edge_verifier=CloudflareEdgeVerifier(
-            CloudflareEdgeConfig(enabled=True, client_id=_CF_ID, client_secret=cf_secret)
-        ),
+        providers=[ApiKeyAuthProvider(svc.api_key_repo), p_oidc],
+        edge_verifier=CloudflareEdgeVerifier(cf_cfg),
     )
     app = create_app(settings, services=svc)
     try:
         async with _asgi_client(app) as client:
             tok = _sign_jwt(rsa_priv, kid="fetcher-k1", sub="sub-f", email="boss@acme.test")
-            h = {
-                "Authorization": f"Bearer {tok}",
-                "CF-Access-Client-Id": _CF_ID,
-                "CF-Access-Client-Secret": cf_secret,
-            }
-            assert await _get_code(client, h, "/v1/system/alerts") == S.OK
-            assert fetch_calls == 1
+            h = {"Authorization": f"Bearer {tok}", "CF-Access-Client-Id": _CF_ID}
+            h["CF-Access-Client-Secret"] = cf_secret
+            assert (await _get_code(client, h, "/v1/system/alerts"), fetch_calls) == (S.OK, 1)
     finally:
         await close_app_services(svc)
 
@@ -337,9 +332,10 @@ async def test_pre_auth_ip_rate_limit_blocks_before_oidc_and_ignores_spoofed_cf_
             "CF-Access-Client-Id": _CF_ID,
             "CF-Access-Client-Secret": cf_sec,
         }
-        for ip, exp in (
+        cases = (
             ("198.51.100.1", S.OK),
             ("198.51.100.1", S.TOO_MANY_REQUESTS),
             ("198.51.100.2", S.OK),
-        ):
+        )
+        for ip, exp in cases:
             assert await _get_code(client, {**base, "CF-Connecting-IP": ip}) == exp

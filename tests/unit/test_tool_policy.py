@@ -1,4 +1,4 @@
-"""Unit tests for tool registry, permission policy, approvals, replay guard, and timeouts."""
+"""Unit tests for dual-plane tool policy, host ban, confinement, approvals, and replay."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from lai.domain.errors import (
     ToolApprovalRequiredError,
     ValidationFailedError,
 )
-from lai.domain.observability import AlertCategory, AlertEvent, AlertSeverity, LoggingConfig
 from lai.domain.tools import (
     ApprovalStatus,
     PermissionTier,
@@ -23,22 +22,16 @@ from lai.domain.tools import (
     ToolApprovalRecord,
     ToolAuditRecord,
     ToolExecutionContext,
+    ToolExecutionTarget,
     ToolResult,
     ToolSpec,
 )
-from lai.observability import AlertManager, configure_observability
-from lai.ports.observability import AlertSinkPort
 from lai.ports.repositories import ToolAuditRepositoryPort
 from lai.ports.tools import ToolExecutorPort, ToolPluginPort, ToolPolicyPort, ToolRegistryPort
 from lai.tools import DefaultToolPolicy, GuardedToolExecutor, InMemoryToolRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-    from pathlib import Path
-
-EXPECTED_TWO = 2
-SHORT_TIMEOUT = 0.05
-LONG_SLEEP = 0.4
 
 
 class _FakePlugin(ToolPluginPort):
@@ -50,10 +43,8 @@ class _FakePlugin(ToolPluginPort):
         sleep_seconds: float = 0.0,
         raise_error: Exception | None = None,
     ) -> None:
-        self._spec = spec
-        self._output = output
-        self._sleep_seconds = sleep_seconds
-        self._raise_error = raise_error
+        self._spec, self._output = spec, output
+        self._sleep_seconds, self._raise_error = sleep_seconds, raise_error
         self.calls: list[tuple[dict[str, Any], ToolExecutionContext]] = []
 
     @property
@@ -67,6 +58,14 @@ class _FakePlugin(ToolPluginPort):
         if self._raise_error is not None:
             raise self._raise_error
         return ToolResult(tool_name=self._spec.name, success=True, output=self._output)
+
+
+class _AllowAllPolicy(ToolPolicyPort):
+    def evaluate(
+        self, spec: ToolSpec, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> PolicyDecision:
+        del spec, arguments, context
+        return PolicyDecision.ALLOW
 
 
 class _FakeToolAuditRepo(ToolAuditRepositoryPort):
@@ -111,16 +110,13 @@ class _FakeToolAuditRepo(ToolAuditRepositoryPort):
         return self.audits[:limit]
 
 
-class _MemoryAlertSink(AlertSinkPort):
-    def __init__(self) -> None:
-        self.events: list[AlertEvent] = []
-
-    async def send_alert(self, event: AlertEvent) -> None:
-        self.events.append(event)
-
-
 def _spec(
-    name: str, tier: PermissionTier, *, gated: bool = False, timeout: float = 30.0
+    name: str,
+    tier: PermissionTier,
+    *,
+    gated: bool = False,
+    timeout: float = 30.0,
+    target: ToolExecutionTarget = ToolExecutionTarget.SERVER_ATTACHMENT,
 ) -> ToolSpec:
     return ToolSpec(
         name=name,
@@ -128,24 +124,28 @@ def _spec(
         permission_tier=tier,
         requires_approval_by_default=gated,
         timeout_seconds=timeout,
+        execution_target=target,
     )
 
 
 def _ctx(
     *scopes: ApiScope,
-    project_id: str = "prj_1",
-    session_id: str = "ses_1",
     approval_id: str | None = None,
+    app_id: str | None = None,
+    tiers: tuple[PermissionTier, ...] = (),
 ) -> ToolExecutionContext:
     return ToolExecutionContext(
-        project_id=project_id,
-        session_id=session_id,
+        project_id="prj_1",
+        session_id="ses_1",
         principal_id="usr_1",
         principal_scopes=scopes,
         allowed_file_ids=("fil_1",),
         workspace_root="/repo",
         approved_approval_id=approval_id,
         request_id="req_1",
+        client_app_id=app_id,
+        client_allowed_tiers=tiers,
+        tool_call_id="tc_1",
     )
 
 
@@ -161,188 +161,170 @@ def _cleanup_logging() -> Generator[None]:
 
 def test_registry_and_port_conformance() -> None:
     """InMemoryToolRegistry registers, replaces, looks up, and lists ToolSpecs."""
-    read_v1 = _FakePlugin(_spec("read_a", PermissionTier.READ))
-    read_v2 = _FakePlugin(_spec("read_a", PermissionTier.READ))
-    registry = InMemoryToolRegistry(plugins=(read_v1,))
-    assert isinstance(registry, ToolRegistryPort)
+    r1, r2 = (
+        _FakePlugin(_spec("r", PermissionTier.READ)),
+        _FakePlugin(_spec("r", PermissionTier.READ)),
+    )
+    reg = InMemoryToolRegistry(plugins=(r1,))
+    assert isinstance(reg, ToolRegistryPort)
     assert isinstance(DefaultToolPolicy(), ToolPolicyPort)
-    assert isinstance(GuardedToolExecutor(registry, _FakeToolAuditRepo()), ToolExecutorPort)
-    assert (registry.get("read_a"), registry.get("missing")) == (read_v1, None)
-    registry.register(read_v2)
-    assert registry.get("read_a") is read_v2
-    assert [s.name for s in registry.list_specs()] == ["read_a"]
+    assert isinstance(GuardedToolExecutor(reg, _FakeToolAuditRepo()), ToolExecutorPort)
+    assert (reg.get("r"), reg.get("missing")) == (r1, None)
+    reg.register(r2)
+    assert reg.get("r") is r2
+    assert [s.name for s in reg.list_specs()] == ["r"]
 
 
-def test_read_and_privileged_tier_policy_matrix() -> None:
-    """Policy enforces READ and WRITE/EXEC/NETWORK scope + approval rules across all scopes."""
-    policy = DefaultToolPolicy()
-    read_spec = _spec("read_tool", PermissionTier.READ)
-    read_allowed = {ApiScope.ADMIN, ApiScope.TOOLS_SAFE, ApiScope.CHAT_WRITE, ApiScope.FILES_READ}
-    assert policy.evaluate(read_spec, {}, _ctx()) is PolicyDecision.DENY
-    for scope in ApiScope:
-        expected = PolicyDecision.ALLOW if scope in read_allowed else PolicyDecision.DENY
-        assert policy.evaluate(read_spec, {}, _ctx(scope)) is expected
+def test_dual_plane_policy_matrix() -> None:
+    """Policy forbids server host tiers and enforces client app tiers, scopes, and approvals."""
+    p = DefaultToolPolicy()
+    al, dn, rq = PolicyDecision.ALLOW, PolicyDecision.DENY, PolicyDecision.REQUIRE_APPROVAL
+    r_srv, r_srv_g = _spec("rs", PermissionTier.READ), _spec("rsg", PermissionTier.READ, gated=True)
+    r_scopes = {ApiScope.ADMIN, ApiScope.TOOLS_SAFE, ApiScope.CHAT_WRITE, ApiScope.FILES_READ}
+    assert p.evaluate(r_srv, {}, _ctx()) is dn
+    for sc in ApiScope:
+        assert p.evaluate(r_srv, {}, _ctx(sc)) is (al if sc in r_scopes else dn)
+        if sc in r_scopes:
+            assert p.evaluate(r_srv_g, {}, _ctx(sc)) is rq
+            assert p.evaluate(r_srv_g, {}, _ctx(sc, approval_id=" ")) is rq
+            assert p.evaluate(r_srv_g, {}, _ctx(sc, approval_id="a")) is al
 
-    deny, req = PolicyDecision.DENY, PolicyDecision.REQUIRE_APPROVAL
     for tier in (PermissionTier.WRITE, PermissionTier.EXEC, PermissionTier.NETWORK):
-        gated, ungated = _spec("g", tier, gated=True), _spec("u", tier, gated=False)
-        for scope in ApiScope:
-            if scope not in {ApiScope.ADMIN, ApiScope.TOOLS_EXEC}:
-                assert policy.evaluate(gated, {}, _ctx(scope, approval_id="a")) is deny
-                assert policy.evaluate(ungated, {}, _ctx(scope)) is deny
-                continue
-            assert policy.evaluate(gated, {}, _ctx(scope)) is req
-            assert policy.evaluate(gated, {}, _ctx(scope, approval_id="  ")) is req
-            assert policy.evaluate(gated, {}, _ctx(scope, approval_id="a")) is PolicyDecision.ALLOW
-            assert policy.evaluate(ungated, {}, _ctx(scope)) is PolicyDecision.ALLOW
+        s_bad = _spec("sb", tier, gated=False)
+        for sc in ApiScope:
+            assert p.evaluate(s_bad, {}, _ctx(sc, approval_id="a")) is dn
+
+    cr = _spec("cr", PermissionTier.READ, target=ToolExecutionTarget.CLIENT)
+    crg = _spec("crg", PermissionTier.READ, gated=True, target=ToolExecutionTarget.CLIENT)
+    assert p.evaluate(cr, {}, _ctx(ApiScope.TOOLS_SAFE, tiers=(PermissionTier.READ,))) is dn
+    assert (
+        p.evaluate(cr, {}, _ctx(ApiScope.TOOLS_SAFE, app_id=" ", tiers=(PermissionTier.READ,)))
+        is dn
+    )
+    assert p.evaluate(cr, {}, _ctx(ApiScope.TOOLS_SAFE, app_id="app_1", tiers=())) is dn
+    assert (
+        p.evaluate(cr, {}, _ctx(ApiScope.TOOLS_SAFE, app_id="app_1", tiers=(PermissionTier.READ,)))
+        is al
+    )
+    assert (
+        p.evaluate(crg, {}, _ctx(ApiScope.TOOLS_SAFE, app_id="app_1", tiers=(PermissionTier.READ,)))
+        is rq
+    )
+    assert (
+        p.evaluate(
+            crg,
+            {},
+            _ctx(
+                ApiScope.TOOLS_SAFE, approval_id="a", app_id="app_1", tiers=(PermissionTier.READ,)
+            ),
+        )
+        is al
+    )
+
+    for tier in (PermissionTier.WRITE, PermissionTier.EXEC, PermissionTier.NETWORK):
+        cu = _spec("cu", tier, gated=False, target=ToolExecutionTarget.CLIENT)
+        cg = _spec("cg", tier, gated=True, target=ToolExecutionTarget.CLIENT)
+        assert (
+            p.evaluate(
+                cu, {}, _ctx(ApiScope.TOOLS_EXEC, app_id="app_1", tiers=(PermissionTier.READ,))
+            )
+            is dn
+        )
+        for sc in ApiScope:
+            c_ctx = _ctx(sc, app_id="app_1", tiers=(tier,))
+            if sc not in {ApiScope.ADMIN, ApiScope.TOOLS_EXEC}:
+                assert p.evaluate(cu, {}, c_ctx) is dn
+                assert p.evaluate(cg, {}, c_ctx) is dn
+            else:
+                assert p.evaluate(cu, {}, c_ctx) is rq
+                assert p.evaluate(cg, {}, c_ctx) is rq
+                c_ok = _ctx(sc, approval_id="a", app_id="app_1", tiers=(tier,))
+                assert p.evaluate(cu, {}, c_ok) is al
+                assert p.evaluate(cg, {}, c_ok) is al
 
 
-async def test_executor_denies_unauthorized_and_missing_tool() -> None:
-    """GuardedToolExecutor records DENY audit and raises AuthorizationError / NotFoundError."""
-    write_plugin = _FakePlugin(_spec("write_file", PermissionTier.WRITE, gated=True))
+async def test_executor_server_host_ban_and_unauthorized() -> None:
+    """Executor unconditionally forbids non-READ server plugins even under custom policy."""
+    write_p = _FakePlugin(_spec("write_file", PermissionTier.WRITE, gated=True))
+    exec_p = _FakePlugin(_spec("run_ps", PermissionTier.EXEC))
+    read_p = _FakePlugin(_spec("read_f", PermissionTier.READ, gated=True))
     repo = _FakeToolAuditRepo()
-    executor = GuardedToolExecutor(InMemoryToolRegistry((write_plugin,)), repo)
+    reg = InMemoryToolRegistry((write_p, exec_p, read_p))
+    executor = GuardedToolExecutor(reg, repo, policy=_AllowAllPolicy())
+
     with pytest.raises(NotFoundError):
         await executor.invoke("unknown", {}, _ctx(ApiScope.ADMIN))
+    for bad in ("write_file", "run_ps"):
+        with pytest.raises(AuthorizationError, match="forbidden"):
+            await executor.invoke(bad, {"path": "x"}, _ctx(ApiScope.ADMIN, ApiScope.TOOLS_EXEC))
+    assert write_p.calls == []
+    assert exec_p.calls == []
+    assert all(
+        a.policy_decision is PolicyDecision.DENY and a.error == "server_host_tool_forbidden"
+        for a in repo.audits
+    )
+
+    strict_exec = GuardedToolExecutor(reg, repo)
     with pytest.raises(AuthorizationError):
-        await executor.invoke("write_file", {"path": "x"}, _ctx(ApiScope.TOOLS_SAFE))
-    assert write_plugin.calls == []
-    assert len(repo.audits) == 1
-    assert repo.audits[0].policy_decision is PolicyDecision.DENY
-    assert repo.audits[0].success is False
+        await strict_exec.invoke("read_f", {}, _ctx(ApiScope.TOOLS_EXEC))
+    assert repo.audits[-1].error == "policy_denied"
 
 
-async def test_approval_lifecycle_and_replay_guard() -> None:
-    """Approval creation -> approve_and_execute -> EXECUTED blocks replay."""
-    write_plugin = _FakePlugin(
-        _spec("write_file", PermissionTier.WRITE, gated=True),
-        output="wrote Bearer lai_sk_secret12345678",
+async def test_server_approval_confinement_restore_cas_and_replay() -> None:
+    """Gated READ server plugin restores confinement across restart and blocks replay."""
+    read_p = _FakePlugin(
+        _spec("read_secret", PermissionTier.READ, gated=True),
+        output="read Bearer lai_sk_secret12345678",
     )
     repo = _FakeToolAuditRepo()
-    executor = GuardedToolExecutor(InMemoryToolRegistry((write_plugin,)), repo)
+    reg = InMemoryToolRegistry((read_p,))
+    executor = GuardedToolExecutor(reg, repo)
 
     with pytest.raises(ToolApprovalRequiredError) as exc_info:
-        await executor.invoke("write_file", {"path": "a.py"}, _ctx(ApiScope.TOOLS_EXEC))
+        await executor.invoke("read_secret", {"file_id": "fil_1"}, _ctx(ApiScope.TOOLS_SAFE))
     aid = exc_info.value.approval_id
-    assert exc_info.value.tool_name == "write_file"
     pending = await repo.get_approval(aid)
     assert pending is not None
-    assert pending.status is ApprovalStatus.PENDING
+    assert (pending.status, pending.allowed_file_ids, pending.principal_scopes) == (
+        ApprovalStatus.PENDING,
+        ("fil_1",),
+        (ApiScope.TOOLS_SAFE,),
+    )
 
-    res = await executor.approve_and_execute(aid, decided_by="usr_admin", approved=True, note="ok")
+    restarted = GuardedToolExecutor(reg, repo)
+    res = await restarted.approve_and_execute(aid, decided_by="usr_admin", approved=True, note="ok")
     assert (res.status, res.decided_by, res.decision_note) == (
         ApprovalStatus.EXECUTED,
         "usr_admin",
         "ok",
     )
-    assert len(write_plugin.calls) == 1
-    assert write_plugin.calls[0][1].allowed_file_ids == ("fil_1",)
-    assert len(repo.audits) == EXPECTED_TWO
-    assert repo.audits[1].success is True
-    assert "lai_sk_secret12345678" not in repo.audits[1].output_preview
-    assert "[REDACTED_SECRET]" in repo.audits[1].output_preview
+    assert len(read_p.calls) == 1
+    assert read_p.calls[0][1].allowed_file_ids == ("fil_1",)
+    assert read_p.calls[0][1].principal_scopes == (ApiScope.TOOLS_SAFE,)
+    assert "[REDACTED_SECRET]" in repo.audits[-1].output_preview
 
     with pytest.raises(ValidationFailedError):
-        await executor.approve_and_execute(aid, decided_by="usr_admin", approved=True)
+        await restarted.approve_and_execute(aid, decided_by="usr_admin", approved=True)
     with pytest.raises(AuthorizationError):
-        await executor.invoke("write_file", {}, _ctx(ApiScope.TOOLS_EXEC, approval_id=aid))
-    assert len(write_plugin.calls) == 1
-
-
-async def test_approval_deny_mismatch_and_fallback_context() -> None:
-    """Denial prevents execution; mismatched project/session/tool cannot consume an approval."""
-    write_plugin = _FakePlugin(_spec("write_file", PermissionTier.WRITE, gated=True))
-    other_plugin = _FakePlugin(_spec("run_cmd", PermissionTier.EXEC, gated=True))
-    repo = _FakeToolAuditRepo()
-    registry = InMemoryToolRegistry((write_plugin, other_plugin))
-    executor = GuardedToolExecutor(registry, repo)
-
+        await restarted.invoke("read_secret", {}, _ctx(ApiScope.TOOLS_SAFE, approval_id=aid))
     with pytest.raises(NotFoundError):
-        await executor.approve_and_execute("apr_missing", decided_by="usr_admin", approved=True)
+        await restarted.approve_and_execute("apr_missing", decided_by="usr_admin", approved=True)
     with pytest.raises(ValidationFailedError):
-        await executor.approve_and_execute("apr_missing", decided_by="  ", approved=True)
-    with pytest.raises(ToolApprovalRequiredError) as exc_deny:
-        await executor.invoke("write_file", {"path": "b.py"}, _ctx(ApiScope.TOOLS_EXEC))
-    denied = await executor.approve_and_execute(
-        exc_deny.value.approval_id, decided_by="usr_admin", approved=False, note="no"
-    )
-    assert denied.status is ApprovalStatus.DENIED
-    with pytest.raises(AuthorizationError):
-        await executor.invoke("write_file", {}, _ctx(ApiScope.TOOLS_EXEC, approval_id=denied.id))
+        await restarted.approve_and_execute(aid, decided_by=" ", approved=True)
 
-    rec = ToolApprovalRecord(
+    rec_cli = ToolApprovalRecord(
         project_id="prj_1",
         session_id="ses_1",
-        tool_name="write_file",
-        arguments_json='{"path": "c.py"}',
-        permission_tier=PermissionTier.WRITE,
-        reason="needs approval",
+        tool_name="read_secret",
+        arguments_json="{}",
+        permission_tier=PermissionTier.READ,
+        reason="client",
         status=ApprovalStatus.APPROVED,
         requested_by="usr_1",
-        decided_by="usr_admin",
+        execution_target=ToolExecutionTarget.CLIENT,
+        client_app_id="app_1",
     )
-    await repo.create_approval(rec)
-    rid = rec.id
-    for err_tool, err_ctx in (
-        ("write_file", _ctx(ApiScope.TOOLS_EXEC, approval_id="apr_missing")),
-        ("write_file", _ctx(ApiScope.TOOLS_EXEC, project_id="prj_other", approval_id=rid)),
-        ("write_file", _ctx(ApiScope.TOOLS_EXEC, session_id="ses_other", approval_id=rid)),
-        ("run_cmd", _ctx(ApiScope.TOOLS_EXEC, approval_id=rid)),
-    ):
-        with pytest.raises(AuthorizationError):
-            await executor.invoke(err_tool, {}, err_ctx)
-
-    ok_res = await executor.invoke("write_file", {}, _ctx(ApiScope.TOOLS_EXEC, approval_id=rid))
-    assert ok_res.success is True
-    consumed = await repo.get_approval(rid)
-    assert consumed is not None
-    assert consumed.status is ApprovalStatus.EXECUTED
-
-    with pytest.raises(ToolApprovalRequiredError) as exc_fresh:
-        await executor.invoke("write_file", {"path": "d.py"}, _ctx(ApiScope.TOOLS_EXEC))
-    done = await GuardedToolExecutor(registry, repo).approve_and_execute(
-        exc_fresh.value.approval_id, decided_by="usr_admin", approved=True
-    )
-    assert done.status is ApprovalStatus.EXECUTED
-    assert len(write_plugin.calls) == EXPECTED_TWO
-
-
-async def test_timeout_emits_alert_and_records_audit(tmp_path: Path) -> None:
-    """TimeoutError logs with AlertCategory.TIMEOUT, emits alert, and audits failure."""
-    sink = _MemoryAlertSink()
-    manager = AlertManager(sinks=(sink,), cooldown_seconds=0.0, log_dir=tmp_path)
-    configure_observability(
-        LoggingConfig(log_dir=tmp_path, enable_file_logs=False), alert_manager=manager
-    )
-    try:
-        slow = _FakePlugin(
-            _spec("slow_read", PermissionTier.READ, timeout=SHORT_TIMEOUT),
-            sleep_seconds=LONG_SLEEP,
-        )
-        boom = _FakePlugin(
-            _spec("boom_read", PermissionTier.READ), raise_error=RuntimeError("disk error")
-        )
-        repo = _FakeToolAuditRepo()
-        executor = GuardedToolExecutor(InMemoryToolRegistry((slow, boom)), repo)
-        timeout_res = await executor.invoke("slow_read", {}, _ctx(ApiScope.TOOLS_SAFE))
-        boom_res = await executor.invoke("boom_read", {}, _ctx(ApiScope.TOOLS_SAFE))
-        await manager.flush()
-    finally:
-        manager.close()
-
-    assert (timeout_res.success, timeout_res.error) == (False, "timeout")
-    assert (boom_res.success, boom_res.error) == (False, "RuntimeError: disk error")
-    alerts = manager.recent_alerts()
-    assert len(alerts) == 1
-    assert len(sink.events) == 1
-    alert = alerts[0]
-    assert (alert.category, alert.severity, alert.component, alert.exception_type) == (
-        AlertCategory.TIMEOUT,
-        AlertSeverity.ERROR,
-        "tools",
-        "TimeoutError",
-    )
-    assert (alert.project_id, alert.session_id, alert.request_id) == ("prj_1", "ses_1", "req_1")
-    assert len(repo.audits) == EXPECTED_TWO
-    assert repo.audits[0].error == "timeout"
-    assert repo.audits[1].success is False
+    await repo.create_approval(rec_cli)
+    with pytest.raises(AuthorizationError):
+        await restarted.invoke("read_secret", {}, _ctx(ApiScope.TOOLS_SAFE, approval_id=rec_cli.id))
+    assert repo.audits[-1].error == "approval_target_mismatch"

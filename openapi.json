@@ -352,6 +352,131 @@
         "title": "Citation",
         "type": "object"
       },
+      "ClientAppListResponse": {
+        "additionalProperties": false,
+        "description": "List of registered client application metadata records.",
+        "properties": {
+          "count": {
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ClientAppResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "count"
+        ],
+        "title": "ClientAppListResponse",
+        "type": "object"
+      },
+      "ClientAppResponse": {
+        "additionalProperties": false,
+        "description": "Public metadata for a registered client application without secret_hash.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "allowed_project_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Project Ids",
+            "type": "array"
+          },
+          "allowed_tiers": {
+            "items": {
+              "$ref": "#/components/schemas/PermissionTier"
+            },
+            "title": "Allowed Tiers",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "registered_tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "title": "Registered Tools",
+            "type": "array"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "secret_prefix": {
+            "maxLength": 32,
+            "minLength": 4,
+            "title": "Secret Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "secret_prefix",
+          "allowed_tiers",
+          "registered_tools",
+          "allowed_project_ids",
+          "created_at",
+          "active"
+        ],
+        "title": "ClientAppResponse",
+        "type": "object"
+      },
       "ClientToolCallEvent": {
         "additionalProperties": false,
         "description": "Event emitted when a client-executed tool invocation pauses for caller execution.",
@@ -456,6 +581,81 @@
         ],
         "title": "ContextMode",
         "type": "string"
+      },
+      "CreateClientAppRequest": {
+        "additionalProperties": false,
+        "description": "Payload for registering a new client application.",
+        "properties": {
+          "allowed_project_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Project Ids",
+            "type": "array"
+          },
+          "allowed_tiers": {
+            "default": [
+              "read"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PermissionTier"
+            },
+            "title": "Allowed Tiers",
+            "type": "array"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "registered_tools": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "title": "Registered Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateClientAppRequest",
+        "type": "object"
+      },
+      "CreatedClientAppResponse": {
+        "additionalProperties": false,
+        "description": "One-time response returning a newly registered client app and its plaintext secret.",
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/ClientAppResponse"
+          },
+          "client_secret": {
+            "minLength": 16,
+            "title": "Client Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app",
+          "client_secret"
+        ],
+        "title": "CreatedClientAppResponse",
+        "type": "object"
       },
       "DeleteResponse": {
         "additionalProperties": false,
@@ -1156,6 +1356,20 @@
             "default": "assistant",
             "title": "Role",
             "type": "string"
+          },
+          "tool_calls": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OpenAIToolCall"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Calls"
           }
         },
         "required": [
@@ -1168,6 +1382,13 @@
         "additionalProperties": true,
         "description": "Drop-in OpenAI /v1/chat/completions payload with optional LAI routing fields.",
         "properties": {
+          "client_tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "title": "Client Tools",
+            "type": "array"
+          },
           "context_mode": {
             "anyOf": [
               {
@@ -1313,6 +1534,16 @@
             "title": "Id",
             "type": "string"
           },
+          "lai_client_tool_call": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClientToolCallEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "model": {
             "minLength": 1,
             "title": "Model",
@@ -1437,6 +1668,53 @@
           "data"
         ],
         "title": "OpenAIModelListResponse",
+        "type": "object"
+      },
+      "OpenAIToolCall": {
+        "additionalProperties": false,
+        "description": "Non-streaming OpenAI assistant tool_calls item.",
+        "properties": {
+          "function": {
+            "$ref": "#/components/schemas/OpenAIToolFunction"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "function",
+            "default": "function",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "function"
+        ],
+        "title": "OpenAIToolCall",
+        "type": "object"
+      },
+      "OpenAIToolFunction": {
+        "additionalProperties": false,
+        "description": "Function name and JSON-encoded arguments inside an OpenAI tool call.",
+        "properties": {
+          "arguments": {
+            "title": "Arguments",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "arguments"
+        ],
+        "title": "OpenAIToolFunction",
         "type": "object"
       },
       "OpenAIUsage": {
@@ -1773,6 +2051,14 @@
             "title": "Attached File Ids",
             "type": "array"
           },
+          "client_tools": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "title": "Client Tools",
+            "type": "array"
+          },
           "content": {
             "minLength": 1,
             "title": "Content",
@@ -1910,6 +2196,48 @@
           }
         },
         "title": "SpoolerSnapshot",
+        "type": "object"
+      },
+      "SubmitToolResultRequest": {
+        "additionalProperties": false,
+        "description": "Payload posted by a client application to return client-executed tool output.",
+        "properties": {
+          "duration_ms": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Duration Ms",
+            "type": "number"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "output": {
+            "title": "Output",
+            "type": "string"
+          },
+          "stream": {
+            "default": false,
+            "title": "Stream",
+            "type": "boolean"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "output"
+        ],
+        "title": "SubmitToolResultRequest",
         "type": "object"
       },
       "SystemStatusResponse": {
@@ -2471,6 +2799,38 @@
               ],
               "title": "X-Lai-Context-Mode"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-LAI-Client-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Lai-Client-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-LAI-Client-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Lai-Client-Secret"
+            }
           }
         ],
         "requestBody": {
@@ -2508,6 +2868,111 @@
         "summary": "Create Openai Chat Completion",
         "tags": [
           "openai"
+        ]
+      }
+    },
+    "/v1/client-apps": {
+      "get": {
+        "description": "List all registered client applications without exposing secret hashes.",
+        "operationId": "list_client_apps_v1_client_apps_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientAppListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Client Apps",
+        "tags": [
+          "client-apps"
+        ]
+      },
+      "post": {
+        "description": "Register a new client application and return its one-time plaintext secret.",
+        "operationId": "create_client_app_v1_client_apps_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateClientAppRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedClientAppResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Client App",
+        "tags": [
+          "client-apps"
+        ]
+      }
+    },
+    "/v1/client-apps/{app_id}": {
+      "delete": {
+        "description": "Revoke an existing client application by ID.",
+        "operationId": "revoke_client_app_v1_client_apps__app_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "app_id",
+            "required": true,
+            "schema": {
+              "title": "App Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Client App",
+        "tags": [
+          "client-apps"
         ]
       }
     },
@@ -3327,6 +3792,38 @@
               "title": "Session Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-LAI-Client-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Lai-Client-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-LAI-Client-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Lai-Client-Secret"
+            }
           }
         ],
         "requestBody": {
@@ -3526,6 +4023,91 @@
           }
         },
         "summary": "Resolve Tool Approval",
+        "tags": [
+          "tools"
+        ]
+      }
+    },
+    "/v1/tool-approvals/{approval_id}/result": {
+      "post": {
+        "description": "Submit a client-executed tool result and resume the paused session turn.",
+        "operationId": "submit_tool_result_v1_tool_approvals__approval_id__result_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "approval_id",
+            "required": true,
+            "schema": {
+              "title": "Approval Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-LAI-Client-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Lai-Client-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-LAI-Client-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Lai-Client-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitToolResultRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnOutput"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Tool Result",
         "tags": [
           "tools"
         ]

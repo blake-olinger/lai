@@ -296,16 +296,17 @@ async def test_admin_client_apps_router_and_schemas(tmp_path: Path) -> None:
 
 
 async def test_openai_sse_handles_client_tool_call_event() -> None:
-    """format_openai_sse translates ClientToolCallEvent cleanly until runtime tool chunks."""
+    """format_openai_sse emits OpenAI delta.tool_calls chunks and tool_calls finish_reason."""
+    client_ev = ClientToolCallEvent(
+        approval_id="apr_1",
+        tool_call_id="tc_1",
+        tool_name="run_ps",
+        arguments_json='{"command":"pwd"}',
+        requires_approval=True,
+    )
 
     async def _events() -> AsyncIterator[OrchestratorEvent]:
-        yield ClientToolCallEvent(
-            approval_id="apr_1",
-            tool_call_id="tc_1",
-            tool_name="run_ps",
-            arguments_json="{}",
-            requires_approval=True,
-        )
+        yield client_ev
         yield TurnCompletedEvent(
             output=TurnOutput(
                 session_id="ses_1",
@@ -317,11 +318,17 @@ async def test_openai_sse_handles_client_tool_call_event() -> None:
                 ),
                 context_mode_used=ContextMode.RETRIEVAL,
                 usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                pending_approval_id="apr_1",
+                pending_client_tool_call=client_ev,
             )
         )
 
     meta = StreamMeta(completion_id="chatcmpl_1", created=1, model_name="gemma4-26b-a4b")
     frames = [frame async for frame in format_openai_sse(_events(), meta)]
     joined = "".join(frames)
-    assert "Client tool call: tc_1 (run_ps)" in joined
+    assert '"tool_calls"' in joined
+    assert '"id":"tc_1"' in joined
+    assert '"name":"run_ps"' in joined
+    assert '"approval_id":"apr_1"' in joined
+    assert '"finish_reason":"tool_calls"' in joined
     assert "data: [DONE]\n\n" in joined

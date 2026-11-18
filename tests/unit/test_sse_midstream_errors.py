@@ -72,6 +72,15 @@ class _ScriptedOrchestrator(OrchestratorPort):
         finally:
             self.stream_closed = bool(turn_input.session_id)
 
+    async def resume_client_tool(self, *_: object, **__: object) -> dc.TurnOutput:
+        raise NotImplementedError
+
+    async def resume_client_tool_stream(
+        self, *_: object, **__: object
+    ) -> AsyncIterator[dc.OrchestratorEvent]:
+        raise NotImplementedError
+        yield  # pragma: no cover
+
 
 @pytest.fixture(autouse=True)
 def _cleanup_root_logging() -> Generator[None]:
@@ -187,14 +196,11 @@ async def test_guard_sse_frame_helpers_lai_unexpected_and_cancelled(tmp_path: Pa
 
 async def test_asgi_sse_midstream_and_priming_errors_and_disconnect(tmp_path: Path) -> None:
     """Verify ASGI mid-stream LaiError/RuntimeError, priming HTTP 502, and disconnect cleanup."""
-    orch = _ScriptedOrchestrator(
-        (dc.ProgressEvent(stage="inference", message="starting"),),
-        error=InferenceBackendError("boom", details={"backend": "ollama"}),
-    )
-    log_cfg = LoggingConfig(
-        log_dir=tmp_path / "l", enable_file_logs=False, alert_cooldown_seconds=0.0
-    )
-    cfg = LaiSettings(data_dir=tmp_path / "d", keepalive_interval_seconds=0.5, logging=log_cfg)
+    evs = (dc.ProgressEvent(stage="inference", message="starting"),)
+    err = InferenceBackendError("boom", details={"backend": "ollama"})
+    orch = _ScriptedOrchestrator(evs, error=err)
+    l_cfg = LoggingConfig(log_dir=tmp_path / "l", enable_file_logs=False, alert_cooldown_seconds=0)
+    cfg = LaiSettings(data_dir=tmp_path / "d", keepalive_interval_seconds=0.5, logging=l_cfg)
     app = create_app(cfg, orchestrator=orch)
 
     async with app.router.lifespan_context(app):
@@ -232,18 +238,19 @@ async def test_asgi_sse_midstream_and_priming_errors_and_disconnect(tmp_path: Pa
                     assert resp.text.endswith("data: [DONE]\n\n")
 
             alerts = app.state.services.alert_manager.recent_alerts()
-            fatal = {
-                (a.request_id, a.exception_type)
-                for a in alerts
-                if a.category is AlertCategory.FATAL_EXCEPTION
+            cat = AlertCategory.FATAL_EXCEPTION
+            assert {(a.request_id, a.exception_type) for a in alerts if a.category is cat} == {
+                ("r_ses", "RuntimeError"),
+                ("r_oai", "RuntimeError"),
             }
-            assert fatal == {("r_ses", "RuntimeError"), ("r_oai", "RuntimeError")}
 
             orch.events, orch.error = [], InferenceBackendError("down")
             for url, payload in ((ses_url, ses_req), (oai_url, oai_req)):
                 r_err = await cli.post(url, headers=hdrs, json=payload)
-                assert r_err.status_code == HTTPStatus.BAD_GATEWAY
-                assert r_err.json()["error"]["code"] == "inference_backend_error"
+                assert (r_err.status_code, r_err.json()["error"]["code"]) == (
+                    HTTPStatus.BAD_GATEWAY,
+                    "inference_backend_error",
+                )
 
         await _assert_asgi_priming_disconnect(app, sid, key.plaintext_key)
 
@@ -284,8 +291,7 @@ async def _assert_asgi_priming_disconnect(app: FastAPI, sid: str, token: str) ->
     }
     with suppress(asyncio.CancelledError):
         await app(scope, _receive, _send)
-    assert slow_orch.stream_closed is True
-    assert sent[0]["status"] == HTTPStatus.OK
+    assert (slow_orch.stream_closed, sent[0]["status"]) == (True, HTTPStatus.OK)
 
 
 async def test_prime_sse_stream_errors_disconnect_and_cleanup() -> None:
@@ -308,33 +314,23 @@ async def test_prime_sse_stream_errors_disconnect_and_cleanup() -> None:
 
     p_disc = await _prime(_egen(w=asyncio.Event(), c=closed, t="disc"), disc=_disc_on_second)
     assert not hasattr(p_disc, "__dict__")
-    assert p_disc.guardrail_blocked is False
-    assert p_disc.guardrail_policy is None
-    assert [ev async for ev in p_disc.events] == []
-    assert "disc" in closed
+    assert (p_disc.guardrail_blocked, p_disc.guardrail_policy) == (False, None)
+    assert ([ev async for ev in p_disc.events], "disc" in closed) == ([], True)
 
     t0 = time.monotonic()
     p_slow = await _prime(_egen(ev_p, d=5.0, c=closed, t="early"), ka=10.0, budget=0.05)
-    assert time.monotonic() - t0 < 0.3  # noqa: PLR2004
-    assert p_slow.guardrail_blocked is False
-    first = await anext(p_slow.events)
-    assert first == ev_p[0]
+    assert (time.monotonic() - t0 < 0.3, p_slow.guardrail_blocked) == (True, False)  # noqa: PLR2004
+    assert (await anext(p_slow.events)) == ev_p[0]
     t1 = time.monotonic()
     await cast("AsyncGenerator[dc.OrchestratorEvent]", p_slow.events).aclose()
-    assert time.monotonic() - t1 < 0.3  # noqa: PLR2004
-    assert "early" in closed
-
+    assert (time.monotonic() - t1 < 0.3, "early" in closed) == (True, True)  # noqa: PLR2004
     t2 = time.monotonic()
     p_ka = await _prime(_egen(d=0.45), ka=0.6, budget=2.0)
     assert time.monotonic() - t2 < 0.45  # noqa: PLR2004
     assert [ev async for ev in p_ka.events] == []
-
-    blocked_ev = dc.TurnCompletedEvent(output=_turn_out("s", "p", "x", blocked=True))
-    p0 = await _prime(_egen((blocked_ev,)), budget=0.0)
-    assert p0.guardrail_blocked is False
-    assert len([ev async for ev in p0.events]) == 1
+    p0 = await _prime(_egen((dc.TurnCompletedEvent(output=_turn_out("s", "p", "x")),)), budget=0.0)
+    assert (p0.guardrail_blocked, len([ev async for ev in p0.events])) == (False, 1)
     assert [ev async for ev in (await _prime(_egen(d=0.05), budget=0.01)).events] == []
-
     task = asyncio.create_task(_prime(_egen(d=5.0, c=closed, t="cancel")))
     await asyncio.sleep(0.02)
     task.cancel()

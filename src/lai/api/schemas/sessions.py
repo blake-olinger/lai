@@ -6,6 +6,7 @@ from pydantic import Field
 
 from lai.domain.base import StrictModel
 from lai.domain.chat import ContextMode, Message, Session
+from lai.domain.tools import ToolSpec
 
 
 class SessionCreateRequest(StrictModel):
@@ -42,3 +43,4 @@ class SessionMessageRequest(StrictModel):
     enable_thinking: bool = True
     max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    client_tools: tuple[ToolSpec, ...] = ()

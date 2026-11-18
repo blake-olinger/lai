@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from lai.domain.tools import (
         PolicyDecision,
         ToolApprovalRecord,
@@ -72,6 +74,8 @@ class ToolExecutorPort(Protocol):
         tool_name: str,
         arguments: dict[str, Any],
         context: ToolExecutionContext,
+        *,
+        client_tools: Mapping[str, ToolSpec] | None = None,
     ) -> ToolResult:
         """Evaluate policy, audit, and execute or raise ToolApprovalRequiredError."""
         ...
@@ -84,4 +88,15 @@ class ToolExecutorPort(Protocol):
         note: str | None = None,
     ) -> ToolApprovalRecord:
         """Resolve a pending approval request and execute if approved."""
+        ...
+
+    async def submit_client_result(
+        self,
+        approval_id: str,
+        client_app_id: str,
+        result: ToolResult,
+        *,
+        principal_id: str,
+    ) -> ToolResult:
+        """Validate, sanitize, guardrail-scan, and consume an approved client tool lease."""
         ...

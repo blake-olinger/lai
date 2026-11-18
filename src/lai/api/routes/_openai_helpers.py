@@ -11,7 +11,10 @@ from lai.api.schemas.openai import (
     OpenAIChatCompletionChunk,
     OpenAIChatCompletionResponse,
     OpenAIDeltaPayload,
+    OpenAIDeltaToolCall,
     OpenAIStreamChoice,
+    OpenAIToolCall,
+    OpenAIToolFunction,
     OpenAIUsage,
 )
 from lai.config.profiles import get_model_profile
@@ -202,6 +205,21 @@ def build_completion_response(
     meta: StreamMeta,
 ) -> OpenAIChatCompletionResponse:
     """Convert TurnOutput into an OpenAI chat.completion JSON response."""
+    client_tc = output.pending_client_tool_call
+    tool_calls = (
+        [
+            OpenAIToolCall(
+                id=client_tc.tool_call_id,
+                function=OpenAIToolFunction(
+                    name=client_tc.tool_name,
+                    arguments=client_tc.arguments_json,
+                ),
+            )
+        ]
+        if client_tc is not None
+        else None
+    )
+    finish_reason = "tool_calls" if client_tc is not None else "stop"
     return OpenAIChatCompletionResponse(
         id=meta.completion_id,
         created=meta.created,
@@ -212,8 +230,9 @@ def build_completion_response(
                 message=OpenAIChatChoiceMessage(
                     content=output.message.content,
                     reasoning_content=output.message.thinking,
+                    tool_calls=tool_calls,
                 ),
-                finish_reason="stop",
+                finish_reason=finish_reason,
             )
         ],
         usage=OpenAIUsage(
@@ -221,6 +240,7 @@ def build_completion_response(
             completion_tokens=output.usage.completion_tokens,
             total_tokens=output.usage.total_tokens,
         ),
+        lai_client_tool_call=client_tc,
     )
 
 
@@ -230,6 +250,7 @@ def make_chunk_sse(
     *,
     finish_reason: str | None = None,
     usage: OpenAIUsage | None = None,
+    lai_client_tool_call: ClientToolCallEvent | None = None,
 ) -> str:
     """Serialize one OpenAI chat.completion.chunk SSE data frame."""
     chunk = OpenAIChatCompletionChunk(
@@ -238,6 +259,7 @@ def make_chunk_sse(
         model=meta.model_name,
         choices=[OpenAIStreamChoice(index=0, delta=delta, finish_reason=finish_reason)],
         usage=usage,
+        lai_client_tool_call=lai_client_tool_call,
     )
     return f"data: {chunk.model_dump_json()}\n\n"
 
@@ -280,10 +302,23 @@ async def format_openai_sse(
         elif isinstance(event, ClientToolCallEvent):
             sent_role = True
             sent_content = True
-            notice = f"\n[Client tool call: {event.tool_call_id} ({event.tool_name})]\n"
             yield make_chunk_sse(
                 meta,
-                OpenAIDeltaPayload(role=role_val, content=notice),
+                OpenAIDeltaPayload(
+                    role=role_val,
+                    tool_calls=[
+                        OpenAIDeltaToolCall(
+                            index=0,
+                            id=event.tool_call_id,
+                            type="function",
+                            function=OpenAIToolFunction(
+                                name=event.tool_name,
+                                arguments=event.arguments_json,
+                            ),
+                        )
+                    ],
+                ),
+                lai_client_tool_call=event,
             )
         else:
             if not sent_content and event.output.message.content:
@@ -294,10 +329,12 @@ async def format_openai_sse(
                         content=event.output.message.content,
                     ),
                 )
+            client_tc = event.output.pending_client_tool_call
+            finish_reason = "tool_calls" if client_tc is not None else "stop"
             yield make_chunk_sse(
                 meta,
                 OpenAIDeltaPayload(),
-                finish_reason="stop",
+                finish_reason=finish_reason,
                 usage=OpenAIUsage(
                     prompt_tokens=event.output.usage.prompt_tokens,
                     completion_tokens=event.output.usage.completion_tokens,

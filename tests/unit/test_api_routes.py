@@ -47,13 +47,13 @@ _CHAT_JSON: dict[str, object] = {
 }
 
 
-class _WriteTool(ToolPluginPort):
+class _GatedReadTool(ToolPluginPort):
     @property
     def spec(self) -> dt.ToolSpec:
         return dt.ToolSpec(
-            name="write_note",
-            description="Guarded note tool",
-            permission_tier=dt.PermissionTier.WRITE,
+            name="read_note",
+            description="Guarded read note tool",
+            permission_tier=dt.PermissionTier.READ,
             requires_approval_by_default=True,
         )
 
@@ -61,7 +61,7 @@ class _WriteTool(ToolPluginPort):
         self, arguments: dict[str, Any], context: dt.ToolExecutionContext
     ) -> dt.ToolResult:
         del arguments, context
-        return dt.ToolResult(tool_name="write_note", success=True, output="saved")
+        return dt.ToolResult(tool_name="read_note", success=True, output="saved")
 
 
 class _FakeOrch(OrchestratorPort):
@@ -102,6 +102,15 @@ class _FakeOrch(OrchestratorPort):
         out = self._prepare(turn_input)
         yield dc.ContentDeltaEvent(delta=out.message.content)
         yield dc.TurnCompletedEvent(output=out)
+
+    async def resume_client_tool(self, *_: object, **__: object) -> dc.TurnOutput:
+        raise NotImplementedError
+
+    async def resume_client_tool_stream(
+        self, *_: object, **__: object
+    ) -> AsyncIterator[dc.OrchestratorEvent]:
+        raise NotImplementedError
+        yield  # pragma: no cover
 
 
 def _auth(token: str, **extra: str) -> dict[str, str]:
@@ -146,7 +155,7 @@ async def env(tmp_path: Path) -> AsyncIterator[_Env]:
     svc.gpu_telemetry_fn = lambda: GpuTelemetry(
         gpu_name="RTX 3090", memory_used_mb=1024, memory_total_mb=24576, utilization_percent=5
     )
-    svc.tool_registry.register(_WriteTool())
+    svc.tool_registry.register(_GatedReadTool())
 
     tokens: dict[str, str] = {}
     writer_scopes = (
@@ -177,8 +186,7 @@ async def test_health_status_alerts_and_files_lifecycle(env: _Env) -> None:
     """Verify /v1/health, auth/scope checks, /v1/system/*, projects, and file lifecycle."""
     svc, client, toks = env.svc, env.client, env.toks
     r_hp = await client.get("/v1/health", headers={"X-Request-Id": "req_1"})
-    assert r_hp.status_code == S.OK
-    assert r_hp.headers["X-Request-Id"] == "req_1"
+    assert (r_hp.status_code, r_hp.headers["X-Request-Id"]) == (S.OK, "req_1")
     assert (await client.get("/v1/system/status")).status_code == S.UNAUTHORIZED
 
     with respx.mock(assert_all_called=True) as mock:
@@ -188,11 +196,9 @@ async def test_health_status_alerts_and_files_lifecycle(env: _Env) -> None:
     assert r_st.status_code == S.OK
     assert r_st.json()["gpu"]["gpu_name"] == "RTX 3090"
     assert r_st.json()["guardrail_health"]["healthy"] is True
-    r_al_403 = await client.get("/v1/system/alerts", headers=_auth(toks["reader"]))
-    assert r_al_403.status_code == S.FORBIDDEN
-    assert (await client.get("/v1/system/alerts", headers=_auth(toks["admin"]))).json()[
-        "count"
-    ] == 0
+    r_al = await client.get("/v1/system/alerts", headers=_auth(toks["reader"]))
+    r_ok = await client.get("/v1/system/alerts", headers=_auth(toks["admin"]))
+    assert (r_al.status_code, r_ok.json()["count"]) == (S.FORBIDDEN, 0)
 
     hdrs = _auth(toks["writer"])
     pid = (await client.post("/v1/projects", headers=hdrs, json={"name": "logs"})).json()["id"]
@@ -204,18 +210,15 @@ async def test_health_status_alerts_and_files_lifecycle(env: _Env) -> None:
         data={"project_id": pid},
         files={"file": ("app.log", b"2026-01-01T00:00:00Z ERROR Boom\n", "text/plain")},
     )
-    assert r_up.status_code == S.CREATED
     f_rec = r_up.json()
     fid = f_rec["id"]
-    assert f_rec["status"] == FileStatus.READY.value
     chk = (await client.get(f"/v1/files/{fid}/chunks", headers=hdrs)).json()
+    assert (r_up.status_code, f_rec["status"]) == (S.CREATED, FileStatus.READY.value)
     assert chk["count"] >= EXPECTED_CHUNK_COUNT
 
-    r_str = await client.post(
-        f"/v1/files/stream?project_id={pid}&wait=true",
-        headers={**hdrs, "X-LAI-Filename": "worker.py", "Content-Type": "text/x-python"},
-        content=b"def run() -> int:\n    return 42\n",
-    )
+    st_h = {**hdrs, "X-LAI-Filename": "worker.py", "Content-Type": "text/x-python"}
+    st_u = f"/v1/files/stream?project_id={pid}&wait=true"
+    r_str = await client.post(st_u, headers=st_h, content=b"def run() -> int:\n    return 42\n")
     assert r_str.status_code == S.CREATED
 
     r_async = await client.post(
@@ -231,12 +234,10 @@ async def test_health_status_alerts_and_files_lifecycle(env: _Env) -> None:
         polled = (await client.get(f"/v1/files/{polled['id']}", headers=hdrs)).json()
     assert polled["status"] == FileStatus.READY.value
 
-    r_del_f = await client.delete(f"/v1/files/{fid}", headers=hdrs)
-    assert r_del_f.status_code == S.OK
+    assert (await client.delete(f"/v1/files/{fid}", headers=hdrs)).status_code == S.OK
     with pytest.raises(errs.NotFoundError):
         await svc.blob_store.read_bytes(Path(f_rec["blob_path"]))
-    r_del_p = await client.delete(f"/v1/projects/{pid}", headers=hdrs)
-    assert r_del_p.status_code == S.OK
+    assert (await client.delete(f"/v1/projects/{pid}", headers=hdrs)).status_code == S.OK
     with pytest.raises(errs.NotFoundError):
         await svc.blob_store.read_bytes(Path(r_str.json()["blob_path"]))
 
@@ -252,9 +253,8 @@ async def test_sessions_and_openai_compat(env: _Env) -> None:
     assert r_msg.json()["message"]["content"] == "ok reply"
 
     orch.blocked, orch.policy = True, "no_prompt_injection"
-    r_sse = await client.post(
-        f"/v1/sessions/{sid}/messages", headers=hdrs, json={"content": "x", "stream": True}
-    )
+    sse_j = {"content": "x", "stream": True}
+    r_sse = await client.post(f"/v1/sessions/{sid}/messages", headers=hdrs, json=sse_j)
     assert r_sse.headers["X-LAI-Guardrail-Blocked"] == "true"
     assert r_sse.headers["X-LAI-Guardrail-Policy"] == "no_prompt_injection"
     assert "event: turn_completed" in r_sse.text
@@ -262,21 +262,16 @@ async def test_sessions_and_openai_compat(env: _Env) -> None:
     orch.blocked, orch.policy = False, None
     models = (await client.get("/v1/models", headers=hdrs)).json()["data"]
     assert "gemma4-26b-a4b" in [m["id"] for m in models]
-    oai_hdrs = {
-        **hdrs,
-        "X-LAI-Project-Id": "prj_1",
-        "X-LAI-File-Ids": "fil_a, fil_b",
-        "X-LAI-Context-Mode": "retrieval",
-    }
+    oai_hdrs = {**hdrs, "X-LAI-Project-Id": "prj_1", "X-LAI-File-Ids": "fil_a, fil_b"}
+    oai_hdrs["X-LAI-Context-Mode"] = "retrieval"
     r_c = await client.post("/v1/chat/completions", headers=oai_hdrs, json=_CHAT_JSON)
     assert r_c.status_code == S.OK
     assert orch.calls[-1].attached_file_ids == ("fil_a", "fil_b")
     assert orch.calls[-1].context_mode is dc.ContextMode.RETRIEVAL
 
     orch.blocked, orch.policy = True, "no_hate_speech"
-    r_oai = await client.post(
-        "/v1/chat/completions", headers=hdrs, json={**_CHAT_JSON, "stream": True}
-    )
+    oai_j = {**_CHAT_JSON, "stream": True}
+    r_oai = await client.post("/v1/chat/completions", headers=hdrs, json=oai_j)
     assert r_oai.headers["X-LAI-Guardrail-Blocked"] == "true"
     assert "chat.completion.chunk" in r_oai.text
     assert "data: [DONE]\n\n" in r_oai.text
@@ -293,10 +288,10 @@ async def test_tools_errors_500_alert_and_429(env: _Env) -> None:
         project_id=pid,
         session_id=sid,
         principal_id="usr_t",
-        principal_scopes=(ApiScope.TOOLS_EXEC,),
+        principal_scopes=(ApiScope.TOOLS_SAFE,),
     )
     with pytest.raises(errs.ToolApprovalRequiredError) as exc_info:
-        await svc.tool_executor.invoke("write_note", {"note": "hi"}, ctx)
+        await svc.tool_executor.invoke("read_note", {"note": "hi"}, ctx)
     apr_url = f"/v1/tool-approvals/{exc_info.value.approval_id}/resolve"
     assert (
         await client.post(apr_url, headers=hdrs, json={"approved": True})
@@ -335,13 +330,13 @@ async def test_tools_errors_500_alert_and_429(env: _Env) -> None:
 def test_cli_runner_smoke(tmp_path: Path) -> None:
     """Smoke-test Typer CLI init, keys create/list/revoke, and tunnel render-config."""
     runner, cfg, out = CliRunner(), tmp_path / "cli" / "config.yaml", tmp_path / "cf.yml"
-    r1 = runner.invoke(cli_app, ["init", "-c", str(cfg), "--data-dir", str(tmp_path / "d")])
-    assert r1.exit_code == 0
-    r2 = runner.invoke(cli_app, ["keys", "create", "-c", str(cfg), "-n", "k", "--admin"])
-    assert "lai_sk_" in r2.output
+    init_cmd = ["init", "-c", str(cfg), "--data-dir", str(tmp_path / "d")]
+    assert runner.invoke(cli_app, init_cmd).exit_code == 0
+    key_res = runner.invoke(cli_app, ["keys", "create", "-c", str(cfg), "-n", "k", "--admin"])
+    assert "lai_sk_" in key_res.output
     kids = runner.invoke(cli_app, ["keys", "list", "-c", str(cfg)]).output.splitlines()
-    r3 = runner.invoke(cli_app, ["keys", "revoke", kids[0].split("\t")[0], "-c", str(cfg)])
-    assert r3.exit_code == 0
+    rev_res = runner.invoke(cli_app, ["keys", "revoke", kids[0].split("\t")[0], "-c", str(cfg)])
+    assert rev_res.exit_code == 0
     tun_cmd = ["tunnel", "render-config", "-c", str(cfg), "-H", "ai.t", "-o", str(out)]
     assert runner.invoke(cli_app, tun_cmd).exit_code == 0
     assert "ai.t" in out.read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-"""Tool catalog and approval resolution API schemas."""
+"""Tool catalog, approval resolution, and client tool result API schemas."""
 
 from __future__ import annotations
 
@@ -20,3 +20,13 @@ class ResolveApprovalRequest(StrictModel):
 
     approved: bool
     note: str | None = Field(default=None, max_length=1000)
+
+
+class SubmitToolResultRequest(StrictModel):
+    """Payload posted by a client application to return client-executed tool output."""
+
+    output: str
+    success: bool = True
+    error: str | None = None
+    duration_ms: float = Field(default=0.0, ge=0.0)
+    stream: bool = False

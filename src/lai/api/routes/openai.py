@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from lai.api._client_auth import resolve_turn_client_context
 from lai.api._streaming import (
     build_guardrail_headers,
     guard_openai_sse_frames,
@@ -62,6 +63,8 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
     x_lai_file_ids: Annotated[str | None, Header(alias="X-LAI-File-Ids")] = None,
     x_lai_session_id: Annotated[str | None, Header(alias="X-LAI-Session-Id")] = None,
     x_lai_context_mode: Annotated[str | None, Header(alias="X-LAI-Context-Mode")] = None,
+    x_lai_client_id: Annotated[str | None, Header(alias="X-LAI-Client-Id")] = None,
+    x_lai_client_secret: Annotated[str | None, Header(alias="X-LAI-Client-Secret")] = None,
 ) -> Response:
     """OpenAI-compatible chat completions supporting project/file context and keepalives."""
     explicit_project_id = (body.project_id or x_lai_project_id or "").strip()
@@ -70,6 +73,13 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
         services,
         explicit_session_id=explicit_session_id,
         explicit_project_id=explicit_project_id,
+    )
+    client_ctx = await resolve_turn_client_context(
+        services,
+        project_id=project_id,
+        requested_tools=body.client_tools,
+        client_id=x_lai_client_id,
+        client_secret=x_lai_client_secret,
     )
     resolved_model_name, turn_model_profile = resolve_openai_model(
         services.settings,
@@ -95,6 +105,9 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
         system_prompt=parsed.system_prompt,
         prior_messages=parsed.prior_messages,
         extra_guardrail_prompts=parsed.extra_guardrail_prompts,
+        client_tools=client_ctx.client_tools,
+        client_app_id=client_ctx.client_app_id,
+        client_allowed_tiers=client_ctx.client_allowed_tiers,
     )
     meta = StreamMeta(
         completion_id=f"chatcmpl-{uuid.uuid4().hex}",

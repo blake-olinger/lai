@@ -31,6 +31,8 @@ from lai.security import generate_api_key
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Generator
 
+    from lai.domain.tools import ToolApprovalRecord, ToolResult
+
 HTTP_OK = 200
 HTTP_CREATED = 201
 HTTP_NOT_FOUND = 404
@@ -77,6 +79,19 @@ class _SlowOrchestrator(OrchestratorPort):
         out = self._output(turn_input)
         yield ContentDeltaEvent(delta=out.message.content)
         yield TurnCompletedEvent(output=out)
+
+    async def resume_client_tool(
+        self, approval: ToolApprovalRecord, tool_result: ToolResult, principal: AuthPrincipal
+    ) -> TurnOutput:
+        del approval, tool_result, principal
+        raise NotImplementedError
+
+    async def resume_client_tool_stream(
+        self, approval: ToolApprovalRecord, tool_result: ToolResult, principal: AuthPrincipal
+    ) -> AsyncIterator[OrchestratorEvent]:
+        del approval, tool_result, principal
+        raise NotImplementedError
+        yield  # pragma: no cover
 
 
 @pytest.fixture(autouse=True)

@@ -56,6 +56,9 @@ def test_openapi_json_matches_app_and_passes_spec_validator() -> None:
         "/v1/tools",
         "/v1/tool-approvals/{approval_id}",
         "/v1/tool-approvals/{approval_id}/resolve",
+        "/v1/tool-approvals/{approval_id}/result",
+        "/v1/client-apps",
+        "/v1/client-apps/{app_id}",
     ):
         assert expected_path in paths
 

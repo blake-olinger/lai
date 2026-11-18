@@ -7,7 +7,8 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from lai.domain.base import StrictModel
-from lai.domain.chat import ContextMode
+from lai.domain.chat import ClientToolCallEvent, ContextMode
+from lai.domain.tools import ToolSpec
 
 
 class OpenAIModelInfo(StrictModel):
@@ -53,6 +54,31 @@ class OpenAIChatCompletionRequest(BaseModel):
     context_mode: ContextMode | None = None
     enable_tools: bool = True
     enable_thinking: bool = True
+    client_tools: list[ToolSpec] = Field(default_factory=list)
+
+
+class OpenAIToolFunction(StrictModel):
+    """Function name and JSON-encoded arguments inside an OpenAI tool call."""
+
+    name: str = Field(min_length=1)
+    arguments: str
+
+
+class OpenAIToolCall(StrictModel):
+    """Non-streaming OpenAI assistant tool_calls item."""
+
+    id: str = Field(min_length=1)
+    type: Literal["function"] = "function"
+    function: OpenAIToolFunction
+
+
+class OpenAIDeltaToolCall(StrictModel):
+    """Streaming OpenAI delta.tool_calls item."""
+
+    index: int = 0
+    id: str | None = None
+    type: Literal["function"] | None = None
+    function: OpenAIToolFunction | None = None
 
 
 class OpenAIChatChoiceMessage(StrictModel):
@@ -61,6 +87,7 @@ class OpenAIChatChoiceMessage(StrictModel):
     role: Literal["assistant"] = "assistant"
     content: str
     reasoning_content: str | None = None
+    tool_calls: list[OpenAIToolCall] | None = None
 
 
 class OpenAIChatChoice(StrictModel):
@@ -88,6 +115,7 @@ class OpenAIChatCompletionResponse(StrictModel):
     model: str = Field(min_length=1)
     choices: list[OpenAIChatChoice]
     usage: OpenAIUsage
+    lai_client_tool_call: ClientToolCallEvent | None = None
 
 
 class OpenAIDeltaPayload(StrictModel):
@@ -96,6 +124,7 @@ class OpenAIDeltaPayload(StrictModel):
     role: Literal["assistant"] | None = None
     content: str | None = None
     reasoning_content: str | None = None
+    tool_calls: list[OpenAIDeltaToolCall] | None = None
 
 
 class OpenAIStreamChoice(StrictModel):
@@ -115,3 +144,4 @@ class OpenAIChatCompletionChunk(StrictModel):
     model: str = Field(min_length=1)
     choices: list[OpenAIStreamChoice]
     usage: OpenAIUsage | None = None
+    lai_client_tool_call: ClientToolCallEvent | None = None

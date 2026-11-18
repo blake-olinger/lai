@@ -26,9 +26,12 @@ from lai.api.schemas.openai import (
     OpenAIChatCompletionResponse,
     OpenAIChatMessageInput,
     OpenAIDeltaPayload,
+    OpenAIDeltaToolCall,
     OpenAIModelInfo,
     OpenAIModelListResponse,
     OpenAIStreamChoice,
+    OpenAIToolCall,
+    OpenAIToolFunction,
     OpenAIUsage,
 )
 from lai.api.schemas.projects import ProjectCreateRequest, ProjectListResponse
@@ -38,7 +41,11 @@ from lai.api.schemas.sessions import (
     SessionListResponse,
     SessionMessageRequest,
 )
-from lai.api.schemas.tools import ResolveApprovalRequest, ToolListResponse
+from lai.api.schemas.tools import (
+    ResolveApprovalRequest,
+    SubmitToolResultRequest,
+    ToolListResponse,
+)
 
 __all__ = [
     "AlertsListResponse",
@@ -60,9 +67,12 @@ __all__ = [
     "OpenAIChatCompletionResponse",
     "OpenAIChatMessageInput",
     "OpenAIDeltaPayload",
+    "OpenAIDeltaToolCall",
     "OpenAIModelInfo",
     "OpenAIModelListResponse",
     "OpenAIStreamChoice",
+    "OpenAIToolCall",
+    "OpenAIToolFunction",
     "OpenAIUsage",
     "ProjectCreateRequest",
     "ProjectListResponse",
@@ -71,6 +81,7 @@ __all__ = [
     "SessionDetailResponse",
     "SessionListResponse",
     "SessionMessageRequest",
+    "SubmitToolResultRequest",
     "SystemStatusResponse",
     "ToolListResponse",
 ]

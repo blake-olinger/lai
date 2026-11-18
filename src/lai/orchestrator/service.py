@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from lai.domain.chat import (
-    ContentDeltaEvent,
     ContextMode,
     Message,
     MessageRole,
@@ -14,18 +13,23 @@ from lai.domain.chat import (
     TurnCompletedEvent,
     TurnOutput,
 )
-from lai.domain.errors import GuardrailBlockedError, InferenceBackendError
-from lai.domain.guardrails import GuardrailBlockMode
+from lai.domain.errors import InferenceBackendError
 from lai.ingestion.detector import estimate_tokens
 from lai.observability.logging import bind_log_context, get_component_logger
 from lai.orchestrator._direct import DirectDeps, run_direct_stream
 from lai.orchestrator._helpers import build_trimmed_history, persist_turn_if_session
+from lai.orchestrator._resume import (
+    ResumeDeps,
+    SessionClientToolsEntry,
+    run_client_tool_resume_stream,
+)
 from lai.orchestrator._retrieval import run_retrieval_stream
 from lai.orchestrator._retrieval_search import RetrievalDeps
 from lai.orchestrator._stream import TurnOutcome
 from lai.orchestrator._turn_prep import (
     PreparedTurnContext,
     TurnPrepDeps,
+    handle_guardrail_block,
     load_authorized_session,
     prepare_allowed_turn,
     scan_turn_guardrails,
@@ -39,14 +43,20 @@ if TYPE_CHECKING:
     from lai.config.settings import LaiSettings
     from lai.domain.auth import AuthPrincipal
     from lai.domain.chat import Session, TurnInput
-    from lai.domain.guardrails import GuardrailDecision
     from lai.domain.inference import ModelProfile
+    from lai.domain.tools import ToolApprovalRecord, ToolResult
     from lai.ports.guardrails import GuardrailPipelinePort
     from lai.ports.inference import InferenceProviderPort
-    from lai.ports.repositories import FileRepositoryPort, SessionRepositoryPort
+    from lai.ports.repositories import (
+        ClientAppRepositoryPort,
+        FileRepositoryPort,
+        SessionRepositoryPort,
+    )
     from lai.ports.scheduler import InferenceSpoolerPort, SessionGatePort
     from lai.ports.storage import BlobStorePort, EmbedderPort, VectorStorePort
     from lai.ports.tools import ToolExecutorPort, ToolRegistryPort
+
+_MAX_CACHED_SESSION_TOOLS = 1024
 
 
 class TurnOrchestrator(OrchestratorPort):
@@ -67,6 +77,7 @@ class TurnOrchestrator(OrchestratorPort):
         embedder: EmbedderPort | None = None,
         vector_store: VectorStorePort | None = None,
         model_profile: ModelProfile | None = None,
+        client_app_repo: ClientAppRepositoryPort | None = None,
     ) -> None:
         self._settings = settings
         self._session_repo = session_repo
@@ -94,6 +105,15 @@ class TurnOrchestrator(OrchestratorPort):
             embedder=embedder,
             vector_store=vector_store,
         )
+        self._resume_deps = ResumeDeps(
+            settings=settings,
+            session_repo=session_repo,
+            session_gate=session_gate,
+            retrieval=self._retrieval_deps,
+            client_app_repo=client_app_repo,
+            default_profile=model_profile,
+        )
+        self._session_client_tools: dict[str, SessionClientToolsEntry] = {}
         self._aggregator = MapReduceAggregator(
             blob_store=blob_store,
             inference_provider=inference_provider,
@@ -117,23 +137,19 @@ class TurnOrchestrator(OrchestratorPort):
         ):
             async with self._session_gate.acquire(turn_input.session_id):
                 session = await load_authorized_session(self._session_repo, turn_input)
-                blocked_decision = await scan_turn_guardrails(
+                blocked = await scan_turn_guardrails(
                     self._guardrail_pipeline,
                     turn_input,
                     principal_id=principal.principal_id,
                 )
-                if blocked_decision is not None:
-                    async for event in self._handle_guardrail_block(
-                        turn_input,
-                        blocked_decision,
-                        session=session,
+                if blocked is not None:
+                    async for event in handle_guardrail_block(
+                        self._prep_deps, turn_input, blocked, session=session
                     ):
                         yield event
                     return
                 async for event in self._execute_allowed_turn(
-                    turn_input,
-                    principal,
-                    session=session,
+                    turn_input, principal, session=session
                 ):
                     yield event
 
@@ -152,58 +168,47 @@ class TurnOrchestrator(OrchestratorPort):
             raise InferenceBackendError(msg)
         return completed_output
 
-    async def _handle_guardrail_block(
+    async def resume_client_tool_stream(
         self,
-        turn_input: TurnInput,
-        decision: GuardrailDecision,
-        *,
-        session: Session | None,
+        approval: ToolApprovalRecord,
+        tool_result: ToolResult,
+        principal: AuthPrincipal,
     ) -> AsyncGenerator[OrchestratorEvent]:
-        """Short-circuit blocked prompts via HTTP error or persisted refusal message."""
-        self._log.warning(
-            "turn_guardrail_blocked",
-            violated_policy=decision.violated_policy,
-            block_mode=self._settings.guardrails.block_mode.value,
-        )
-        if self._settings.guardrails.block_mode is GuardrailBlockMode.HTTP_ERROR:
-            raise GuardrailBlockedError(
-                self._settings.guardrails.refusal_text,
-                violated_policy=decision.violated_policy,
-                details={"provider": decision.provider},
-            )
+        """Resume a paused turn after client tool execution and yield streaming events."""
+        async for event in run_client_tool_resume_stream(
+            self._resume_deps,
+            approval,
+            tool_result,
+            principal,
+            session_tools_cache=self._session_client_tools,
+        ):
+            yield event
 
-        refusal_text = self._settings.guardrails.refusal_text
-        assistant_msg = Message(
-            session_id=turn_input.session_id,
-            project_id=turn_input.project_id,
-            role=MessageRole.ASSISTANT,
-            content=refusal_text,
-            usage=TokenUsage(),
-        )
-        await persist_turn_if_session(
-            self._session_repo,
-            session,
-            turn_input,
-            decision.scrubbed_prompt,
-            assistant_msg,
-        )
+    async def resume_client_tool(
+        self,
+        approval: ToolApprovalRecord,
+        tool_result: ToolResult,
+        principal: AuthPrincipal,
+    ) -> TurnOutput:
+        """Resume a paused turn after client tool execution and return TurnOutput."""
+        completed_output: TurnOutput | None = None
+        async for event in self.resume_client_tool_stream(approval, tool_result, principal):
+            if isinstance(event, TurnCompletedEvent):
+                completed_output = event.output
+        if completed_output is None:
+            msg = "Resume stream ended without emitting TurnCompletedEvent."
+            raise InferenceBackendError(msg)
+        return completed_output
 
-        mode_used = (
-            turn_input.context_mode
-            if turn_input.context_mode is not ContextMode.AUTO
-            else ContextMode.DIRECT
-        )
-        yield ContentDeltaEvent(delta=refusal_text)
-        yield TurnCompletedEvent(
-            output=TurnOutput(
-                session_id=turn_input.session_id,
-                message=assistant_msg,
-                context_mode_used=mode_used,
-                citations=(),
-                usage=TokenUsage(),
-                guardrail_blocked=True,
-                guardrail_policy=decision.violated_policy,
-            )
+    def _remember_session_client_tools(self, turn_input: TurnInput) -> None:
+        if not turn_input.client_app_id or not turn_input.client_tools:
+            return
+        if len(self._session_client_tools) >= _MAX_CACHED_SESSION_TOOLS:
+            del self._session_client_tools[next(iter(self._session_client_tools))]
+        self._session_client_tools[turn_input.session_id] = (
+            turn_input.client_app_id,
+            turn_input.client_tools,
+            turn_input.client_allowed_tiers,
         )
 
     async def _execute_allowed_turn(
@@ -213,7 +218,7 @@ class TurnOrchestrator(OrchestratorPort):
         *,
         session: Session | None,
     ) -> AsyncGenerator[OrchestratorEvent]:
-        """Prepare context, stream inference across selected mode, and persist messages."""
+        self._remember_session_client_tools(turn_input)
         prep = await prepare_allowed_turn(self._prep_deps, turn_input, session)
         self._log.info(
             "turn_started",
@@ -224,21 +229,14 @@ class TurnOrchestrator(OrchestratorPort):
 
         outcome: TurnOutcome | None = None
         async for item in self._dispatch_mode(
-            prep=prep,
-            turn_input=turn_input,
-            principal=principal,
+            prep=prep, turn_input=turn_input, principal=principal
         ):
             if isinstance(item, TurnOutcome):
                 outcome = item
             else:
                 yield item
 
-        resolved = outcome or TurnOutcome(
-            content="",
-            thinking="",
-            citations=(),
-            usage=TokenUsage(),
-        )
+        resolved = outcome or TurnOutcome(content="", thinking="", citations=(), usage=TokenUsage())
         assistant_msg = Message(
             session_id=turn_input.session_id,
             project_id=turn_input.project_id,
@@ -246,6 +244,9 @@ class TurnOrchestrator(OrchestratorPort):
             content=resolved.content,
             thinking=resolved.thinking or None,
             citations=resolved.citations,
+            tool_calls=(
+                (resolved.pending_tool_call,) if resolved.pending_tool_call is not None else ()
+            ),
             usage=resolved.usage,
         )
         await persist_turn_if_session(
@@ -254,6 +255,7 @@ class TurnOrchestrator(OrchestratorPort):
             turn_input,
             turn_input.user_message,
             assistant_msg,
+            intermediate_messages=resolved.intermediate_messages,
         )
 
         self._log.info(
@@ -271,6 +273,7 @@ class TurnOrchestrator(OrchestratorPort):
                 citations=resolved.citations,
                 usage=resolved.usage,
                 pending_approval_id=resolved.pending_approval_id,
+                pending_client_tool_call=resolved.pending_client_tool_call,
             )
         )
 
@@ -281,7 +284,6 @@ class TurnOrchestrator(OrchestratorPort):
         turn_input: TurnInput,
         principal: AuthPrincipal,
     ) -> AsyncGenerator[OrchestratorEvent | TurnOutcome]:
-        """Dispatch to Direct, Retrieval, or Map-Reduce execution strategy."""
         if prep.context_mode is ContextMode.DIRECT:
             stream = run_direct_stream(
                 self._direct_deps,

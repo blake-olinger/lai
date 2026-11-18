@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
     from lai.domain.auth import AuthPrincipal
     from lai.domain.chat import OrchestratorEvent, TurnInput, TurnOutput
+    from lai.domain.tools import ToolApprovalRecord, ToolResult
 
 
 @runtime_checkable
@@ -29,4 +30,22 @@ class OrchestratorPort(Protocol):
         principal: AuthPrincipal,
     ) -> TurnOutput:
         """Execute a turn to completion and return the final TurnOutput."""
+        ...
+
+    def resume_client_tool_stream(
+        self,
+        approval: ToolApprovalRecord,
+        tool_result: ToolResult,
+        principal: AuthPrincipal,
+    ) -> AsyncIterator[OrchestratorEvent]:
+        """Resume a paused turn after client tool execution and yield events."""
+        ...
+
+    async def resume_client_tool(
+        self,
+        approval: ToolApprovalRecord,
+        tool_result: ToolResult,
+        principal: AuthPrincipal,
+    ) -> TurnOutput:
+        """Resume a paused turn after client tool execution and return TurnOutput."""
         ...

@@ -218,6 +218,14 @@ def _format_openai_error_frame(exc: LaiError) -> str:
     return f"data: {payload}\n\ndata: [DONE]\n\n"
 
 
+async def format_orchestrator_sse(
+    events: AsyncIterator[OrchestratorEvent],
+) -> AsyncIterator[str]:
+    """Serialize OrchestratorEvents as Server-Sent Events frames."""
+    async for event in events:
+        yield f"event: {event.event_type}\ndata: {event.model_dump_json()}\n\n"
+
+
 async def guard_orchestrator_sse_frames(frames: AsyncIterator[str]) -> AsyncIterator[str]:
     """Convert mid-stream LaiErrors and unhandled exceptions on orchestrator SSE streams."""
     async for frame in _guard_sse_frames(frames, _format_orchestrator_error_frame):

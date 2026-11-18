@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from lai.ports.orchestrator import OrchestratorPort
     from lai.ports.repositories import (
         ApiKeyRepositoryPort,
+        ClientAppRepositoryPort,
         FileRepositoryPort,
         ProjectRepositoryPort,
         SessionRepositoryPort,
@@ -50,6 +51,7 @@ class AppServices:
     settings: LaiSettings
     alert_manager: AlertManagerPort
     api_key_repo: ApiKeyRepositoryPort
+    client_app_repo: ClientAppRepositoryPort
     project_repo: ProjectRepositoryPort
     session_repo: SessionRepositoryPort
     file_repo: FileRepositoryPort

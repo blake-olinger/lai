@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from lai.domain.errors import ValidationFailedError
-from lai.domain.tools import ApprovalStatus, ToolAuditRecord
+from lai.domain.tools import ApprovalStatus, ToolAuditRecord, ToolExecutionTarget
 from lai.observability.scrubber import scrub_sensitive_text
 
 if TYPE_CHECKING:
@@ -74,6 +74,8 @@ def validate_approval_match(
     """Return an error code if approval is missing, mismatched, or not APPROVED."""
     if approval is None:
         return "approval_not_found"
+    if approval.execution_target is not ToolExecutionTarget.SERVER_ATTACHMENT:
+        return "approval_target_mismatch"
     if (approval.project_id, approval.session_id, approval.tool_name) != (
         context.project_id,
         context.session_id,

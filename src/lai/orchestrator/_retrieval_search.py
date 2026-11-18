@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from lai.domain.chat import Citation, MessageRole
-from lai.domain.errors import LaiError, ToolApprovalRequiredError
+from lai.domain.errors import ClientToolDispatchError, LaiError, ToolApprovalRequiredError
 from lai.domain.inference import InferenceMessage
 from lai.ingestion.detector import estimate_tokens
 from lai.ingestion.rrf import reciprocal_rank_fusion
@@ -21,12 +21,12 @@ from lai.orchestrator._helpers import (
 from lai.orchestrator.prompts import build_system_prompt, format_retrieval_context
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from lai.domain.chat import Message, TurnInput
     from lai.domain.files import FileRecord, ScoredChunk
     from lai.domain.inference import InferenceToolCall, InferenceToolDef, ModelProfile
-    from lai.domain.tools import ToolExecutionContext
+    from lai.domain.tools import ToolExecutionContext, ToolSpec
     from lai.ports.inference import InferenceProviderPort
     from lai.ports.repositories import FileRepositoryPort
     from lai.ports.scheduler import InferenceSpoolerPort
@@ -179,12 +179,19 @@ async def invoke_single_tool(
     executor: ToolExecutorPort,
     tool_call: InferenceToolCall,
     context: ToolExecutionContext,
+    *,
+    client_tools: Mapping[str, ToolSpec] | None = None,
 ) -> tuple[str, Citation | None]:
     """Parse arguments and execute one guarded tool call, formatting recoverable errors."""
     try:
         arguments = parse_tool_arguments(tool_call.arguments_json)
-        result = await executor.invoke(tool_call.name, arguments, context)
-    except ToolApprovalRequiredError:
+        result = await executor.invoke(
+            tool_call.name,
+            arguments,
+            context,
+            client_tools=client_tools,
+        )
+    except (ToolApprovalRequiredError, ClientToolDispatchError):
         raise
     except (LaiError, ValueError, TypeError) as exc:
         get_component_logger("orchestrator").warning(

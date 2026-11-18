@@ -1,19 +1,35 @@
-"""Pre-flight guardrail scanning and turn context preparation for TurnOrchestrator."""
+"""Pre-flight guardrail scanning, block handling, and turn context preparation."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from lai.domain.errors import AuthorizationError
-from lai.domain.guardrails import GuardrailVerdict
-from lai.observability.logging import get_request_id
-from lai.orchestrator._helpers import resolve_model_profile, resolve_target_files
+from lai.domain.chat import (
+    ContentDeltaEvent,
+    ContextMode,
+    Message,
+    MessageRole,
+    OrchestratorEvent,
+    TokenUsage,
+    TurnCompletedEvent,
+    TurnOutput,
+)
+from lai.domain.errors import AuthorizationError, GuardrailBlockedError
+from lai.domain.guardrails import GuardrailBlockMode, GuardrailVerdict
+from lai.observability.logging import get_component_logger, get_request_id
+from lai.orchestrator._helpers import (
+    persist_turn_if_session,
+    resolve_model_profile,
+    resolve_target_files,
+)
 from lai.orchestrator.classifier import classify_context_mode
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from lai.config.settings import LaiSettings
-    from lai.domain.chat import ContextMode, Message, Session, TurnInput
+    from lai.domain.chat import Session, TurnInput
     from lai.domain.files import FileRecord
     from lai.domain.guardrails import GuardrailDecision
     from lai.domain.inference import ModelProfile
@@ -77,6 +93,60 @@ async def scan_turn_guardrails(
     return None
 
 
+async def handle_guardrail_block(
+    deps: TurnPrepDeps,
+    turn_input: TurnInput,
+    decision: GuardrailDecision,
+    *,
+    session: Session | None,
+) -> AsyncGenerator[OrchestratorEvent]:
+    """Short-circuit blocked prompts via HTTP error or persisted refusal message."""
+    get_component_logger("orchestrator").warning(
+        "turn_guardrail_blocked",
+        violated_policy=decision.violated_policy,
+        block_mode=deps.settings.guardrails.block_mode.value,
+    )
+    if deps.settings.guardrails.block_mode is GuardrailBlockMode.HTTP_ERROR:
+        raise GuardrailBlockedError(
+            deps.settings.guardrails.refusal_text,
+            violated_policy=decision.violated_policy,
+            details={"provider": decision.provider},
+        )
+
+    refusal_text = deps.settings.guardrails.refusal_text
+    assistant_msg = Message(
+        session_id=turn_input.session_id,
+        project_id=turn_input.project_id,
+        role=MessageRole.ASSISTANT,
+        content=refusal_text,
+        usage=TokenUsage(),
+    )
+    await persist_turn_if_session(
+        deps.session_repo,
+        session,
+        turn_input,
+        decision.scrubbed_prompt,
+        assistant_msg,
+    )
+    mode_used = (
+        turn_input.context_mode
+        if turn_input.context_mode is not ContextMode.AUTO
+        else ContextMode.DIRECT
+    )
+    yield ContentDeltaEvent(delta=refusal_text)
+    yield TurnCompletedEvent(
+        output=TurnOutput(
+            session_id=turn_input.session_id,
+            message=assistant_msg,
+            context_mode_used=mode_used,
+            citations=(),
+            usage=TokenUsage(),
+            guardrail_blocked=True,
+            guardrail_policy=decision.violated_policy,
+        )
+    )
+
+
 async def prepare_allowed_turn(
     deps: TurnPrepDeps,
     turn_input: TurnInput,
@@ -109,6 +179,13 @@ async def prepare_allowed_turn(
         target_files,
         direct_budget_tokens=deps.settings.direct_file_budget_tokens,
     )
+    if (
+        turn_input.context_mode is ContextMode.AUTO
+        and turn_input.enable_tools
+        and turn_input.client_tools
+        and context_mode is ContextMode.DIRECT
+    ):
+        context_mode = ContextMode.RETRIEVAL
     return PreparedTurnContext(
         session=session,
         existing_messages=existing_messages,
