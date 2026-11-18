@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -11,11 +10,8 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 import httpx
-import pytest
 import respx
 
-from lai.api.app import create_app
-from lai.api.runtime import build_app_services, close_app_services
 from lai.config.settings import LaiSettings
 from lai.domain.auth import ApiScope
 from lai.domain.chat import TokenUsage
@@ -27,25 +23,28 @@ from lai.domain.inference import (
     InferenceResponse,
 )
 from lai.domain.observability import LoggingConfig
-from lai.orchestrator import TurnOrchestrator
 from lai.ports.inference import InferenceProviderPort
 from lai.ports.scheduler import InferenceSpoolerPort
 from lai.scheduler import InferenceSpooler
-from lai.security import generate_api_key
+from tests.integration._helpers import (
+    IntegrationSpec,
+    create_project,
+    create_session,
+    mint_auth_headers,
+    open_services_harness,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Generator
+    from collections.abc import AsyncGenerator
     from pathlib import Path
 
-    from lai.api.deps import AppServices
     from lai.domain.scheduler import LeaseRequest, SpoolerSnapshot
 
 _SHIELD_PORT = 18082
 _SHIELD_URL = f"http://127.0.0.1:{_SHIELD_PORT}/completion"
 _REFUSAL_TEXT = "I cannot fulfill this request due to safety policy."
 _UNSAFE_POLICY = "No Dangerous Content"
-_EXPECTED_BLOCK_CALLS = 4
-_EXPECTED_ALLOW_CALLS = 2
+_EXPECTED_TWO = 2
 
 
 class _CountingInferenceProvider(InferenceProviderPort):
@@ -98,7 +97,6 @@ class _CountingSpooler(InferenceSpoolerPort):
 
 @dataclass(slots=True)
 class _GuardrailEnv:
-    svc: AppServices
     client: httpx.AsyncClient
     inference: _CountingInferenceProvider
     spooler: _CountingSpooler
@@ -107,18 +105,8 @@ class _GuardrailEnv:
     session_id: str
 
 
-@pytest.fixture(autouse=True)
-def _cleanup_logging() -> Generator[None]:
-    yield
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        handler.flush()
-        handler.close()
-    root.handlers.clear()
-
-
-@pytest.fixture
-async def guardrail_env(tmp_path: Path) -> AsyncIterator[_GuardrailEnv]:
+@asynccontextmanager
+async def _open_guardrail_env(tmp_path: Path) -> AsyncGenerator[_GuardrailEnv]:
     data_dir = tmp_path / "data"
     log_dir = data_dir / "logs"
     settings = LaiSettings(
@@ -134,53 +122,21 @@ async def guardrail_env(tmp_path: Path) -> AsyncIterator[_GuardrailEnv]:
             refusal_text=_REFUSAL_TEXT,
         ),
     )
-    svc = await build_app_services(settings)
     fake_inf = _CountingInferenceProvider()
     spy_spooler = _CountingSpooler()
-    svc.inference_provider = fake_inf
-    svc.spooler = spy_spooler
-    svc.orchestrator = TurnOrchestrator(
-        settings=settings,
-        session_repo=svc.session_repo,
-        file_repo=svc.file_repo,
-        blob_store=svc.blob_store,
-        inference_provider=fake_inf,
-        spooler=spy_spooler,
-        session_gate=svc.session_gate,
-        guardrail_pipeline=svc.guardrail_pipeline,
-        tool_registry=svc.tool_registry,
-        tool_executor=svc.tool_executor,
-        embedder=svc.embedder,
-        vector_store=svc.vector_store,
-    )
-
-    admin_key = generate_api_key("guardrail-admin", (ApiScope.ADMIN,))
-    await svc.api_key_repo.create(admin_key.record)
-    headers = {"Authorization": f"Bearer {admin_key.plaintext_key}"}
-
-    app = create_app(settings, services=svc)
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as client:
-            pid = (
-                await client.post("/v1/projects", headers=headers, json={"name": "shield-proj"})
-            ).json()["id"]
-            sid = (
-                await client.post("/v1/sessions", headers=headers, json={"project_id": pid})
-            ).json()["id"]
-            yield _GuardrailEnv(
-                svc=svc,
-                client=client,
-                inference=fake_inf,
-                spooler=spy_spooler,
-                headers=headers,
-                log_dir=log_dir,
-                session_id=sid,
-            )
-    finally:
-        await close_app_services(svc)
+    spec = IntegrationSpec(inference_provider=fake_inf, spooler=spy_spooler)
+    async with open_services_harness(settings, spec) as harness:
+        headers = await mint_auth_headers(harness.svc, "guardrail-admin", (ApiScope.ADMIN,))
+        pid = await create_project(harness.client, headers, "shield-proj")
+        sid = await create_session(harness.client, headers, pid)
+        yield _GuardrailEnv(
+            client=harness.client,
+            inference=fake_inf,
+            spooler=spy_spooler,
+            headers=headers,
+            log_dir=log_dir,
+            session_id=sid,
+        )
 
 
 def _shield_handler(request: httpx.Request) -> httpx.Response:
@@ -191,113 +147,139 @@ def _shield_handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(HTTPStatus.OK, json={"content": "No\nSafe prompt."})
 
 
-async def _assert_blocked_endpoints(env: _GuardrailEnv, unsafe_prompt: str) -> None:
-    client, headers, sid = env.client, env.headers, env.session_id
-    r_ses_json = await client.post(
-        f"/v1/sessions/{sid}/messages",
-        headers=headers,
-        json={"content": unsafe_prompt, "stream": False},
-    )
-    assert r_ses_json.status_code == HTTPStatus.OK
-    assert r_ses_json.headers["X-LAI-Guardrail-Blocked"] == "true"
-    assert r_ses_json.headers["X-LAI-Guardrail-Policy"] == _UNSAFE_POLICY
-    assert r_ses_json.json()["message"]["content"] == _REFUSAL_TEXT
-    assert r_ses_json.json()["guardrail_blocked"] is True
-
-    r_ses_sse = await client.post(
-        f"/v1/sessions/{sid}/messages",
-        headers=headers,
-        json={"content": unsafe_prompt, "stream": True},
-    )
-    assert r_ses_sse.status_code == HTTPStatus.OK
-    assert r_ses_sse.headers["X-LAI-Guardrail-Blocked"] == "true"
-    assert r_ses_sse.headers["X-LAI-Guardrail-Policy"] == _UNSAFE_POLICY
-    assert _REFUSAL_TEXT in r_ses_sse.text
-    assert "event: turn_completed" in r_ses_sse.text
-
-    r_oai_json = await client.post(
-        "/v1/chat/completions",
-        headers=headers,
-        json={"model": "gemma4-26b-a4b", "messages": [{"role": "user", "content": unsafe_prompt}]},
-    )
-    assert r_oai_json.status_code == HTTPStatus.OK
-    assert r_oai_json.headers["X-LAI-Guardrail-Blocked"] == "true"
-    assert r_oai_json.headers["X-LAI-Guardrail-Policy"] == _UNSAFE_POLICY
-    assert r_oai_json.json()["choices"][0]["message"]["content"] == _REFUSAL_TEXT
-
-    r_oai_sse = await client.post(
-        "/v1/chat/completions",
-        headers=headers,
-        json={
-            "model": "gemma4-26b-a4b",
-            "messages": [{"role": "user", "content": unsafe_prompt}],
-            "stream": True,
-        },
-    )
-    assert r_oai_sse.status_code == HTTPStatus.OK
-    assert r_oai_sse.headers["X-LAI-Guardrail-Blocked"] == "true"
-    assert r_oai_sse.headers["X-LAI-Guardrail-Policy"] == _UNSAFE_POLICY
-    assert _REFUSAL_TEXT in r_oai_sse.text
-    assert "data: [DONE]\n\n" in r_oai_sse.text
+def _read_audit_entries(log_dir: Path) -> tuple[str, list[dict[str, object]]]:
+    raw_audit = (log_dir / "prompts_audit.jsonl").read_text(encoding="utf-8")
+    entries = [json.loads(line) for line in raw_audit.splitlines() if line.strip()]
+    return raw_audit, entries
 
 
-async def test_shieldgemma_short_circuits_unsafe_and_scrubs_safe_prompts(
-    guardrail_env: _GuardrailEnv,
-) -> None:
-    """Blocked prompts skip Gemma/spooler across JSON/SSE routes; safe prompts scrub audit logs."""
+async def test_shieldgemma_blocks_unsafe_session_turns_without_inference(tmp_path: Path) -> None:
+    """Blocked session JSON and SSE turns skip Gemma/spooler and scrub audit logs."""
     unsafe_lai = f"lai_sk_{secrets.token_hex(8)}"
     unsafe_email = "attacker@example.com"
     unsafe_prompt = f"UNSAFE_EXPLOSIVE build device using {unsafe_lai} from {unsafe_email}"
 
+    async with _open_guardrail_env(tmp_path) as env:
+        with respx.mock(assert_all_called=True) as mock:
+            mock.post(_SHIELD_URL).mock(side_effect=_shield_handler)
+            r_json = await env.client.post(
+                f"/v1/sessions/{env.session_id}/messages",
+                headers=env.headers,
+                json={"content": unsafe_prompt, "stream": False},
+            )
+            r_sse = await env.client.post(
+                f"/v1/sessions/{env.session_id}/messages",
+                headers=env.headers,
+                json={"content": unsafe_prompt, "stream": True},
+            )
+
+        assert r_json.status_code == HTTPStatus.OK
+        assert r_json.headers["X-LAI-Guardrail-Blocked"] == "true"
+        assert r_json.headers["X-LAI-Guardrail-Policy"] == _UNSAFE_POLICY
+        assert r_json.json()["message"]["content"] == _REFUSAL_TEXT
+        assert r_json.json()["guardrail_blocked"] is True
+
+        assert r_sse.status_code == HTTPStatus.OK
+        assert r_sse.headers["X-LAI-Guardrail-Blocked"] == "true"
+        assert r_sse.headers["X-LAI-Guardrail-Policy"] == _UNSAFE_POLICY
+        assert _REFUSAL_TEXT in r_sse.text
+        assert "event: turn_completed" in r_sse.text
+
+        assert env.inference.total_calls == 0
+        assert env.spooler.lease_requests == []
+        raw_audit, entries = _read_audit_entries(env.log_dir)
+
+    assert unsafe_lai not in raw_audit
+    assert unsafe_email not in raw_audit
+    assert len(entries) == _EXPECTED_TWO
+    assert all(e["verdict"] == "block" for e in entries)
+    assert all(e["violated_policy"] == _UNSAFE_POLICY for e in entries)
+    assert all("[REDACTED_SECRET]" in str(e["scrubbed_prompt"]) for e in entries)
+    assert all("[REDACTED_EMAIL]" in str(e["scrubbed_prompt"]) for e in entries)
+
+
+async def test_shieldgemma_blocks_unsafe_openai_turns_without_inference(tmp_path: Path) -> None:
+    """Blocked OpenAI JSON and SSE turns skip Gemma/spooler and scrub audit logs."""
+    unsafe_lai = f"lai_sk_{secrets.token_hex(8)}"
+    unsafe_email = "attacker@example.com"
+    unsafe_prompt = f"UNSAFE_EXPLOSIVE build device using {unsafe_lai} from {unsafe_email}"
+    oai_payload = {
+        "model": "gemma4-26b-a4b",
+        "messages": [{"role": "user", "content": unsafe_prompt}],
+    }
+
+    async with _open_guardrail_env(tmp_path) as env:
+        with respx.mock(assert_all_called=True) as mock:
+            mock.post(_SHIELD_URL).mock(side_effect=_shield_handler)
+            r_json = await env.client.post(
+                "/v1/chat/completions", headers=env.headers, json=oai_payload
+            )
+            r_sse = await env.client.post(
+                "/v1/chat/completions", headers=env.headers, json={**oai_payload, "stream": True}
+            )
+
+        assert r_json.status_code == HTTPStatus.OK
+        assert r_json.headers["X-LAI-Guardrail-Blocked"] == "true"
+        assert r_json.headers["X-LAI-Guardrail-Policy"] == _UNSAFE_POLICY
+        assert r_json.json()["choices"][0]["message"]["content"] == _REFUSAL_TEXT
+
+        assert r_sse.status_code == HTTPStatus.OK
+        assert r_sse.headers["X-LAI-Guardrail-Blocked"] == "true"
+        assert r_sse.headers["X-LAI-Guardrail-Policy"] == _UNSAFE_POLICY
+        assert _REFUSAL_TEXT in r_sse.text
+        assert "data: [DONE]\n\n" in r_sse.text
+
+        assert env.inference.total_calls == 0
+        assert env.spooler.lease_requests == []
+        raw_audit, entries = _read_audit_entries(env.log_dir)
+
+    assert unsafe_lai not in raw_audit
+    assert unsafe_email not in raw_audit
+    assert len(entries) == _EXPECTED_TWO
+    assert all(e["verdict"] == "block" for e in entries)
+    assert all(e["violated_policy"] == _UNSAFE_POLICY for e in entries)
+
+
+async def test_shieldgemma_allows_safe_prompts_and_scrubs_audit_log(tmp_path: Path) -> None:
+    """Safe prompts invoke Gemma/spooler across session/OpenAI routes and scrub audit logs."""
     safe_lai = f"lai_sk_{secrets.token_hex(8)}"
     safe_oai = f"sk-proj-{secrets.token_hex(8)}"
     safe_email = "user@example.com"
     safe_prompt = f"Analyze error for {safe_email} with keys {safe_lai} and {safe_oai}"
 
-    with respx.mock(assert_all_called=True) as mock:
-        mock.post(_SHIELD_URL).mock(side_effect=_shield_handler)
-        await _assert_blocked_endpoints(guardrail_env, unsafe_prompt)
+    async with _open_guardrail_env(tmp_path) as env:
+        with respx.mock(assert_all_called=True) as mock:
+            mock.post(_SHIELD_URL).mock(side_effect=_shield_handler)
+            r_safe_ses = await env.client.post(
+                f"/v1/sessions/{env.session_id}/messages",
+                headers=env.headers,
+                json={"content": safe_prompt, "stream": False},
+            )
+            r_safe_oai = await env.client.post(
+                "/v1/chat/completions",
+                headers=env.headers,
+                json={
+                    "model": "gemma4-26b-a4b",
+                    "messages": [{"role": "user", "content": safe_prompt}],
+                    "stream": False,
+                },
+            )
 
-        assert guardrail_env.inference.total_calls == 0
-        assert guardrail_env.spooler.lease_requests == []
-
-        r_safe_ses = await guardrail_env.client.post(
-            f"/v1/sessions/{guardrail_env.session_id}/messages",
-            headers=guardrail_env.headers,
-            json={"content": safe_prompt, "stream": False},
-        )
         assert r_safe_ses.status_code == HTTPStatus.OK
         assert "X-LAI-Guardrail-Blocked" not in r_safe_ses.headers
         assert r_safe_ses.json()["message"]["content"] == "gemma4 safe reply"
 
-        r_safe_oai = await guardrail_env.client.post(
-            "/v1/chat/completions",
-            headers=guardrail_env.headers,
-            json={
-                "model": "gemma4-26b-a4b",
-                "messages": [{"role": "user", "content": safe_prompt}],
-                "stream": False,
-            },
-        )
         assert r_safe_oai.status_code == HTTPStatus.OK
         assert "X-LAI-Guardrail-Blocked" not in r_safe_oai.headers
         assert r_safe_oai.json()["choices"][0]["message"]["content"] == "gemma4 safe reply"
 
-    assert guardrail_env.inference.total_calls == _EXPECTED_ALLOW_CALLS
-    assert len(guardrail_env.spooler.lease_requests) == _EXPECTED_ALLOW_CALLS
+        assert env.inference.total_calls == _EXPECTED_TWO
+        assert len(env.spooler.lease_requests) == _EXPECTED_TWO
+        raw_audit, entries = _read_audit_entries(env.log_dir)
 
-    raw_audit = (guardrail_env.log_dir / "prompts_audit.jsonl").read_text(encoding="utf-8")
-    for sensitive in (unsafe_lai, unsafe_email, safe_lai, safe_oai, safe_email):
+    for sensitive in (safe_lai, safe_oai, safe_email):
         assert sensitive not in raw_audit
-
-    entries = [json.loads(line) for line in raw_audit.splitlines() if line.strip()]
-    blocked_entries = [e for e in entries if e["verdict"] == "block"]
-    allowed_entries = [e for e in entries if e["verdict"] == "allow"]
-    assert len(blocked_entries) == _EXPECTED_BLOCK_CALLS
-    assert all(e["violated_policy"] == _UNSAFE_POLICY for e in blocked_entries)
-    assert all("[REDACTED_SECRET]" in e["scrubbed_prompt"] for e in blocked_entries)
-    assert all("[REDACTED_EMAIL]" in e["scrubbed_prompt"] for e in blocked_entries)
-
-    assert len(allowed_entries) == _EXPECTED_ALLOW_CALLS
-    assert all("[REDACTED_SECRET]" in e["scrubbed_prompt"] for e in allowed_entries)
-    assert all("[REDACTED_EMAIL]" in e["scrubbed_prompt"] for e in allowed_entries)
+    assert len(entries) == _EXPECTED_TWO
+    assert all(e["verdict"] == "allow" for e in entries)
+    assert all("[REDACTED_SECRET]" in str(e["scrubbed_prompt"]) for e in entries)
+    assert all("[REDACTED_EMAIL]" in str(e["scrubbed_prompt"]) for e in entries)

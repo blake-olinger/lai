@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
 
-import httpx
 import pytest
 
 from lai.api._streaming import (
@@ -27,23 +25,32 @@ from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.errors import InferenceBackendError
 from lai.domain.observability import AlertCategory, LoggingConfig
 from lai.observability import bind_request_id, configure_observability
-from lai.ports.orchestrator import OrchestratorPort
 from lai.security import generate_api_key
+from tests._helpers import StubOrchestratorBase, bearer_headers, open_app_client
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
     from collections.abc import Sequence as Seq
     from pathlib import Path
 
+    import httpx
     from fastapi import FastAPI
     from starlette.types import Message as AsgiMessage
     from starlette.types import Scope
 
 _ERR_MSG = "An unexpected internal server error occurred."
 _TWO = 2
+_SHORT_ELAPSED = 0.3
+_KA_ELAPSED = 0.45
+_SES_REQ: dict[str, object] = {"content": "hi", "stream": True}
+_OAI_REQ: dict[str, object] = {
+    "model": "gemma4-26b-a4b",
+    "messages": [{"role": "user", "content": "hi"}],
+    "stream": True,
+}
 
 
-class _ScriptedOrchestrator(OrchestratorPort):
+class _ScriptedOrchestrator(StubOrchestratorBase):
     """Orchestrator stub yielding scripted events before optionally waiting or raising."""
 
     def __init__(
@@ -71,25 +78,6 @@ class _ScriptedOrchestrator(OrchestratorPort):
                 raise self.error
         finally:
             self.stream_closed = bool(turn_input.session_id)
-
-    async def resume_client_tool(self, *_: object, **__: object) -> dc.TurnOutput:
-        raise NotImplementedError
-
-    async def resume_client_tool_stream(
-        self, *_: object, **__: object
-    ) -> AsyncIterator[dc.OrchestratorEvent]:
-        raise NotImplementedError
-        yield  # pragma: no cover
-
-
-@pytest.fixture(autouse=True)
-def _cleanup_root_logging() -> Generator[None]:
-    yield
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        handler.flush()
-        handler.close()
-    root.handlers.clear()
 
 
 def _turn_out(sid: str, pid: str, text: str, *, blocked: bool = False) -> dc.TurnOutput:
@@ -152,6 +140,25 @@ async def _prime(
     )
 
 
+@asynccontextmanager
+async def _open_sse_session(
+    tmp_path: Path,
+    orch: _ScriptedOrchestrator,
+) -> AsyncGenerator[tuple[FastAPI, httpx.AsyncClient, dict[str, str], str, str]]:
+    l_cfg = LoggingConfig(log_dir=tmp_path / "l", enable_file_logs=False, alert_cooldown_seconds=0)
+    cfg = LaiSettings(data_dir=tmp_path / "d", keepalive_interval_seconds=0.5, logging=l_cfg)
+    app = create_app(cfg, orchestrator=orch)
+    async with open_app_client(app) as client:
+        key = generate_api_key("sse-err-admin", (ApiScope.ADMIN,))
+        await app.state.services.api_key_repo.create(key.record)
+        hdrs = bearer_headers(key.plaintext_key)
+        pid = (await client.post("/v1/projects", headers=hdrs, json={"name": "e"})).json()["id"]
+        sid = str(
+            (await client.post("/v1/sessions", headers=hdrs, json={"project_id": pid})).json()["id"]
+        )
+        yield app, client, hdrs, sid, key.plaintext_key
+
+
 async def test_guard_sse_frame_helpers_lai_unexpected_and_cancelled(tmp_path: Path) -> None:
     """Verify LaiError framing, unexpected Exception alerts/sanitization, and CancelledError."""
     og, ag = guard_orchestrator_sse_frames, guard_openai_sse_frames
@@ -194,104 +201,100 @@ async def test_guard_sse_frame_helpers_lai_unexpected_and_cancelled(tmp_path: Pa
         mgr.close()
 
 
-async def test_asgi_sse_midstream_and_priming_errors_and_disconnect(tmp_path: Path) -> None:
-    """Verify ASGI mid-stream LaiError/RuntimeError, priming HTTP 502, and disconnect cleanup."""
+async def test_asgi_sse_midstream_lai_error_frames(tmp_path: Path) -> None:
+    """Verify mid-stream LaiError emits structured SSE error frames over HTTP."""
     evs = (dc.ProgressEvent(stage="inference", message="starting"),)
-    err = InferenceBackendError("boom", details={"backend": "ollama"})
-    orch = _ScriptedOrchestrator(evs, error=err)
-    l_cfg = LoggingConfig(log_dir=tmp_path / "l", enable_file_logs=False, alert_cooldown_seconds=0)
-    cfg = LaiSettings(data_dir=tmp_path / "d", keepalive_interval_seconds=0.5, logging=l_cfg)
-    app = create_app(cfg, orchestrator=orch)
-
-    async with app.router.lifespan_context(app):
-        key = generate_api_key("sse-err-admin", (ApiScope.ADMIN,))
-        await app.state.services.api_key_repo.create(key.record)
-        hdrs = {"Authorization": f"Bearer {key.plaintext_key}"}
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as cli:
-            pid = (await cli.post("/v1/projects", headers=hdrs, json={"name": "e"})).json()["id"]
-            r_ses = await cli.post("/v1/sessions", headers=hdrs, json={"project_id": pid})
-            sid = str(r_ses.json()["id"])
-            ses_url, oai_url = f"/v1/sessions/{sid}/messages", "/v1/chat/completions"
-            ses_req = {"content": "hi", "stream": True}
-            msgs = [{"role": "user", "content": "hi"}]
-            oai_req = {"model": "gemma4-26b-a4b", "messages": msgs, "stream": True}
-
-            ses_txt = (await cli.post(ses_url, headers=hdrs, json=ses_req)).text
-            assert "event: progress" in ses_txt
-            assert '"code":"inference_backend_error"' in ses_txt
-            oai_txt = (await cli.post(oai_url, headers=hdrs, json=oai_req)).text
-            assert '"type": "inference_backend_error"' in oai_txt
-            assert oai_txt.endswith("data: [DONE]\n\n")
-
-            orch.error = RuntimeError("db secret leaked")
-            for url, rid, req, marker in (
-                (ses_url, "r_ses", ses_req, '"code":"internal_error"'),
-                (oai_url, "r_oai", oai_req, '"type": "internal_error"'),
-            ):
-                resp = await cli.post(url, headers={**hdrs, "X-Request-Id": rid}, json=req)
-                assert resp.status_code == HTTPStatus.OK
-                assert "db secret leaked" not in resp.text
-                assert marker in resp.text
-                assert _ERR_MSG in resp.text
-                if url == oai_url:
-                    assert resp.text.endswith("data: [DONE]\n\n")
-
-            alerts = app.state.services.alert_manager.recent_alerts()
-            cat = AlertCategory.FATAL_EXCEPTION
-            assert {(a.request_id, a.exception_type) for a in alerts if a.category is cat} == {
-                ("r_ses", "RuntimeError"),
-                ("r_oai", "RuntimeError"),
-            }
-
-            orch.events, orch.error = [], InferenceBackendError("down")
-            for url, payload in ((ses_url, ses_req), (oai_url, oai_req)):
-                r_err = await cli.post(url, headers=hdrs, json=payload)
-                assert (r_err.status_code, r_err.json()["error"]["code"]) == (
-                    HTTPStatus.BAD_GATEWAY,
-                    "inference_backend_error",
-                )
-
-        await _assert_asgi_priming_disconnect(app, sid, key.plaintext_key)
+    orch = _ScriptedOrchestrator(evs, error=InferenceBackendError("boom", details={"b": "ollama"}))
+    async with _open_sse_session(tmp_path, orch) as (_, cli, hdrs, sid, _):
+        ses_txt = (await cli.post(f"/v1/sessions/{sid}/messages", headers=hdrs, json=_SES_REQ)).text
+        assert "event: progress" in ses_txt
+        assert '"code":"inference_backend_error"' in ses_txt
+        oai_txt = (await cli.post("/v1/chat/completions", headers=hdrs, json=_OAI_REQ)).text
+        assert '"type": "inference_backend_error"' in oai_txt
+        assert oai_txt.endswith("data: [DONE]\n\n")
 
 
-async def _assert_asgi_priming_disconnect(app: FastAPI, sid: str, token: str) -> None:
+async def test_asgi_sse_midstream_unexpected_error_sanitizes_and_alerts(tmp_path: Path) -> None:
+    """Verify mid-stream RuntimeError sanitizes SSE output and emits FATAL_EXCEPTION alerts."""
+    evs = (dc.ProgressEvent(stage="inference", message="starting"),)
+    orch = _ScriptedOrchestrator(evs, error=RuntimeError("db secret leaked"))
+    async with _open_sse_session(tmp_path, orch) as (app, cli, hdrs, sid, _):
+        ses_url, oai_url = f"/v1/sessions/{sid}/messages", "/v1/chat/completions"
+        for url, rid, req, marker in (
+            (ses_url, "r_ses", _SES_REQ, '"code":"internal_error"'),
+            (oai_url, "r_oai", _OAI_REQ, '"type": "internal_error"'),
+        ):
+            resp = await cli.post(url, headers={**hdrs, "X-Request-Id": rid}, json=req)
+            assert resp.status_code == HTTPStatus.OK
+            assert "db secret leaked" not in resp.text
+            assert marker in resp.text
+            assert _ERR_MSG in resp.text
+            if url == oai_url:
+                assert resp.text.endswith("data: [DONE]\n\n")
+
+        alerts = app.state.services.alert_manager.recent_alerts()
+        cat = AlertCategory.FATAL_EXCEPTION
+        assert {(a.request_id, a.exception_type) for a in alerts if a.category is cat} == {
+            ("r_ses", "RuntimeError"),
+            ("r_oai", "RuntimeError"),
+        }
+
+
+async def test_asgi_sse_priming_lai_error_returns_http_502(tmp_path: Path) -> None:
+    """Verify LaiError raised during SSE priming returns HTTP 502 error envelopes."""
+    orch = _ScriptedOrchestrator((), error=InferenceBackendError("down"))
+    async with _open_sse_session(tmp_path, orch) as (_, cli, hdrs, sid, _):
+        for url, payload in (
+            (f"/v1/sessions/{sid}/messages", _SES_REQ),
+            ("/v1/chat/completions", _OAI_REQ),
+        ):
+            r_err = await cli.post(url, headers=hdrs, json=payload)
+            assert (r_err.status_code, r_err.json()["error"]["code"]) == (
+                HTTPStatus.BAD_GATEWAY,
+                "inference_backend_error",
+            )
+
+
+async def test_asgi_sse_priming_disconnect_closes_producer(tmp_path: Path) -> None:
     """Exercise ASGI client disconnect during prime_sse_stream and verify producer cleanup."""
     slow_orch = _ScriptedOrchestrator()
     slow_orch.entered_event, slow_orch.wait_event = asyncio.Event(), asyncio.Event()
-    app.state.services.orchestrator = slow_orch
-    sent: list[AsgiMessage] = []
-    sent_body = False
+    async with _open_sse_session(tmp_path, slow_orch) as (app, _, _, sid, token):
+        sent: list[AsgiMessage] = []
+        sent_body = False
 
-    async def _receive() -> AsgiMessage:
-        nonlocal sent_body
-        if not sent_body:
-            sent_body = True
-            return {
-                "type": "http.request",
-                "body": b'{"content":"hi","stream":true}',
-                "more_body": False,
-            }
-        assert slow_orch.entered_event is not None
-        if not slow_orch.entered_event.is_set():
-            await asyncio.sleep(1.0)
-        return {"type": "http.disconnect"}
+        async def _receive() -> AsgiMessage:
+            nonlocal sent_body
+            if not sent_body:
+                sent_body = True
+                return {
+                    "type": "http.request",
+                    "body": b'{"content":"hi","stream":true}',
+                    "more_body": False,
+                }
+            assert slow_orch.entered_event is not None
+            if not slow_orch.entered_event.is_set():
+                await asyncio.sleep(1.0)
+            return {"type": "http.disconnect"}
 
-    async def _send(message: AsgiMessage) -> None:
-        sent.append(message)
+        async def _send(message: AsgiMessage) -> None:
+            sent.append(message)
 
-    hdrs = [(b"authorization", f"Bearer {token}".encode()), (b"content-type", b"application/json")]
-    scope: Scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "method": "POST",
-        "path": f"/v1/sessions/{sid}/messages",
-        "query_string": b"",
-        "headers": hdrs,
-    }
-    with suppress(asyncio.CancelledError):
-        await app(scope, _receive, _send)
-    assert (slow_orch.stream_closed, sent[0]["status"]) == (True, HTTPStatus.OK)
+        hdrs = [
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"content-type", b"application/json"),
+        ]
+        scope: Scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "method": "POST",
+            "path": f"/v1/sessions/{sid}/messages",
+            "query_string": b"",
+            "headers": hdrs,
+        }
+        with suppress(asyncio.CancelledError):
+            await app(scope, _receive, _send)
+        assert (slow_orch.stream_closed, sent[0]["status"]) == (True, HTTPStatus.OK)
 
 
 async def test_prime_sse_stream_errors_disconnect_and_cleanup() -> None:
@@ -319,14 +322,14 @@ async def test_prime_sse_stream_errors_disconnect_and_cleanup() -> None:
 
     t0 = time.monotonic()
     p_slow = await _prime(_egen(ev_p, d=5.0, c=closed, t="early"), ka=10.0, budget=0.05)
-    assert (time.monotonic() - t0 < 0.3, p_slow.guardrail_blocked) == (True, False)  # noqa: PLR2004
+    assert (time.monotonic() - t0 < _SHORT_ELAPSED, p_slow.guardrail_blocked) == (True, False)
     assert (await anext(p_slow.events)) == ev_p[0]
     t1 = time.monotonic()
     await cast("AsyncGenerator[dc.OrchestratorEvent]", p_slow.events).aclose()
-    assert (time.monotonic() - t1 < 0.3, "early" in closed) == (True, True)  # noqa: PLR2004
+    assert (time.monotonic() - t1 < _SHORT_ELAPSED, "early" in closed) == (True, True)
     t2 = time.monotonic()
     p_ka = await _prime(_egen(d=0.45), ka=0.6, budget=2.0)
-    assert time.monotonic() - t2 < 0.45  # noqa: PLR2004
+    assert time.monotonic() - t2 < _KA_ELAPSED
     assert [ev async for ev in p_ka.events] == []
     p0 = await _prime(_egen((dc.TurnCompletedEvent(output=_turn_out("s", "p", "x")),)), budget=0.0)
     assert (p0.guardrail_blocked, len([ev async for ev in p0.events])) == (False, 1)

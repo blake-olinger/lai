@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import json
-import logging
 import secrets
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus as S
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import jwt
-import pytest
 import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
@@ -23,7 +20,6 @@ from lai.config.settings import LaiSettings
 from lai.domain import chat as dc
 from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.observability import LoggingConfig
-from lai.ports.orchestrator import OrchestratorPort
 from lai.security import (
     ApiKeyAuthProvider,
     CloudflareEdgeConfig,
@@ -31,11 +27,12 @@ from lai.security import (
     CompositeAuthenticator,
     OidcJwtAuthProvider,
     OidcProviderConfig,
-    generate_api_key,
 )
+from tests._helpers import StubOrchestratorBase, bearer_headers, open_app_client
+from tests.integration._helpers import mint_api_key
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Generator
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from fastapi import FastAPI
@@ -52,7 +49,7 @@ _RSA_PUBLIC_EXPONENT = 65537
 _EXPECTED_RECOVERY_CALLS = 2
 
 
-class _StubOrchestrator(OrchestratorPort):
+class _StubOrchestrator(StubOrchestratorBase):
     """Minimal orchestrator verifying authenticated principals reach route handlers."""
 
     async def run_turn(self, turn_input: dc.TurnInput, principal: AuthPrincipal) -> dc.TurnOutput:
@@ -75,25 +72,6 @@ class _StubOrchestrator(OrchestratorPort):
         out = await self.run_turn(turn_input, principal)
         yield dc.ContentDeltaEvent(delta=out.message.content)
         yield dc.TurnCompletedEvent(output=out)
-
-    async def resume_client_tool(self, *_: object, **__: object) -> dc.TurnOutput:
-        raise NotImplementedError
-
-    async def resume_client_tool_stream(
-        self, *_: object, **__: object
-    ) -> AsyncIterator[dc.OrchestratorEvent]:
-        raise NotImplementedError
-        yield  # pragma: no cover
-
-
-@pytest.fixture(autouse=True)
-def _cleanup_logging() -> Generator[None]:
-    yield
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        handler.flush()
-        handler.close()
-    root.handlers.clear()
 
 
 def _make_rsa_jwk(kid: str) -> tuple[rsa.RSAPrivateKey, dict[str, Any]]:
@@ -141,21 +119,8 @@ def _build_oidc_settings(tmp_path: Path, cf_secret: str) -> LaiSettings:
     )
 
 
-@asynccontextmanager
-async def _asgi_client(app: FastAPI) -> AsyncGenerator[httpx.AsyncClient]:
-    async with (
-        app.router.lifespan_context(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        ) as client,
-    ):
-        yield client
-
-
-async def _mint_key(app: FastAPI, name: str, scopes: tuple[ApiScope, ...]) -> tuple[str, str]:
-    created = generate_api_key(name, scopes)
-    await app.state.services.api_key_repo.create(created.record)
-    return created.plaintext_key, created.record.id
+async def _mint_app_key(app: FastAPI, name: str, scopes: tuple[ApiScope, ...]) -> tuple[str, str]:
+    return await mint_api_key(app.state.services, name, scopes)
 
 
 async def _get_code(
@@ -174,8 +139,8 @@ async def test_composite_auth_api_key_google_oidc_and_cloudflare_edge(tmp_path: 
     app = create_app(_build_oidc_settings(tmp_path, cf_secret), orchestrator=_StubOrchestrator())
     rsa_priv, rsa_jwk = _make_rsa_jwk("google-k1")
 
-    async with _asgi_client(app) as client:
-        plaintext, key_id = await _mint_key(
+    async with open_app_client(app) as client:
+        plaintext, key_id = await _mint_app_key(
             app, "ci", (ApiScope.PROJECTS_READ, ApiScope.CHAT_WRITE)
         )
         cf_hdrs = {"CF-Access-Client-Id": _CF_ID, "CF-Access-Client-Secret": cf_secret}
@@ -183,10 +148,9 @@ async def test_composite_auth_api_key_google_oidc_and_cloudflare_edge(tmp_path: 
         with respx.mock(assert_all_called=True) as mock:
             mock.get(_JWKS_URL).respond(S.OK, json={"keys": [rsa_jwk]})
             for extra in ({}, {"CF-Access-Client-Id": _CF_ID, "CF-Access-Client-Secret": "bad"}):
-                hdr = {"Authorization": f"Bearer {plaintext}", **extra}
-                assert await _get_code(client, hdr) == S.UNAUTHORIZED
+                assert await _get_code(client, bearer_headers(plaintext, **extra)) == S.UNAUTHORIZED
 
-            key_hdrs = {**cf_hdrs, "Authorization": f"Bearer {plaintext}"}
+            key_hdrs = bearer_headers(plaintext, **cf_hdrs)
             assert await _get_code(client, key_hdrs) == S.OK
             oai_body = {"model": "gemma4-26b-a4b", "messages": [{"role": "user", "content": "hi"}]}
             chat_res = await client.post("/v1/chat/completions", headers=key_hdrs, json=oai_body)
@@ -195,10 +159,7 @@ async def test_composite_auth_api_key_google_oidc_and_cloudflare_edge(tmp_path: 
             assert await _get_code(client, key_hdrs, "/v1/system/alerts") == S.FORBIDDEN
 
             def _oidc(sub: str, email: str) -> dict[str, str]:
-                return {
-                    **cf_hdrs,
-                    "Authorization": f"Bearer {_sign_jwt(rsa_priv, sub=sub, email=email)}",
-                }
+                return bearer_headers(_sign_jwt(rsa_priv, sub=sub, email=email), **cf_hdrs)
 
             dom_h, adm_h = _oidc("sub-dev", "dev@acme.test"), _oidc("sub-b", "boss@acme.test")
             for hdrs, path, code in (
@@ -219,8 +180,7 @@ async def test_composite_auth_api_key_google_oidc_and_cloudflare_edge(tmp_path: 
                 (_sign_jwt(rsa_priv, email_verified=False), S.UNAUTHORIZED),
                 (_sign_jwt(rsa_priv, email="stranger@external.org"), S.FORBIDDEN),
             ):
-                h_tok = {**cf_hdrs, "Authorization": f"Bearer {tok}"}
-                assert await _get_code(client, h_tok) == code
+                assert await _get_code(client, bearer_headers(tok, **cf_hdrs)) == code
 
 
 async def test_oidc_custom_jwks_fetcher_integration(tmp_path: Path) -> None:
@@ -252,17 +212,18 @@ async def test_oidc_custom_jwks_fetcher_integration(tmp_path: Path) -> None:
     )
     app = create_app(settings, services=svc)
     try:
-        async with _asgi_client(app) as client:
+        async with open_app_client(app) as client:
             tok = _sign_jwt(rsa_priv, kid="fetcher-k1", sub="sub-f", email="boss@acme.test")
-            h = {"Authorization": f"Bearer {tok}", "CF-Access-Client-Id": _CF_ID}
-            h["CF-Access-Client-Secret"] = cf_secret
+            h = bearer_headers(
+                tok, **{"CF-Access-Client-Id": _CF_ID, "CF-Access-Client-Secret": cf_secret}
+            )
             assert (await _get_code(client, h, "/v1/system/alerts"), fetch_calls) == (S.OK, 1)
     finally:
         await close_app_services(svc)
 
 
-async def test_cloudflare_dual_mode_startup_recovery_and_malformed_jwk_asgi(tmp_path: Path) -> None:
-    """Verify dual-mode CF pre-warm, partial token 401, startup recovery, and bad JWK 401."""
+async def test_cloudflare_dual_mode_prewarm_and_malformed_jwk_asgi(tmp_path: Path) -> None:
+    """Verify dual-mode CF pre-warm, partial header 401, and bad JWK rejection over ASGI."""
     cf_priv, cf_jwk = _make_rsa_jwk("cf-dual-1")
     cf_secret = secrets.token_hex(16)
     cf_jwt = _sign_jwt(cf_priv, kid="cf-dual-1", iss=f"https://{_CF_DOMAIN}", aud=_CF_AUD)
@@ -271,31 +232,37 @@ async def test_cloudflare_dual_mode_startup_recovery_and_malformed_jwk_asgi(tmp_
     with respx.mock(assert_all_called=True) as mock:
         body = {"keys": [cf_jwk, {"kid": "bad-cf", "kty": "RSA"}]}
         certs = mock.get(_CF_CERTS_URL).respond(S.OK, json=body)
-        cfg = _build_oidc_settings(tmp_path / "dual", cf_secret).model_copy(update=cf_up)
+        cfg = _build_oidc_settings(tmp_path, cf_secret).model_copy(update=cf_up)
         app = create_app(cfg, orchestrator=_StubOrchestrator())
-        async with _asgi_client(app) as client:
+        async with open_app_client(app) as client:
             assert certs.call_count == 1
-            key, _ = await _mint_key(app, "dual", (ApiScope.PROJECTS_READ,))
-            auth = {"Authorization": f"Bearer {key}"}
+            key, _ = await _mint_app_key(app, "dual", (ApiScope.PROJECTS_READ,))
             for h, code in (
-                ({**auth, "Cf-Access-Jwt-Assertion": cf_jwt}, S.OK),
-                ({**auth, "CF-Access-Client-Id": _CF_ID}, S.UNAUTHORIZED),
-                ({**auth, "Cf-Access-Jwt-Assertion": bad_jwt}, S.UNAUTHORIZED),
+                (bearer_headers(key, **{"Cf-Access-Jwt-Assertion": cf_jwt}), S.OK),
+                (bearer_headers(key, **{"CF-Access-Client-Id": _CF_ID}), S.UNAUTHORIZED),
+                (bearer_headers(key, **{"Cf-Access-Jwt-Assertion": bad_jwt}), S.UNAUTHORIZED),
             ):
                 assert await _get_code(client, h) == code
 
+
+async def test_cloudflare_dual_mode_startup_recovery_retries_jwks(tmp_path: Path) -> None:
+    """Verify Cloudflare JWKS startup failure recovers on the first authenticated request."""
+    cf_priv, cf_jwk = _make_rsa_jwk("cf-dual-1")
+    cf_secret = secrets.token_hex(16)
+    cf_jwt = _sign_jwt(cf_priv, kid="cf-dual-1", iss=f"https://{_CF_DOMAIN}", aud=_CF_AUD)
+    cf_up = {"cf_access_team_domain": _CF_DOMAIN, "cf_access_aud": _CF_AUD}
     with respx.mock(assert_all_called=True) as mock:
         resps = [
             httpx.Response(S.SERVICE_UNAVAILABLE),
             httpx.Response(S.OK, json={"keys": [cf_jwk]}),
         ]
         certs = mock.get(_CF_CERTS_URL).mock(side_effect=resps)
-        rec_cfg = _build_oidc_settings(tmp_path / "rec", cf_secret).model_copy(update=cf_up)
+        rec_cfg = _build_oidc_settings(tmp_path, cf_secret).model_copy(update=cf_up)
         rec_app = create_app(rec_cfg, orchestrator=_StubOrchestrator())
-        async with _asgi_client(rec_app) as client:
+        async with open_app_client(rec_app) as client:
             assert certs.call_count == 1
-            key, _ = await _mint_key(rec_app, "rec", (ApiScope.PROJECTS_READ,))
-            h_ok = {"Authorization": f"Bearer {key}", "Cf-Access-Jwt-Assertion": cf_jwt}
+            key, _ = await _mint_app_key(rec_app, "rec", (ApiScope.PROJECTS_READ,))
+            h_ok = bearer_headers(key, **{"Cf-Access-Jwt-Assertion": cf_jwt})
             assert await _get_code(client, h_ok) == S.OK
             assert certs.call_count == _EXPECTED_RECOVERY_CALLS
 
@@ -306,29 +273,31 @@ async def test_pre_auth_ip_rate_limit_blocks_before_oidc_and_ignores_spoofed_cf_
     """Enforce pre-auth per-IP 429 before OIDC JWKS fetch and ignore CF-Connecting-IP when off."""
     rsa_priv, _ = _make_rsa_jwk("ip-k1")
     oidc_jwt = _sign_jwt(rsa_priv, kid="ip-k1")
-    no_cf = _build_oidc_settings(tmp_path / "no_cf", "").model_copy(
+    no_cf = _build_oidc_settings(tmp_path, "").model_copy(
         update={"cf_access_enabled": False, "ip_rate_limit_rpm": 1}
     )
     with respx.mock(assert_all_called=False) as mock:
         jwks_route = mock.get(_JWKS_URL).respond(S.OK, json={"keys": []})
         app = create_app(no_cf, orchestrator=_StubOrchestrator())
-        async with _asgi_client(app) as client:
-            key, _ = await _mint_key(app, "ip", (ApiScope.PROJECTS_READ,))
-            assert await _get_code(client, {"Authorization": f"Bearer {key}"}) == S.OK
-            hdrs = {"Authorization": f"Bearer {oidc_jwt}", "CF-Connecting-IP": "203.0.113.99"}
+        async with open_app_client(app) as client:
+            key, _ = await _mint_app_key(app, "ip", (ApiScope.PROJECTS_READ,))
+            assert await _get_code(client, bearer_headers(key)) == S.OK
+            hdrs = bearer_headers(oidc_jwt, **{"CF-Connecting-IP": "203.0.113.99"})
             r_429 = await client.get("/v1/projects", headers=hdrs)
             assert (r_429.status_code, not jwks_route.called) == (S.TOO_MANY_REQUESTS, True)
             assert int(r_429.headers["Retry-After"]) >= 1
 
+
+async def test_pre_auth_ip_rate_limit_uses_cf_connecting_ip_when_cf_enabled(
+    tmp_path: Path,
+) -> None:
+    """Enforce per-IP 429 keyed by CF-Connecting-IP when Cloudflare Access is enabled."""
     cf_sec = secrets.token_hex(16)
-    cf_cfg = _build_oidc_settings(tmp_path / "with_cf", cf_sec).model_copy(
-        update={"ip_rate_limit_rpm": 1}
-    )
+    cf_cfg = _build_oidc_settings(tmp_path, cf_sec).model_copy(update={"ip_rate_limit_rpm": 1})
     cf_app = create_app(cf_cfg, orchestrator=_StubOrchestrator())
-    async with _asgi_client(cf_app) as client:
-        key, _ = await _mint_key(cf_app, "cf-ip", (ApiScope.PROJECTS_READ,))
+    async with open_app_client(cf_app) as client:
+        key, _ = await _mint_app_key(cf_app, "cf-ip", (ApiScope.PROJECTS_READ,))
         base = {
-            "Authorization": f"Bearer {key}",
             "CF-Access-Client-Id": _CF_ID,
             "CF-Access-Client-Secret": cf_sec,
         }
@@ -338,4 +307,7 @@ async def test_pre_auth_ip_rate_limit_blocks_before_oidc_and_ignores_spoofed_cf_
             ("198.51.100.2", S.OK),
         )
         for ip, exp in cases:
-            assert await _get_code(client, {**base, "CF-Connecting-IP": ip}) == exp
+            assert (
+                await _get_code(client, bearer_headers(key, **base, **{"CF-Connecting-IP": ip}))
+                == exp
+            )

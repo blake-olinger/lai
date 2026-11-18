@@ -64,20 +64,27 @@ def test_openapi_json_matches_app_and_passes_spec_validator() -> None:
 
 
 def test_github_workflows_and_dependabot_parse_with_expected_triggers_and_jobs() -> None:
-    """Validate CI, security, release workflows and dependabot config."""
-    ci = _load_yaml_mapping(REPO_ROOT / ".github" / "workflows" / "ci.yml")
+    """Validate all CI, security, release workflows and dependabot config."""
+    workflows_dir = REPO_ROOT / ".github" / "workflows"
+    assert {p.name for p in workflows_dir.glob("*.yml")} == {
+        "ci.yml",
+        "release.yml",
+        "security.yml",
+    }
+
+    ci = _load_yaml_mapping(workflows_dir / "ci.yml")
     ci_triggers = _get_triggers(ci)
     assert {"push", "pull_request"}.issubset(ci_triggers)
     ci_jobs = cast("dict[str, object]", ci["jobs"])
     assert "verify" in ci_jobs
 
-    security = _load_yaml_mapping(REPO_ROOT / ".github" / "workflows" / "security.yml")
+    security = _load_yaml_mapping(workflows_dir / "security.yml")
     sec_triggers = _get_triggers(security)
     assert {"push", "pull_request", "schedule"}.issubset(sec_triggers)
     sec_jobs = cast("dict[str, object]", security["jobs"])
     assert "security" in sec_jobs
 
-    release = _load_yaml_mapping(REPO_ROOT / ".github" / "workflows" / "release.yml")
+    release = _load_yaml_mapping(workflows_dir / "release.yml")
     rel_triggers = _get_triggers(release)
     assert "push" in rel_triggers
     push_cfg = cast("dict[str, object]", rel_triggers["push"])

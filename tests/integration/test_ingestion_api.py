@@ -2,31 +2,25 @@
 
 from __future__ import annotations
 
-import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, cast
 
-import httpx
-import pytest
-
-from lai.api.app import create_app
-from lai.api.runtime import build_app_services, close_app_services
 from lai.config.settings import LaiSettings
 from lai.domain.auth import ApiScope
 from lai.domain.files import FileKind, FileStatus
 from lai.domain.observability import LoggingConfig
-from lai.ingestion import (
-    DeterministicHashEmbedder,
-    LanceDbVectorStore,
-    LocalIngestionPipeline,
-    reciprocal_rank_fusion,
+from lai.ingestion import reciprocal_rank_fusion
+from tests.integration._helpers import (
+    IntegrationSpec,
+    create_project,
+    mint_auth_headers,
+    open_services_harness,
 )
-from lai.security import generate_api_key
-from lai.tools import build_default_tool_registry
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
+
+    import httpx
 
 _FP_HEX_LEN = 16
 _MIN_LOG_LINES = 2200
@@ -34,16 +28,17 @@ _MIN_TRACEBACK_CHUNKS = 3
 _EXPECTED_TIMEOUT_ERRORS = 4
 _EXPECTED_VALUE_ERRORS = 3
 _EXPECTED_WARNINGS = 11
+_INGEST_SCOPES = (ApiScope.PROJECTS_WRITE, ApiScope.FILES_WRITE, ApiScope.CHAT_WRITE)
 
 
-@pytest.fixture(autouse=True)
-def _cleanup_logging() -> Generator[None]:
-    yield
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        handler.flush()
-        handler.close()
-    root.handlers.clear()
+def _ingest_settings(tmp_path: Path) -> LaiSettings:
+    data_dir = tmp_path / "data"
+    return LaiSettings(
+        data_dir=data_dir,
+        models_dir=tmp_path / "models",
+        bin_dir=tmp_path / "bin",
+        logging=LoggingConfig(log_dir=data_dir / "logs", enable_file_logs=False),
+    )
 
 
 def _build_multi_thousand_line_log() -> bytes:
@@ -81,50 +76,11 @@ def _build_multi_thousand_line_log() -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-async def _upload_project_files(
+async def _upload_large_log(
     client: httpx.AsyncClient,
     headers: dict[str, str],
     pid: str,
-    other_pid: str,
 ) -> dict[str, object]:
-    db_code = (
-        b"async def acquire_pool_connection(pool, timeout: float = 5.0):\n"
-        b"    # Checkout connection from primary-db pool\n"
-        b"    return await pool.checkout(timeout=timeout)\n"
-    )
-    auth_code = (
-        b"def verify_bearer_token(raw_token: str) -> dict[str, str]:\n"
-        b"    if not raw_token:\n"
-        b"        raise ValueError('invalid token signature in header')\n"
-        b"    return {'sub': 'user'}\n"
-    )
-
-    r_auth = await client.post(
-        "/v1/files?wait=true",
-        headers=headers,
-        data={"project_id": pid},
-        files={"file": ("auth_service.py", auth_code, "text/x-python")},
-    )
-    assert r_auth.status_code == HTTPStatus.CREATED
-    auth_rec = r_auth.json()
-    assert auth_rec["kind"] == FileKind.CODE.value
-    assert auth_rec["status"] == FileStatus.READY.value
-    assert "verify_bearer_token" in auth_rec["code_summary"]["symbols"]
-
-    r_db = await client.post(
-        f"/v1/files/stream?project_id={pid}&wait=true",
-        headers={
-            **headers,
-            "X-LAI-Filename": "db_pool.py",
-            "Content-Type": "text/x-python",
-        },
-        content=db_code,
-    )
-    assert r_db.status_code == HTTPStatus.CREATED
-    db_rec = r_db.json()
-    assert db_rec["kind"] == FileKind.CODE.value
-    assert "acquire_pool_connection" in db_rec["code_summary"]["symbols"]
-
     r_log = await client.post(
         "/v1/files/stream?wait=true",
         headers={
@@ -136,119 +92,132 @@ async def _upload_project_files(
         content=_build_multi_thousand_line_log(),
     )
     assert r_log.status_code == HTTPStatus.CREATED
-
-    await client.post(
-        "/v1/files?wait=true",
-        headers=headers,
-        data={"project_id": other_pid},
-        files={
-            "file": (
-                "other.log",
-                b"2026-11-17T00:00:00Z ERROR TimeoutError: isolated project\n",
-                "text/plain",
-            )
-        },
-    )
     return dict(r_log.json())
 
 
-async def _assert_log_summary_and_chunks(
-    client: httpx.AsyncClient,
-    headers: dict[str, str],
-    log_rec: dict[str, object],
-) -> str:
-    log_id = str(log_rec["id"])
-    assert log_rec["kind"] == FileKind.LOG.value
-    assert log_rec["status"] == FileStatus.READY.value
+async def test_code_upload_multipart_and_streaming_extracts_symbols(tmp_path: Path) -> None:
+    """Multipart and streaming Python uploads classify FileKind.CODE and extract symbols."""
+    db_code = (
+        b"async def acquire_pool_connection(pool, timeout: float = 5.0):\n"
+        b"    # Checkout connection from primary-db pool\n"
+        b"    return await pool.checkout(timeout=timeout)\n"
+    )
+    auth_code = (
+        b"def verify_bearer_token(raw_token: str) -> dict[str, str]:\n"
+        b"    if not raw_token:\n"
+        b"        raise ValueError('invalid token signature in header')\n"
+        b"    return {'sub': 'user'}\n"
+    )
+    spec = IntegrationSpec(use_hash_embedder=True)
+    async with open_services_harness(_ingest_settings(tmp_path), spec) as harness:
+        headers = await mint_auth_headers(harness.svc, "ingest-code", _INGEST_SCOPES)
+        pid = await create_project(harness.client, headers, "ingest-code-p1")
 
-    summary = cast("dict[str, Any]", log_rec["log_summary"])
-    assert isinstance(summary, dict)
-    assert summary["total_lines"] >= _MIN_LOG_LINES
-    assert summary["error_count"] == _EXPECTED_TIMEOUT_ERRORS + _EXPECTED_VALUE_ERRORS
-    assert summary["warning_count"] == _EXPECTED_WARNINGS
-    assert summary["first_timestamp"] is not None
-    assert summary["last_timestamp"] is not None
-
-    top_items = cast("list[dict[str, Any]]", summary["top_exceptions"])
-    by_exc_type = {str(item["exception_type"]): item for item in top_items}
-    assert by_exc_type["TimeoutError"]["count"] == _EXPECTED_TIMEOUT_ERRORS
-    assert len(str(by_exc_type["TimeoutError"]["fingerprint"])) == _FP_HEX_LEN
-    assert by_exc_type["ValueError"]["count"] == _EXPECTED_VALUE_ERRORS
-    assert len(str(by_exc_type["ValueError"]["fingerprint"])) == _FP_HEX_LEN
-
-    chunks = (await client.get(f"/v1/files/{log_id}/chunks", headers=headers)).json()["items"]
-    tb_chunks = [c for c in chunks if "Traceback (most recent call last):" in c["text"]]
-    assert len(tb_chunks) >= _MIN_TRACEBACK_CHUNKS
-    for tb_chunk in tb_chunks:
-        assert (
-            "TimeoutError: connection pool exhausted for primary-db" in tb_chunk["text"]
-            or "ValueError: invalid token signature in header" in tb_chunk["text"]
-        )
-
-    first_tb = tb_chunks[0]
-    filtered = (
-        await client.get(
-            f"/v1/files/{log_id}/chunks",
+        r_auth = await harness.client.post(
+            "/v1/files?wait=true",
             headers=headers,
-            params={"start_line": first_tb["start_line"], "end_line": first_tb["end_line"]},
+            data={"project_id": pid},
+            files={"file": ("auth_service.py", auth_code, "text/x-python")},
         )
-    ).json()["items"]
-    assert any(c["id"] == first_tb["id"] for c in filtered)
-    return log_id
+        assert r_auth.status_code == HTTPStatus.CREATED
+        auth_rec = r_auth.json()
+        assert auth_rec["kind"] == FileKind.CODE.value
+        assert auth_rec["status"] == FileStatus.READY.value
+        assert "verify_bearer_token" in auth_rec["code_summary"]["symbols"]
+
+        r_db = await harness.client.post(
+            f"/v1/files/stream?project_id={pid}&wait=true",
+            headers={**headers, "X-LAI-Filename": "db_pool.py", "Content-Type": "text/x-python"},
+            content=db_code,
+        )
+        assert r_db.status_code == HTTPStatus.CREATED
+        db_rec = r_db.json()
+        assert db_rec["kind"] == FileKind.CODE.value
+        assert "acquire_pool_connection" in db_rec["code_summary"]["symbols"]
 
 
-async def test_multipart_and_streaming_ingestion_log_summary_and_hybrid_rrf(
+async def test_large_log_streaming_ingestion_preserves_tracebacks_and_summaries(
     tmp_path: Path,
 ) -> None:
-    """Upload code + >2k-line log via HTTP and verify trace preservation, summaries, and RRF."""
-    data_dir = tmp_path / "data"
-    settings = LaiSettings(
-        data_dir=data_dir,
-        models_dir=tmp_path / "models",
-        bin_dir=tmp_path / "bin",
-        logging=LoggingConfig(log_dir=data_dir / "logs", enable_file_logs=False),
-    )
-    svc = await build_app_services(settings)
-    embedder = DeterministicHashEmbedder()
-    vector_store = LanceDbVectorStore(data_dir / "lancedb", dimensions=embedder.dimensions)
-    svc.embedder = embedder
-    svc.vector_store = vector_store
-    svc.ingestion_pipeline = LocalIngestionPipeline(
-        blob_store=svc.blob_store,
-        file_repo=svc.file_repo,
-        embedder=embedder,
-        vector_store=vector_store,
-    )
-    svc.tool_registry = build_default_tool_registry(
-        svc.file_repo, svc.blob_store, embedder=embedder, vector_store=vector_store
-    )
+    """Streaming >2k-line log preserves whole tracebacks, summary counts, and line filters."""
+    spec = IntegrationSpec(use_hash_embedder=True)
+    async with open_services_harness(_ingest_settings(tmp_path), spec) as harness:
+        headers = await mint_auth_headers(harness.svc, "ingest-log", _INGEST_SCOPES)
+        pid = await create_project(harness.client, headers, "ingest-log-p1")
+        log_rec = await _upload_large_log(harness.client, headers, pid)
+        log_id = str(log_rec["id"])
 
-    api_key = generate_api_key(
-        "ingest-writer",
-        (ApiScope.PROJECTS_WRITE, ApiScope.FILES_WRITE, ApiScope.CHAT_WRITE),
-    )
-    await svc.api_key_repo.create(api_key.record)
-    headers = {"Authorization": f"Bearer {api_key.plaintext_key}"}
+        assert log_rec["kind"] == FileKind.LOG.value
+        assert log_rec["status"] == FileStatus.READY.value
 
-    app = create_app(settings, services=svc)
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as client:
-            pid = (
-                await client.post("/v1/projects", headers=headers, json={"name": "ingest-p1"})
-            ).json()["id"]
-            other_pid = (
-                await client.post("/v1/projects", headers=headers, json={"name": "ingest-p2"})
-            ).json()["id"]
-            log_rec = await _upload_project_files(client, headers, pid, other_pid)
-            log_id = await _assert_log_summary_and_chunks(client, headers, log_rec)
+        summary = cast("dict[str, Any]", log_rec["log_summary"])
+        assert isinstance(summary, dict)
+        assert summary["total_lines"] >= _MIN_LOG_LINES
+        assert summary["error_count"] == _EXPECTED_TIMEOUT_ERRORS + _EXPECTED_VALUE_ERRORS
+        assert summary["warning_count"] == _EXPECTED_WARNINGS
+        assert summary["first_timestamp"] is not None
+        assert summary["last_timestamp"] is not None
 
+        top_items = cast("list[dict[str, Any]]", summary["top_exceptions"])
+        by_exc_type = {str(item["exception_type"]): item for item in top_items}
+        assert by_exc_type["TimeoutError"]["count"] == _EXPECTED_TIMEOUT_ERRORS
+        assert len(str(by_exc_type["TimeoutError"]["fingerprint"])) == _FP_HEX_LEN
+        assert by_exc_type["ValueError"]["count"] == _EXPECTED_VALUE_ERRORS
+        assert len(str(by_exc_type["ValueError"]["fingerprint"])) == _FP_HEX_LEN
+
+        chunks = (await harness.client.get(f"/v1/files/{log_id}/chunks", headers=headers)).json()[
+            "items"
+        ]
+        tb_chunks = [c for c in chunks if "Traceback (most recent call last):" in c["text"]]
+        assert len(tb_chunks) >= _MIN_TRACEBACK_CHUNKS
+        for tb_chunk in tb_chunks:
+            assert (
+                "TimeoutError: connection pool exhausted for primary-db" in tb_chunk["text"]
+                or "ValueError: invalid token signature in header" in tb_chunk["text"]
+            )
+
+        first_tb = tb_chunks[0]
+        filtered = (
+            await harness.client.get(
+                f"/v1/files/{log_id}/chunks",
+                headers=headers,
+                params={"start_line": first_tb["start_line"], "end_line": first_tb["end_line"]},
+            )
+        ).json()["items"]
+        assert any(c["id"] == first_tb["id"] for c in filtered)
+
+
+async def test_hybrid_fts_vector_search_and_rrf_respect_project_isolation(
+    tmp_path: Path,
+) -> None:
+    """FTS5, LanceDB vectors, and RRF fuse matches strictly within the target project."""
+    spec = IntegrationSpec(use_hash_embedder=True)
+    async with open_services_harness(_ingest_settings(tmp_path), spec) as harness:
+        headers = await mint_auth_headers(harness.svc, "ingest-rrf", _INGEST_SCOPES)
+        pid = await create_project(harness.client, headers, "ingest-p1")
+        other_pid = await create_project(harness.client, headers, "ingest-p2")
+
+        log_rec = await _upload_large_log(harness.client, headers, pid)
+        log_id = str(log_rec["id"])
+        await harness.client.post(
+            "/v1/files?wait=true",
+            headers=headers,
+            data={"project_id": other_pid},
+            files={
+                "file": (
+                    "other.log",
+                    b"2026-11-17T00:00:00Z ERROR TimeoutError: isolated project\n",
+                    "text/plain",
+                )
+            },
+        )
+
+        assert harness.svc.embedder is not None
+        assert harness.svc.vector_store is not None
         query = "TimeoutError connection pool exhausted primary-db"
-        fts_hits = await svc.file_repo.search_fts(pid, query, limit=20)
-        vec_hits = await vector_store.search_vectors(
-            pid, await embedder.embed_query(query), limit=20
+        fts_hits = await harness.svc.file_repo.search_fts(pid, query, limit=20)
+        vec_hits = await harness.svc.vector_store.search_vectors(
+            pid, await harness.svc.embedder.embed_query(query), limit=20
         )
         assert fts_hits
         assert vec_hits
@@ -259,5 +228,3 @@ async def test_multipart_and_streaming_ingestion_log_summary_and_hybrid_rrf(
         assert fused
         assert log_id in {hit.chunk.file_id for hit in fused}
         assert any("connection pool exhausted" in hit.chunk.text for hit in fused)
-    finally:
-        await close_app_services(svc)

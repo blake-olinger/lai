@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import runpy
 import sys
 from typing import TYPE_CHECKING
@@ -29,6 +28,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 EXPECTED_PORT = 8499
+EXPECTED_TWO_MODELS = 2
 
 
 @pytest.fixture(autouse=True)
@@ -120,11 +120,7 @@ class _RecordingGuardrailSupervisor(ShieldGemmaSupervisor):
         self._events.append("stop:shield")
 
 
-def test_cli_models_setup_flags_list_and_errors(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify lai models setup forwards tag/cuda_version/force/token and handles failures."""
+def _write_cli_config(tmp_path: Path) -> Path:
     cfg_path = tmp_path / "config.yaml"
     cfg_payload = {
         "data_dir": str(tmp_path / "data"),
@@ -132,17 +128,32 @@ def test_cli_models_setup_flags_list_and_errors(
         "bin_dir": str(tmp_path / "bin"),
     }
     cfg_path.write_text(yaml.safe_dump(cfg_payload), encoding="utf-8")
+    return cfg_path
 
+
+def test_cli_models_build_downloader_and_list(tmp_path: Path) -> None:
+    """Verify models_cmd.build_downloader and `lai models list` output."""
+    cfg_path = _write_cli_config(tmp_path)
     real_dl = models_cmd.build_downloader(
         LaiSettings(data_dir=tmp_path / "data", models_dir=tmp_path / "m", bin_dir=tmp_path / "b")
     )
     assert isinstance(real_dl, ModelDownloader)
 
+    res_list = CliRunner().invoke(cli_app, ["models", "list", "--config", str(cfg_path)])
+    assert res_list.exit_code == 0
+    assert "* gemma4-26b-a4b" in res_list.output
+
+
+def test_cli_models_setup_default_flags_and_skip_binaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify `lai models setup` forwards flags cleanly across default and skip modes."""
+    cfg_path = _write_cli_config(tmp_path)
     captured: list[_RecordingDownloader] = []
-    fail_next = False
 
     def _fake_build(settings: LaiSettings) -> _RecordingDownloader:
-        stub = _RecordingDownloader(settings.models_dir, settings.bin_dir, fail_model=fail_next)
+        stub = _RecordingDownloader(settings.models_dir, settings.bin_dir)
         captured.append(stub)
         return stub
 
@@ -160,22 +171,10 @@ def test_cli_models_setup_flags_list_and_errors(
     assert "primary_model:" in res_default.output
     assert "guardrail_model:" in res_default.output
 
+    flags = ["--tag", "b9897", "--cuda-version", "12.4", "--hf-token", "hf_tok_123"]
     res_flags = runner.invoke(
         cli_app,
-        [
-            "models",
-            "setup",
-            "--config",
-            str(cfg_path),
-            "--tag",
-            "b9897",
-            "--cuda-version",
-            "12.4",
-            "--hf-token",
-            "hf_tok_123",
-            "--skip-guardrail",
-            "--force",
-        ],
+        ["models", "setup", "--config", str(cfg_path), *flags, "--skip-guardrail", "--force"],
     )
     assert res_flags.exit_code == 0, res_flags.output
     assert captured[1].binary_calls == [("b9897", "12.4", True)]
@@ -187,23 +186,27 @@ def test_cli_models_setup_flags_list_and_errors(
     )
     assert res_skip_bin.exit_code == 0, res_skip_bin.output
     assert captured[2].binary_calls == []
-    assert len(captured[2].model_calls) == 2  # noqa: PLR2004
-
-    fail_next = True
-    res_fail = runner.invoke(cli_app, ["models", "setup", "--config", str(cfg_path)])
-    assert res_fail.exit_code == 1
-    assert "Model setup failed" in res_fail.output
-
-    res_list = runner.invoke(cli_app, ["models", "list", "--config", str(cfg_path)])
-    assert res_list.exit_code == 0
-    assert "* gemma4-26b-a4b" in res_list.output
+    assert len(captured[2].model_calls) == EXPECTED_TWO_MODELS
 
 
-def test_cli_serve_supervisors_llamacpp_settings_and_errors(
+def test_cli_models_setup_failure_exits_nonzero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify build_supervisors(llamacpp), uvicorn.Config, LaiSettings mutations, and errors."""
+    """Verify `lai models setup` reports failure and exits 1 when downloads fail."""
+    cfg_path = _write_cli_config(tmp_path)
+
+    def _build_failing(settings: LaiSettings) -> _RecordingDownloader:
+        return _RecordingDownloader(settings.models_dir, settings.bin_dir, fail_model=True)
+
+    monkeypatch.setattr(models_cmd, "build_downloader", _build_failing)
+    res_fail = CliRunner().invoke(cli_app, ["models", "setup", "--config", str(cfg_path)])
+    assert res_fail.exit_code == 1
+    assert "Model setup failed" in res_fail.output
+
+
+def test_cli_serve_build_supervisors_llamacpp(tmp_path: Path) -> None:
+    """Verify build_supervisors wires LlamaCppSupervisor and optional ShieldGemmaSupervisor."""
     llama_dir = tmp_path / "bin" / "llama"
     llama_dir.mkdir(parents=True)
     exe_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
@@ -233,14 +236,13 @@ def test_cli_serve_supervisors_llamacpp_settings_and_errors(
     assert isinstance(sup_off, LlamaCppSupervisor)
     assert guard_off is None
 
-    cfg_path = tmp_path / "config.yaml"
-    cfg_payload = {
-        "data_dir": str(tmp_path / "data"),
-        "models_dir": str(tmp_path / "models"),
-        "bin_dir": str(tmp_path / "bin"),
-    }
-    cfg_path.write_text(yaml.safe_dump(cfg_payload), encoding="utf-8")
 
+def test_cli_serve_runs_lifecycle_and_forwards_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify `lai serve` starts/stops supervisors in order and forwards CLI overrides."""
+    cfg_path = _write_cli_config(tmp_path)
     events: list[str] = []
     configs: list[uvicorn.Config] = []
     seen_settings: list[LaiSettings] = []
@@ -268,23 +270,20 @@ def test_cli_serve_supervisors_llamacpp_settings_and_errors(
     monkeypatch.setattr(serve_cmd, "create_app", _fake_create_app)
     monkeypatch.setattr(uvicorn, "Server", _RecordingServer)
 
-    runner = CliRunner()
-    res = runner.invoke(
-        cli_app,
-        [
-            "serve",
-            "--config",
-            str(cfg_path),
-            "--host",
-            "127.0.0.2",
-            "--port",
-            str(EXPECTED_PORT),
-            "--profile",
-            "gemma4-26b-a4b",
-            "--backend",
-            "llamacpp",
-        ],
-    )
+    serve_args = [
+        "serve",
+        "--config",
+        str(cfg_path),
+        "--host",
+        "127.0.0.2",
+        "--port",
+        str(EXPECTED_PORT),
+        "--profile",
+        "gemma4-26b-a4b",
+        "--backend",
+        "llamacpp",
+    ]
+    res = CliRunner().invoke(cli_app, serve_args)
     assert res.exit_code == 0, res.output
     assert events == ["start:llama", "start:shield", "uvicorn:serve", "stop:shield", "stop:llama"]
     assert llama_rec.started_profiles == [GEMMA4_26B_A4B_PROFILE]
@@ -298,7 +297,14 @@ def test_cli_serve_supervisors_llamacpp_settings_and_errors(
     assert configs[0].port == EXPECTED_PORT
     assert configs[0].log_config is None
 
-    events.clear()
+
+def test_cli_serve_startup_failure_stops_started_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify `lai serve` stops started supervisors and exits 1 on startup failure."""
+    cfg_path = _write_cli_config(tmp_path)
+    events: list[str] = []
     failing = _RecordingInferenceSupervisor(events, fail_start=True)
 
     def _failing_sup_pair(
@@ -307,7 +313,7 @@ def test_cli_serve_supervisors_llamacpp_settings_and_errors(
         return (failing, None)
 
     monkeypatch.setattr(serve_cmd, "build_supervisors", _failing_sup_pair)
-    res_fail = runner.invoke(cli_app, ["serve", "--config", str(cfg_path)])
+    res_fail = CliRunner().invoke(cli_app, ["serve", "--config", str(cfg_path)])
     assert res_fail.exit_code == 1
     assert "Server startup failed" in res_fail.output
     assert events == ["start:llama", "stop:llama"]
@@ -318,6 +324,7 @@ def test_cli_main_module_entrypoint(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Executing `python -m lai.cli` invokes Typer main() and exits cleanly on --help."""
+    monkeypatch.delitem(sys.modules, "lai.cli.__main__", raising=False)
     monkeypatch.setattr(sys, "argv", ["lai", "--help"])
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_module("lai.cli", run_name="__main__")
@@ -325,5 +332,7 @@ def test_cli_main_module_entrypoint(
     captured = capsys.readouterr()
     assert "Local AI platform CLI" in captured.out
 
-    main_mod = importlib.import_module("lai.cli.__main__")
-    assert callable(main_mod.main)
+    import lai.cli.__main__ as cli_main_mod  # noqa: PLC0415
+
+    main_fn: object = getattr(cli_main_mod, "main", None)
+    assert callable(main_fn)

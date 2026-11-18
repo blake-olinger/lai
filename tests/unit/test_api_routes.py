@@ -1,12 +1,11 @@
-"""Unit tests for FastAPI routes, error envelopes, alerts, OpenAI compat, and CLI."""
+"""Unit tests for FastAPI health, system, projects, files, sessions, and OpenAI routes."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
 import time
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from http import HTTPStatus as S
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -14,40 +13,37 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 import respx
-from typer.testing import CliRunner
 
 from lai.api.app import create_app
 from lai.api.runtime import build_app_services, close_app_services
-from lai.cli.app import app as cli_app
 from lai.config.settings import LaiSettings
 from lai.domain import chat as dc
 from lai.domain import errors as errs
 from lai.domain import tools as dt
 from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.files import FileStatus
-from lai.domain.observability import AlertCategory, LoggingConfig
+from lai.domain.observability import LoggingConfig
 from lai.inference import GpuTelemetry
 from lai.ingestion import DeterministicHashEmbedder, LanceDbVectorStore, LocalIngestionPipeline
-from lai.ports.orchestrator import OrchestratorPort
 from lai.ports.tools import ToolPluginPort
-from lai.security import TokenBucketRateLimiter, generate_api_key
+from lai.security import generate_api_key
+from tests._helpers import StubOrchestratorBase, bearer_headers
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Generator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from lai.api.deps import AppServices
 
-HTTP_CLIENT_DISCONNECTED = 499
-EXPECTED_MIN_TOOLS = 3
 EXPECTED_CHUNK_COUNT = 1
-_CHAT_URL = "/v1/chat/completions"
 _CHAT_JSON: dict[str, object] = {
     "model": "gemma4-26b-a4b",
     "messages": [{"role": "user", "content": "hi"}],
 }
 
 
-class _GatedReadTool(ToolPluginPort):
+class GatedReadTool(ToolPluginPort):
+    """Guarded read tool plugin used to exercise tool approval routes."""
+
     @property
     def spec(self) -> dt.ToolSpec:
         return dt.ToolSpec(
@@ -64,18 +60,25 @@ class _GatedReadTool(ToolPluginPort):
         return dt.ToolResult(tool_name="read_note", success=True, output="saved")
 
 
-class _FakeOrch(OrchestratorPort):
-    def __init__(self) -> None:
+class FakeOrch(StubOrchestratorBase):
+    """Configurable OrchestratorPort double created upfront per test scenario."""
+
+    def __init__(
+        self,
+        *,
+        next_error: Exception | None = None,
+        blocked: bool = False,
+        policy: str | None = None,
+    ) -> None:
         self.calls: list[dc.TurnInput] = []
-        self.next_error: Exception | None = None
-        self.blocked = False
-        self.policy: str | None = None
+        self.next_error = next_error
+        self.blocked = blocked
+        self.policy = policy
 
     def _prepare(self, inp: dc.TurnInput) -> dc.TurnOutput:
         self.calls.append(inp)
         if self.next_error is not None:
-            err, self.next_error = self.next_error, None
-            raise err
+            raise self.next_error
         msg = dc.Message(
             session_id=inp.session_id,
             project_id=inp.project_id,
@@ -103,59 +106,56 @@ class _FakeOrch(OrchestratorPort):
         yield dc.ContentDeltaEvent(delta=out.message.content)
         yield dc.TurnCompletedEvent(output=out)
 
-    async def resume_client_tool(self, *_: object, **__: object) -> dc.TurnOutput:
-        raise NotImplementedError
-
-    async def resume_client_tool_stream(
-        self, *_: object, **__: object
-    ) -> AsyncIterator[dc.OrchestratorEvent]:
-        raise NotImplementedError
-        yield  # pragma: no cover
-
-
-def _auth(token: str, **extra: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}", **extra}
-
-
-@pytest.fixture(autouse=True)
-def _cleanup_logging() -> Generator[None]:
-    yield
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        handler.flush()
-        handler.close()
-    root.handlers.clear()
-
 
 @dataclass(slots=True)
-class _Env:
+class RoutesEnv:
+    """Isolated unit-route ASGI environment with prebuilt tokens and services."""
+
     svc: AppServices
-    orch: _FakeOrch
+    orch: FakeOrch
     client: httpx.AsyncClient
     toks: dict[str, str]
 
 
-@pytest.fixture
-async def env(tmp_path: Path) -> AsyncIterator[_Env]:
+@asynccontextmanager
+async def open_routes_env(
+    tmp_path: Path,
+    *,
+    orch: FakeOrch | None = None,
+    rate_limit_rpm: int = 120,
+    raise_app_exceptions: bool = True,
+) -> AsyncGenerator[RoutesEnv]:
+    """Build isolated unit-route AppServices + ASGI client upfront without mid-test mutation."""
     data_dir = tmp_path / "data"
     settings = LaiSettings(
         data_dir=data_dir,
         models_dir=tmp_path / "models",
         bin_dir=tmp_path / "bin",
+        rate_limit_rpm=rate_limit_rpm,
         logging=LoggingConfig(log_dir=data_dir / "logs", enable_file_logs=True),
     )
-    orch = _FakeOrch()
-    svc = await build_app_services(settings, orchestrator=orch)
+    resolved_orch = orch or FakeOrch()
+    base_svc = await build_app_services(settings, orchestrator=resolved_orch)
     emb = DeterministicHashEmbedder()
     vec = LanceDbVectorStore(data_dir / "lancedb", dimensions=emb.dimensions)
-    svc.embedder, svc.vector_store = emb, vec
-    svc.ingestion_pipeline = LocalIngestionPipeline(
-        blob_store=svc.blob_store, file_repo=svc.file_repo, embedder=emb, vector_store=vec
+    svc = replace(
+        base_svc,
+        embedder=emb,
+        vector_store=vec,
+        ingestion_pipeline=LocalIngestionPipeline(
+            blob_store=base_svc.blob_store,
+            file_repo=base_svc.file_repo,
+            embedder=emb,
+            vector_store=vec,
+        ),
+        gpu_telemetry_fn=lambda: GpuTelemetry(
+            gpu_name="RTX 3090",
+            memory_used_mb=1024,
+            memory_total_mb=24576,
+            utilization_percent=5,
+        ),
     )
-    svc.gpu_telemetry_fn = lambda: GpuTelemetry(
-        gpu_name="RTX 3090", memory_used_mb=1024, memory_total_mb=24576, utilization_percent=5
-    )
-    svc.tool_registry.register(_GatedReadTool())
+    svc.tool_registry.register(GatedReadTool())
 
     tokens: dict[str, str] = {}
     writer_scopes = (
@@ -174,173 +174,165 @@ async def env(tmp_path: Path) -> AsyncIterator[_Env]:
         tokens[role] = created.plaintext_key
 
     app = create_app(settings, services=svc)
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=raise_app_exceptions)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            yield _Env(svc=svc, orch=orch, client=client, toks=tokens)
+            yield RoutesEnv(svc=svc, orch=resolved_orch, client=client, toks=tokens)
     finally:
         await close_app_services(svc)
 
 
-async def test_health_status_alerts_and_files_lifecycle(env: _Env) -> None:
-    """Verify /v1/health, auth/scope checks, /v1/system/*, projects, and file lifecycle."""
-    svc, client, toks = env.svc, env.client, env.toks
-    r_hp = await client.get("/v1/health", headers={"X-Request-Id": "req_1"})
-    assert (r_hp.status_code, r_hp.headers["X-Request-Id"]) == (S.OK, "req_1")
-    assert (await client.get("/v1/system/status")).status_code == S.UNAUTHORIZED
+async def test_health_status_and_alerts_authorization(tmp_path: Path) -> None:
+    """Verify /v1/health request ID, /v1/system/status telemetry, and /v1/system/alerts scope."""
+    async with open_routes_env(tmp_path) as env:
+        r_hp = await env.client.get("/v1/health", headers={"X-Request-Id": "req_1"})
+        assert (r_hp.status_code, r_hp.headers["X-Request-Id"]) == (S.OK, "req_1")
+        assert (await env.client.get("/v1/system/status")).status_code == S.UNAUTHORIZED
 
-    with respx.mock(assert_all_called=True) as mock:
-        mock.get("http://127.0.0.1:8081/health").respond(S.OK, json={"status": "ok"})
-        mock.get("http://127.0.0.1:8082/health").respond(S.OK, json={"status": "ok"})
-        r_st = await client.get("/v1/system/status", headers=_auth(toks["reader"]))
-    assert r_st.status_code == S.OK
-    assert r_st.json()["gpu"]["gpu_name"] == "RTX 3090"
-    assert r_st.json()["guardrail_health"]["healthy"] is True
-    r_al = await client.get("/v1/system/alerts", headers=_auth(toks["reader"]))
-    r_ok = await client.get("/v1/system/alerts", headers=_auth(toks["admin"]))
-    assert (r_al.status_code, r_ok.json()["count"]) == (S.FORBIDDEN, 0)
+        with respx.mock(assert_all_called=True) as mock:
+            mock.get("http://127.0.0.1:8081/health").respond(S.OK, json={"status": "ok"})
+            mock.get("http://127.0.0.1:8082/health").respond(S.OK, json={"status": "ok"})
+            r_st = await env.client.get(
+                "/v1/system/status", headers=bearer_headers(env.toks["reader"])
+            )
+        assert r_st.status_code == S.OK
+        assert r_st.json()["gpu"]["gpu_name"] == "RTX 3090"
+        assert r_st.json()["guardrail_health"]["healthy"] is True
 
-    hdrs = _auth(toks["writer"])
-    pid = (await client.post("/v1/projects", headers=hdrs, json={"name": "logs"})).json()["id"]
-    assert (await client.get("/v1/projects", headers=hdrs)).json()["count"] == 1
-    assert (await client.get(f"/v1/projects/{pid}", headers=hdrs)).json()["id"] == pid
-    assert (await client.get("/v1/projects/prj_nope", headers=hdrs)).status_code == S.NOT_FOUND
-    assert (await client.delete("/v1/projects/prj_nope", headers=hdrs)).status_code == S.NOT_FOUND
-
-    r_up = await client.post(
-        "/v1/files?wait=true",
-        headers=hdrs,
-        data={"project_id": pid},
-        files={"file": ("app.log", b"2026-01-01T00:00:00Z ERROR Boom\n", "text/plain")},
-    )
-    f_rec = r_up.json()
-    fid = f_rec["id"]
-    chk = (await client.get(f"/v1/files/{fid}/chunks", headers=hdrs)).json()
-    assert (r_up.status_code, f_rec["status"]) == (S.CREATED, FileStatus.READY.value)
-    assert chk["count"] >= EXPECTED_CHUNK_COUNT
-
-    st_h = {**hdrs, "X-LAI-Filename": "worker.py", "Content-Type": "text/x-python"}
-    st_u = f"/v1/files/stream?project_id={pid}&wait=true"
-    r_str = await client.post(st_u, headers=st_h, content=b"def run() -> int:\n    return 42\n")
-    assert r_str.status_code == S.CREATED
-
-    r_async = await client.post(
-        "/v1/files?wait=false",
-        headers=hdrs,
-        data={"project_id": pid},
-        files={"file": ("notes.md", b"# Summary\nOk.\n", "text/markdown")},
-    )
-    assert r_async.status_code == S.ACCEPTED
-    deadline, polled = time.monotonic() + 3.0, r_async.json()
-    while time.monotonic() < deadline and polled["status"] != FileStatus.READY.value:
-        await asyncio.sleep(0.02)
-        polled = (await client.get(f"/v1/files/{polled['id']}", headers=hdrs)).json()
-    assert polled["status"] == FileStatus.READY.value
-
-    assert (await client.delete(f"/v1/files/{fid}", headers=hdrs)).status_code == S.OK
-    with pytest.raises(errs.NotFoundError):
-        await svc.blob_store.read_bytes(Path(f_rec["blob_path"]))
-    assert (await client.delete(f"/v1/projects/{pid}", headers=hdrs)).status_code == S.OK
-    with pytest.raises(errs.NotFoundError):
-        await svc.blob_store.read_bytes(Path(r_str.json()["blob_path"]))
+        r_al = await env.client.get("/v1/system/alerts", headers=bearer_headers(env.toks["reader"]))
+        r_ok = await env.client.get("/v1/system/alerts", headers=bearer_headers(env.toks["admin"]))
+        assert (r_al.status_code, r_ok.json()["count"]) == (S.FORBIDDEN, 0)
 
 
-async def test_sessions_and_openai_compat(env: _Env) -> None:
-    """Verify sessions, OpenAI JSON/SSE, X-LAI-* routing headers, and guardrail headers."""
-    orch, client, toks = env.orch, env.client, env.toks
-    hdrs = _auth(toks["writer"])
-    pid = (await client.post("/v1/projects", headers=hdrs, json={"name": "c"})).json()["id"]
-    sid = (await client.post("/v1/sessions", headers=hdrs, json={"project_id": pid})).json()["id"]
-
-    r_msg = await client.post(f"/v1/sessions/{sid}/messages", headers=hdrs, json={"content": "hi"})
-    assert r_msg.json()["message"]["content"] == "ok reply"
-
-    orch.blocked, orch.policy = True, "no_prompt_injection"
-    sse_j = {"content": "x", "stream": True}
-    r_sse = await client.post(f"/v1/sessions/{sid}/messages", headers=hdrs, json=sse_j)
-    assert r_sse.headers["X-LAI-Guardrail-Blocked"] == "true"
-    assert r_sse.headers["X-LAI-Guardrail-Policy"] == "no_prompt_injection"
-    assert "event: turn_completed" in r_sse.text
-
-    orch.blocked, orch.policy = False, None
-    assert (await client.get("/v1/models")).status_code == S.UNAUTHORIZED
-    models = (await client.get("/v1/models", headers=hdrs)).json()["data"]
-    assert "gemma4-26b-a4b" in [m["id"] for m in models]
-    oai_hdrs = {**hdrs, "X-LAI-Project-Id": "prj_1", "X-LAI-File-Ids": "fil_a, fil_b"}
-    oai_hdrs["X-LAI-Context-Mode"] = "retrieval"
-    r_c = await client.post("/v1/chat/completions", headers=oai_hdrs, json=_CHAT_JSON)
-    assert r_c.status_code == S.OK
-    assert orch.calls[-1].attached_file_ids == ("fil_a", "fil_b")
-    assert orch.calls[-1].context_mode is dc.ContextMode.RETRIEVAL
-
-    orch.blocked, orch.policy = True, "no_hate_speech"
-    oai_j = {**_CHAT_JSON, "stream": True}
-    r_oai = await client.post("/v1/chat/completions", headers=hdrs, json=oai_j)
-    assert r_oai.headers["X-LAI-Guardrail-Blocked"] == "true"
-    assert "chat.completion.chunk" in r_oai.text
-    assert "data: [DONE]\n\n" in r_oai.text
+async def test_projects_crud_and_not_found_envelopes(tmp_path: Path) -> None:
+    """Verify project creation, listing, retrieval, and 404 envelopes."""
+    async with open_routes_env(tmp_path) as env:
+        hdrs = bearer_headers(env.toks["writer"])
+        pid = (await env.client.post("/v1/projects", headers=hdrs, json={"name": "logs"})).json()[
+            "id"
+        ]
+        assert (await env.client.get("/v1/projects", headers=hdrs)).json()["count"] == 1
+        assert (await env.client.get(f"/v1/projects/{pid}", headers=hdrs)).json()["id"] == pid
+        assert (await env.client.get("/v1/projects/prj_nope", headers=hdrs)).status_code == (
+            S.NOT_FOUND
+        )
+        assert (await env.client.delete("/v1/projects/prj_nope", headers=hdrs)).status_code == (
+            S.NOT_FOUND
+        )
 
 
-async def test_tools_errors_500_alert_and_429(env: _Env) -> None:
-    """Verify tool approvals, error envelopes, 500 FATAL_EXCEPTION alert, and 429 Retry-After."""
-    svc, orch, client, toks = env.svc, env.orch, env.client, env.toks
-    hdrs = _auth(toks["writer"])
-    assert (await client.get("/v1/tools", headers=hdrs)).json()["count"] >= EXPECTED_MIN_TOOLS
-    pid = (await client.post("/v1/projects", headers=hdrs, json={"name": "tp"})).json()["id"]
-    sid = (await client.post("/v1/sessions", headers=hdrs, json={"project_id": pid})).json()["id"]
-    ctx = dt.ToolExecutionContext(
-        project_id=pid,
-        session_id=sid,
-        principal_id="usr_t",
-        principal_scopes=(ApiScope.TOOLS_SAFE,),
-    )
-    with pytest.raises(errs.ToolApprovalRequiredError) as exc_info:
-        await svc.tool_executor.invoke("read_note", {"note": "hi"}, ctx)
-    apr_url = f"/v1/tool-approvals/{exc_info.value.approval_id}/resolve"
-    assert (
-        await client.post(apr_url, headers=hdrs, json={"approved": True})
-    ).status_code == S.FORBIDDEN
-    r_a = await client.post(apr_url, headers=_auth(toks["admin"]), json={"approved": True})
-    assert r_a.json()["status"] == dt.ApprovalStatus.EXECUTED.value
+async def test_files_multipart_stream_async_poll_and_cascade_delete(tmp_path: Path) -> None:
+    """Verify multipart/stream file upload, ?wait=false polling, and blob cascade delete."""
+    async with open_routes_env(tmp_path) as env:
+        hdrs = bearer_headers(env.toks["writer"])
+        pid = (await env.client.post("/v1/projects", headers=hdrs, json={"name": "logs"})).json()[
+            "id"
+        ]
 
-    for err, expected in (
-        (errs.ToolApprovalRequiredError("ok", approval_id="a", tool_name="s"), S.CONFLICT),
-        (errs.PayloadTooLargeError("big"), S.REQUEST_ENTITY_TOO_LARGE),
-        (errs.GuardrailBlockedError("no", violated_policy="p"), S.UNPROCESSABLE_CONTENT),
-        (errs.ClientDisconnectedError("bye"), HTTP_CLIENT_DISCONNECTED),
-        (errs.InferenceBackendError("bad"), S.BAD_GATEWAY),
-        (errs.QueueFullError("full"), S.SERVICE_UNAVAILABLE),
-    ):
-        orch.next_error = err
-        res = await client.post("/v1/chat/completions", headers=hdrs, json=_CHAT_JSON)
-        assert res.status_code == expected
-        assert res.json()["error"]["request_id"]
+        r_up = await env.client.post(
+            "/v1/files?wait=true",
+            headers=hdrs,
+            data={"project_id": pid},
+            files={"file": ("app.log", b"2026-01-01T00:00:00Z ERROR Boom\n", "text/plain")},
+        )
+        f_rec = r_up.json()
+        fid = f_rec["id"]
+        chk = (await env.client.get(f"/v1/files/{fid}/chunks", headers=hdrs)).json()
+        assert (r_up.status_code, f_rec["status"]) == (S.CREATED, FileStatus.READY.value)
+        assert chk["count"] >= EXPECTED_CHUNK_COUNT
 
-    orch.next_error = RuntimeError("secret crash")
-    r5 = await client.post(_CHAT_URL, headers={**hdrs, "X-Request-Id": "r5"}, json=_CHAT_JSON)
-    assert r5.status_code == S.INTERNAL_SERVER_ERROR
-    assert "secret crash" not in json.dumps(r5.json())
-    items = (await client.get("/v1/system/alerts", headers=_auth(toks["admin"]))).json()["items"]
-    cat = AlertCategory.FATAL_EXCEPTION.value
-    assert any(a["category"] == cat and a["request_id"] == "r5" for a in items)
+        st_h = {**hdrs, "X-LAI-Filename": "worker.py", "Content-Type": "text/x-python"}
+        r_str = await env.client.post(
+            f"/v1/files/stream?project_id={pid}&wait=true",
+            headers=st_h,
+            content=b"def run() -> int:\n    return 42\n",
+        )
+        assert r_str.status_code == S.CREATED
 
-    svc.rate_limiter = TokenBucketRateLimiter(requests_per_minute=1)
-    assert (await client.get("/v1/projects", headers=hdrs)).status_code == S.OK
-    r_429 = await client.get("/v1/projects", headers=hdrs)
-    assert r_429.status_code == S.TOO_MANY_REQUESTS
-    assert int(r_429.headers["Retry-After"]) >= 1
+        r_async = await env.client.post(
+            "/v1/files?wait=false",
+            headers=hdrs,
+            data={"project_id": pid},
+            files={"file": ("notes.md", b"# Summary\nOk.\n", "text/markdown")},
+        )
+        assert r_async.status_code == S.ACCEPTED
+        deadline, polled = time.monotonic() + 3.0, r_async.json()
+        while time.monotonic() < deadline and polled["status"] != FileStatus.READY.value:
+            await asyncio.sleep(0.02)
+            polled = (await env.client.get(f"/v1/files/{polled['id']}", headers=hdrs)).json()
+        assert polled["status"] == FileStatus.READY.value
+
+        assert (await env.client.delete(f"/v1/files/{fid}", headers=hdrs)).status_code == S.OK
+        with pytest.raises(errs.NotFoundError):
+            await env.svc.blob_store.read_bytes(Path(f_rec["blob_path"]))
+        assert (await env.client.delete(f"/v1/projects/{pid}", headers=hdrs)).status_code == S.OK
+        with pytest.raises(errs.NotFoundError):
+            await env.svc.blob_store.read_bytes(Path(r_str.json()["blob_path"]))
 
 
-def test_cli_runner_smoke(tmp_path: Path) -> None:
-    """Smoke-test Typer CLI init, keys create/list/revoke, and tunnel render-config."""
-    runner, cfg, out = CliRunner(), tmp_path / "cli" / "config.yaml", tmp_path / "cf.yml"
-    init_cmd = ["init", "-c", str(cfg), "--data-dir", str(tmp_path / "d")]
-    assert runner.invoke(cli_app, init_cmd).exit_code == 0
-    key_res = runner.invoke(cli_app, ["keys", "create", "-c", str(cfg), "-n", "k", "--admin"])
-    assert "lai_sk_" in key_res.output
-    kids = runner.invoke(cli_app, ["keys", "list", "-c", str(cfg)]).output.splitlines()
-    rev_res = runner.invoke(cli_app, ["keys", "revoke", kids[0].split("\t")[0], "-c", str(cfg)])
-    assert rev_res.exit_code == 0
-    tun_cmd = ["tunnel", "render-config", "-c", str(cfg), "-H", "ai.t", "-o", str(out)]
-    assert runner.invoke(cli_app, tun_cmd).exit_code == 0
-    assert "ai.t" in out.read_text(encoding="utf-8")
+async def test_session_message_returns_reply(tmp_path: Path) -> None:
+    """Verify non-streaming session turn returns orchestrator reply."""
+    async with open_routes_env(tmp_path) as env:
+        hdrs = bearer_headers(env.toks["writer"])
+        pid = (await env.client.post("/v1/projects", headers=hdrs, json={"name": "c"})).json()["id"]
+        sid = (
+            await env.client.post("/v1/sessions", headers=hdrs, json={"project_id": pid})
+        ).json()["id"]
+        r_msg = await env.client.post(
+            f"/v1/sessions/{sid}/messages", headers=hdrs, json={"content": "hi"}
+        )
+        assert r_msg.json()["message"]["content"] == "ok reply"
+
+
+async def test_session_message_guardrail_blocked_sse_sets_headers(tmp_path: Path) -> None:
+    """Verify blocked session SSE stream sets X-LAI-Guardrail-* headers and turn_completed."""
+    orch = FakeOrch(blocked=True, policy="no_prompt_injection")
+    async with open_routes_env(tmp_path, orch=orch) as env:
+        hdrs = bearer_headers(env.toks["writer"])
+        pid = (await env.client.post("/v1/projects", headers=hdrs, json={"name": "c"})).json()["id"]
+        sid = (
+            await env.client.post("/v1/sessions", headers=hdrs, json={"project_id": pid})
+        ).json()["id"]
+        r_sse = await env.client.post(
+            f"/v1/sessions/{sid}/messages",
+            headers=hdrs,
+            json={"content": "x", "stream": True},
+        )
+        assert r_sse.headers["X-LAI-Guardrail-Blocked"] == "true"
+        assert r_sse.headers["X-LAI-Guardrail-Policy"] == "no_prompt_injection"
+        assert "event: turn_completed" in r_sse.text
+
+
+async def test_openai_models_and_routing_headers(tmp_path: Path) -> None:
+    """Verify /v1/models auth and X-LAI-* routing headers on /v1/chat/completions."""
+    async with open_routes_env(tmp_path) as env:
+        hdrs = bearer_headers(env.toks["writer"])
+        assert (await env.client.get("/v1/models")).status_code == S.UNAUTHORIZED
+        models = (await env.client.get("/v1/models", headers=hdrs)).json()["data"]
+        assert "gemma4-26b-a4b" in [m["id"] for m in models]
+
+        oai_hdrs = {
+            **hdrs,
+            "X-LAI-Project-Id": "prj_1",
+            "X-LAI-File-Ids": "fil_a, fil_b",
+            "X-LAI-Context-Mode": "retrieval",
+        }
+        r_c = await env.client.post("/v1/chat/completions", headers=oai_hdrs, json=_CHAT_JSON)
+        assert r_c.status_code == S.OK
+        assert env.orch.calls[-1].attached_file_ids == ("fil_a", "fil_b")
+        assert env.orch.calls[-1].context_mode is dc.ContextMode.RETRIEVAL
+
+
+async def test_openai_stream_guardrail_blocked_sse_sets_headers(tmp_path: Path) -> None:
+    """Verify blocked OpenAI SSE stream emits guardrail headers, chunks, and [DONE]."""
+    orch = FakeOrch(blocked=True, policy="no_hate_speech")
+    async with open_routes_env(tmp_path, orch=orch) as env:
+        hdrs = bearer_headers(env.toks["writer"])
+        r_oai = await env.client.post(
+            "/v1/chat/completions",
+            headers=hdrs,
+            json={**_CHAT_JSON, "stream": True},
+        )
+        assert r_oai.headers["X-LAI-Guardrail-Blocked"] == "true"
+        assert "chat.completion.chunk" in r_oai.text
+        assert "data: [DONE]\n\n" in r_oai.text
