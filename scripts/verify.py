@@ -11,27 +11,26 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts._verify_targets import (  # noqa: E402
+    CRITICAL_MUTATION_TARGETS,
+    MutationTier,
+    resolve_mutation_targets,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MUTATION_TARGETS = (
-    "src/lai/observability/alerts.py,"
-    "src/lai/observability/scrubber.py,"
-    "src/lai/security/keys.py,"
-    "src/lai/security/scopes.py,"
-    "src/lai/security/ratelimit.py,"
-    "src/lai/guardrails/prompts.py,"
-    "src/lai/tools/policy.py,"
-    "src/lai/scheduler/fair_queue.py,"
-    "src/lai/scheduler/session_gate.py,"
-    "src/lai/ingestion/rrf.py,"
-    "src/lai/orchestrator/classifier.py,"
-    "src/lai/orchestrator/windower.py"
-)
+DEFAULT_COV_FAIL_UNDER = 90
+DEFAULT_MUTATION_TARGETS = ",".join(CRITICAL_MUTATION_TARGETS)
 DEFAULT_MIN_MUTATION_SCORE = 85.0
 DEFAULT_MUTANT_TIMEOUT_SECONDS = 20
-_GREMLINS_JSON_REL = Path("coverage/gremlins/gremlins.json")
+DEFAULT_MUTATION_WORKERS = min(os.cpu_count() or 4, 8)
+GREMLINS_JSON_REL = Path("coverage/gremlins/gremlins.json")
+_GREMLINS_JSON_REL = GREMLINS_JSON_REL
 
 
 def _run_python_module(module: str, *args: str) -> int:
@@ -69,8 +68,12 @@ def cmd_lint() -> int:
 
 def cmd_typecheck() -> int:
     """Run basedpyright (strict) and mypy (strict)."""
-    for module in ("basedpyright", "mypy"):
-        rc = _run_python_module(module, "src", "tests", "scripts")
+    steps: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("basedpyright", ("--pythonpath", sys.executable, "src", "tests", "scripts")),
+        ("mypy", ("--explicit-package-bases", "src", "tests", "scripts")),
+    )
+    for module, args in steps:
+        rc = _run_python_module(module, *args)
         if rc != 0:
             return rc
     return 0
@@ -93,7 +96,7 @@ def cmd_boundaries() -> int:
     return result if isinstance(result, int) else 0
 
 
-def cmd_test(cov_fail_under: int = 85) -> int:
+def cmd_test(cov_fail_under: int = DEFAULT_COV_FAIL_UNDER) -> int:
     """Run unit and integration tests with branch coverage."""
     args = [
         "tests/unit",
@@ -112,34 +115,64 @@ def cmd_schema() -> int:
 
 
 def _cleanup_generated_coverage_dir(*, existed_before: bool) -> None:
-    """Remove generated coverage/gremlins directory when created during verify."""
+    """Remove generated coverage/gremlins directory when mutation run succeeds."""
     gremlins_dir = REPO_ROOT / "coverage" / "gremlins"
     if gremlins_dir.exists():
         shutil.rmtree(gremlins_dir, ignore_errors=True)
     coverage_dir = REPO_ROOT / "coverage"
-    if not existed_before and coverage_dir.exists():
+    if coverage_dir.exists() and (not existed_before or not any(coverage_dir.iterdir())):
         shutil.rmtree(coverage_dir, ignore_errors=True)
 
 
-def _evaluate_gremlins_report(report_path: Path, min_score: float) -> int:
-    """Parse pytest-gremlins JSON report and enforce minimum mutation kill percentage."""
+def _extract_summary_metric(
+    summary: dict[str, object],
+    key: str,
+    *,
+    allow_float: bool = False,
+) -> float:
+    """Extract a numeric non-boolean metric from a gremlins summary mapping."""
+    value = summary.get(key, 0.0 if allow_float else 0)
+    valid_type = (int, float) if allow_float else int
+    if isinstance(value, bool) or not isinstance(value, valid_type):
+        msg = f"Invalid numeric field {key!r} in mutation report summary."
+        raise TypeError(msg)
+    return float(value)
+
+
+def _load_gremlins_summary(report_path: Path) -> dict[str, object] | None:
+    """Load and validate the top-level summary mapping from a gremlins JSON report."""
     if not report_path.exists():
         sys.stderr.write(f"ERROR: Mutation JSON report not found at {report_path}\n")
-        return 1
-    raw_obj: object = json.loads(report_path.read_text(encoding="utf-8"))
+        return None
+    try:
+        raw_obj: object = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"ERROR: Failed to parse mutation JSON report at {report_path}: {exc}\n")
+        return None
     if not isinstance(raw_obj, dict):
         sys.stderr.write("ERROR: Invalid mutation JSON report structure.\n")
-        return 1
+        return None
     data = cast("dict[str, object]", raw_obj)
     summary_obj = data.get("summary")
     if not isinstance(summary_obj, dict):
         sys.stderr.write("ERROR: Mutation JSON report missing 'summary'.\n")
+        return None
+    return cast("dict[str, object]", summary_obj)
+
+
+def evaluate_gremlins_report(report_path: Path, min_score: float) -> int:
+    """Parse pytest-gremlins JSON report and enforce minimum mutation kill percentage."""
+    summary = _load_gremlins_summary(report_path)
+    if summary is None:
         return 1
-    summary = cast("dict[str, object]", summary_obj)
-    total = int(cast("int", summary.get("total", 0)))
-    zapped = int(cast("int", summary.get("zapped", 0)))
-    pardoned = int(cast("int", summary.get("pardoned", 0)))
-    percentage = float(cast("float | int", summary.get("percentage", 0.0)))
+    try:
+        total = int(_extract_summary_metric(summary, "total"))
+        zapped = int(_extract_summary_metric(summary, "zapped"))
+        pardoned = int(_extract_summary_metric(summary, "pardoned"))
+        percentage = _extract_summary_metric(summary, "percentage", allow_float=True)
+    except TypeError as exc:
+        sys.stderr.write(f"ERROR: {exc}\n")
+        return 1
     if total <= 0:
         sys.stderr.write("ERROR: Zero gremlins evaluated; mutation targets may be invalid.\n")
         return 1
@@ -156,44 +189,52 @@ def _evaluate_gremlins_report(report_path: Path, min_score: float) -> int:
     return 0
 
 
+_evaluate_gremlins_report = evaluate_gremlins_report
+
+
 def cmd_mutate(
-    targets: str = DEFAULT_MUTATION_TARGETS,
+    targets: str | None = None,
     *,
+    tier: MutationTier = "critical",
     min_score: float = DEFAULT_MIN_MUTATION_SCORE,
-    workers: int = 4,
+    workers: int = DEFAULT_MUTATION_WORKERS,
     mutant_timeout: int = DEFAULT_MUTANT_TIMEOUT_SECONDS,
 ) -> int:
     """Run mutation tests with pytest-gremlins and enforce the minimum mutation score."""
-    coverage_dir = REPO_ROOT / "coverage"
-    existed_before = coverage_dir.exists()
-    report_path = REPO_ROOT / _GREMLINS_JSON_REL
-    try:
-        rc = _run_python_module(
-            "pytest",
-            "--gremlins",
-            "--gremlin-parallel",
-            f"--gremlin-workers={workers}",
-            f"--gremlin-mutant-timeout={mutant_timeout}",
-            f"--gremlin-targets={targets}",
-            "--gremlin-report=console,json",
-            "tests/unit",
-        )
-        if rc != 0:
-            return rc
-        return _evaluate_gremlins_report(report_path, min_score)
-    finally:
-        _cleanup_generated_coverage_dir(existed_before=existed_before)
+    resolved_targets = resolve_mutation_targets(tier=tier, targets=targets)
+    existed_before = (REPO_ROOT / "coverage").exists()
+    report_path = REPO_ROOT / GREMLINS_JSON_REL
+    rc = _run_python_module(
+        "pytest",
+        "--gremlins",
+        "--gremlin-parallel",
+        f"--gremlin-workers={workers}",
+        f"--gremlin-mutant-timeout={mutant_timeout}",
+        f"--gremlin-targets={resolved_targets}",
+        "--gremlin-report=console,json",
+        "tests/unit",
+        "tests/integration",
+    )
+    if rc == 0:
+        rc = evaluate_gremlins_report(report_path, min_score)
+    if rc != 0:
+        if report_path.exists():
+            sys.stderr.write(f"Preserving mutation report at {report_path} for inspection.\n")
+        return rc
+    _cleanup_generated_coverage_dir(existed_before=existed_before)
+    return 0
 
 
 def cmd_all(
     *,
     skip_mutate: bool = False,
-    cov_fail_under: int = 85,
-    targets: str = DEFAULT_MUTATION_TARGETS,
+    cov_fail_under: int = DEFAULT_COV_FAIL_UNDER,
+    tier: MutationTier = "critical",
+    targets: str | None = None,
     min_score: float = DEFAULT_MIN_MUTATION_SCORE,
 ) -> int:
     """Run the full verification suite in strict fail-fast order."""
-    steps = [
+    steps: list[Callable[[], int]] = [
         cmd_lint,
         cmd_typecheck,
         cmd_boundaries,
@@ -201,7 +242,7 @@ def cmd_all(
         cmd_schema,
     ]
     if not skip_mutate:
-        steps.append(lambda: cmd_mutate(targets=targets, min_score=min_score))
+        steps.append(lambda: cmd_mutate(targets=targets, tier=tier, min_score=min_score))
 
     for step in steps:
         rc = step()
@@ -210,7 +251,28 @@ def cmd_all(
     return 0
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _add_mutation_args(subparser: argparse.ArgumentParser) -> None:
+    """Register shared mutation testing CLI options on a subcommand parser."""
+    subparser.add_argument(
+        "--tier",
+        choices=("critical", "full"),
+        default="critical",
+        help="Mutation target tier to run when --targets is omitted (default: critical).",
+    )
+    subparser.add_argument(
+        "--targets",
+        default=None,
+        help="Optional comma-separated source targets override for pytest-gremlins.",
+    )
+    subparser.add_argument(
+        "--min-score",
+        type=float,
+        default=DEFAULT_MIN_MUTATION_SCORE,
+        help="Minimum required mutation kill percentage.",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for repository verification subcommands."""
     parser = argparse.ArgumentParser(description="Run repository verification checks.")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
@@ -223,24 +285,14 @@ def _build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--cov-fail-under",
         type=int,
-        default=85,
-        help="Minimum branch coverage percentage threshold (default: 85).",
+        default=DEFAULT_COV_FAIL_UNDER,
+        help=f"Minimum branch coverage percentage threshold (default: {DEFAULT_COV_FAIL_UNDER}).",
     )
 
     subparsers.add_parser("schema", help="Validate checked-in OpenAPI schema.")
 
     mutate_parser = subparsers.add_parser("mutate", help="Run pytest-gremlins mutation tests.")
-    mutate_parser.add_argument(
-        "--targets",
-        default=DEFAULT_MUTATION_TARGETS,
-        help="Comma-separated source targets for pytest-gremlins.",
-    )
-    mutate_parser.add_argument(
-        "--min-score",
-        type=float,
-        default=DEFAULT_MIN_MUTATION_SCORE,
-        help="Minimum required mutation kill percentage.",
-    )
+    _add_mutation_args(mutate_parser)
 
     all_parser = subparsers.add_parser("all", help="Run all verification checks.")
     all_parser.add_argument(
@@ -251,21 +303,14 @@ def _build_parser() -> argparse.ArgumentParser:
     all_parser.add_argument(
         "--cov-fail-under",
         type=int,
-        default=85,
-        help="Minimum branch coverage percentage threshold (default: 85).",
+        default=DEFAULT_COV_FAIL_UNDER,
+        help=f"Minimum branch coverage percentage threshold (default: {DEFAULT_COV_FAIL_UNDER}).",
     )
-    all_parser.add_argument(
-        "--targets",
-        default=DEFAULT_MUTATION_TARGETS,
-        help="Comma-separated source targets for pytest-gremlins.",
-    )
-    all_parser.add_argument(
-        "--min-score",
-        type=float,
-        default=DEFAULT_MIN_MUTATION_SCORE,
-        help="Minimum required mutation kill percentage.",
-    )
+    _add_mutation_args(all_parser)
     return parser
+
+
+_build_parser = build_parser
 
 
 def main() -> int:
@@ -281,13 +326,15 @@ def main() -> int:
         "test": lambda: cmd_test(cov_fail_under=cast("int", args.cov_fail_under)),
         "schema": cmd_schema,
         "mutate": lambda: cmd_mutate(
-            targets=cast("str", args.targets),
+            targets=cast("str | None", args.targets),
+            tier=cast("MutationTier", args.tier),
             min_score=cast("float", args.min_score),
         ),
         "all": lambda: cmd_all(
             skip_mutate=cast("bool", args.skip_mutate),
             cov_fail_under=cast("int", args.cov_fail_under),
-            targets=cast("str", args.targets),
+            tier=cast("MutationTier", args.tier),
+            targets=cast("str | None", args.targets),
             min_score=cast("float", args.min_score),
         ),
     }
