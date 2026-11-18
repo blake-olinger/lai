@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
+import httpx
+
 from lai.config.settings import LaiSettings
 from lai.domain import (
     GuardrailBlockedError,
@@ -17,6 +19,14 @@ from lai.domain import (
     SafetyPrinciple,
 )
 from lai.domain.chat import ContextMode, Message, MessageRole, TokenUsage, TurnOutput
+from lai.guardrails import (
+    AllowAllGuardrailProvider,
+    CompositeGuardrailPipeline,
+    OllamaShieldGemmaProvider,
+    RegexPolicyGuardrailProvider,
+    ShieldGemmaCpuProvider,
+    ShieldGemmaSupervisor,
+)
 from lai.observability import (
     PromptAuditLogger,
     fingerprint_prompt,
@@ -45,8 +55,12 @@ CUTOFF_BEFORE_CLOSING_BRACKET = 24
 CUTOFF_AT_CLOSING_BRACKET = 25
 
 
-def test_guardrail_domain_settings_and_port_contracts() -> None:
-    """Guardrail domain models, settings defaults, error types, and ports validate."""
+class _NonConformingGuardrailStub:
+    """Minimal stub lacking guardrail provider, pipeline, and supervisor methods."""
+
+
+async def test_guardrail_domain_settings_and_port_contracts(tmp_path: Path) -> None:
+    """Guardrail models, settings defaults, error types, and concrete adapters validate."""
     cfg = GuardrailConfig()
     assert cfg.enabled is True
     assert cfg.block_mode is GuardrailBlockMode.REFUSAL_MESSAGE
@@ -81,8 +95,37 @@ def test_guardrail_domain_settings_and_port_contracts() -> None:
     assert turn.guardrail_blocked is True
     assert turn.guardrail_policy == "no_harassment"
 
+    allow_all = AllowAllGuardrailProvider()
+    regex_guard = RegexPolicyGuardrailProvider()
+    assert isinstance(allow_all, GuardrailProviderPort)
+    assert isinstance(regex_guard, GuardrailProviderPort)
+
+    async with httpx.AsyncClient() as http_client:
+        shield_cpu = ShieldGemmaCpuProvider(cfg, client=http_client)
+        ollama_guard = OllamaShieldGemmaProvider(
+            cfg.model_copy(update={"backend": "ollama"}),
+            client=http_client,
+        )
+        supervisor = ShieldGemmaSupervisor(
+            tmp_path / "llama-server",
+            tmp_path / "shieldgemma.gguf",
+            log_dir=tmp_path / "logs",
+            http_client=http_client,
+        )
+        assert isinstance(shield_cpu, GuardrailProviderPort)
+        assert isinstance(ollama_guard, GuardrailProviderPort)
+        assert isinstance(supervisor, GuardrailSupervisorPort)
+
+    with CompositeGuardrailPipeline(
+        cfg,
+        providers=(allow_all,),
+        log_dir=tmp_path / "audit",
+    ) as pipeline:
+        assert isinstance(pipeline, GuardrailPipelinePort)
+
+    stub = _NonConformingGuardrailStub()
     for port in (GuardrailProviderPort, GuardrailPipelinePort, GuardrailSupervisorPort):
-        assert not isinstance(object(), port)
+        assert not isinstance(stub, port)
 
 
 def test_scrub_sensitive_text_redacts_secrets_and_pii_without_breaking_code() -> None:

@@ -7,12 +7,16 @@ import logging
 import logging.handlers
 from typing import TYPE_CHECKING
 
+import httpx
+
 from lai.config.settings import LaiSettings
 from lai.domain import LoggingConfig
 from lai.domain.ids import ALERT_ID_PREFIX, new_alert_id
 from lai.observability import (
+    AlertManager,
     DailyRotatingStreamWriter,
     SafeTimedRotatingFileHandler,
+    WebhookAlertSink,
     create_daily_rotating_handler,
 )
 from lai.ports import AlertManagerPort, AlertSinkPort
@@ -27,12 +31,16 @@ BACKUP_COUNT_FOUR = 4
 DEFAULT_COOLDOWN_SECONDS = 60.0
 
 
+class _NonConformingAlertStub:
+    """Minimal stub lacking AlertSinkPort and AlertManagerPort methods."""
+
+
 def _raise_locked(_self: logging.handlers.TimedRotatingFileHandler) -> None:
     raise PermissionError("locked")
 
 
-def test_observability_domain_and_port_contracts() -> None:
-    """Alert IDs, LoggingConfig defaults, and Alert ports validate cleanly."""
+async def test_observability_domain_and_port_contracts(tmp_path: Path) -> None:
+    """Alert IDs, LoggingConfig defaults, and concrete Alert adapters validate cleanly."""
     alert_id = new_alert_id()
     assert alert_id.startswith(ALERT_ID_PREFIX)
     assert len(alert_id) > len(ALERT_ID_PREFIX)
@@ -43,8 +51,16 @@ def test_observability_domain_and_port_contracts() -> None:
     assert cfg.alert_cooldown_seconds == DEFAULT_COOLDOWN_SECONDS
     assert LaiSettings().logging == cfg
 
-    assert not isinstance(object(), AlertSinkPort)
-    assert not isinstance(object(), AlertManagerPort)
+    async with httpx.AsyncClient() as http_client:
+        sink = WebhookAlertSink("https://example.com/webhook", client=http_client)
+        manager = AlertManager(sinks=(sink,), log_dir=tmp_path / "alerts")
+        try:
+            assert isinstance(sink, AlertSinkPort)
+            assert isinstance(manager, AlertManagerPort)
+            assert not isinstance(_NonConformingAlertStub(), AlertSinkPort)
+            assert not isinstance(_NonConformingAlertStub(), AlertManagerPort)
+        finally:
+            manager.close()
 
 
 def test_daily_rotating_handler_compression_pruning_and_permission_recovery(
