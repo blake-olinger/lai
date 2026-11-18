@@ -7,7 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 
 from lai.domain.errors import ValidationFailedError
-from lai.domain.files import ScoredChunk
+from lai.domain.rrf import reciprocal_rank_fusion
 from lai.domain.tools import PermissionTier, ToolResult, ToolSpec
 from lai.ports.tools import ToolPluginPort
 from lai.tools.plugins._scoping import (
@@ -19,14 +19,13 @@ from lai.tools.plugins._scoping import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from lai.domain.files import FileRecord
+    from lai.domain.files import FileRecord, ScoredChunk
     from lai.domain.tools import ToolExecutionContext
     from lai.ports.repositories import FileRepositoryPort
     from lai.ports.storage import EmbedderPort, VectorStorePort
 
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 50
-_RRF_K = 60
 
 
 def _parse_file_ids(arguments: dict[str, Any]) -> tuple[str, ...]:
@@ -45,30 +44,6 @@ def _parse_file_ids(arguments: dict[str, Any]) -> tuple[str, ...]:
             raise ValidationFailedError(msg, details={"field": "file_ids"})
         parsed.append(item.strip())
     return tuple(dict.fromkeys(parsed))
-
-
-def _fuse_ranked_chunks(
-    fts_results: Sequence[ScoredChunk],
-    vec_results: Sequence[ScoredChunk],
-) -> list[ScoredChunk]:
-    """Merge FTS and vector search rankings via Reciprocal Rank Fusion."""
-    scores: dict[str, float] = {}
-    chunks_by_id: dict[str, ScoredChunk] = {}
-    sources_by_id: dict[str, set[str]] = {}
-
-    for results in (fts_results, vec_results):
-        for rank, item in enumerate(results):
-            chunk_id = item.chunk.id
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + (1.0 / (_RRF_K + rank + 1))
-            chunks_by_id.setdefault(chunk_id, item)
-            sources_by_id.setdefault(chunk_id, set()).add(item.source)
-
-    merged: list[ScoredChunk] = []
-    for chunk_id, fused_score in sorted(scores.items(), key=lambda pair: pair[1], reverse=True):
-        base = chunks_by_id[chunk_id]
-        source = "hybrid" if len(sources_by_id[chunk_id]) > 1 else base.source
-        merged.append(ScoredChunk(chunk=base.chunk, score=fused_score, source=source))
-    return merged
 
 
 class SearchFilesPlugin(ToolPluginPort):
@@ -207,7 +182,11 @@ class SearchFilesPlugin(ToolPluginPort):
                 file_ids=file_ids,
                 limit=limit,
             )
-            return _fuse_ranked_chunks(fts_results, vec_results)
+            return reciprocal_rank_fusion(
+                fts_results,
+                vec_results,
+                limit=max(limit, len(fts_results) + len(vec_results)),
+            )
 
         fts_only = await self._file_repo.search_fts(
             project_id,

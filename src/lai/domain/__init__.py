@@ -9,6 +9,7 @@ from lai.domain.auth import (
     AuthPrincipal,
     CreatedApiKey,
     RequestCredentials,
+    expand_scopes,
 )
 from lai.domain.chat import ClientToolCallEvent, InferenceToolCall
 from lai.domain.client_apps import ClientAppRecord, CreatedClientApp
@@ -51,4 +52,5 @@ __all__ = [
     "PromptAuditEntry",
     "RequestCredentials",
     "SafetyPrinciple",
+    "expand_scopes",
 ]

@@ -2,38 +2,11 @@
 
 from __future__ import annotations
 
-from collections import deque
-from typing import TYPE_CHECKING
-
-from lai.domain.auth import ApiScope, AuthPrincipal
+from lai.domain.auth import ApiScope, AuthPrincipal, expand_scopes
 from lai.domain.errors import AuthorizationError
 from lai.observability.logging import get_component_logger
 
-if TYPE_CHECKING:
-    from collections.abc import Iterable
-
-_IMPLIED_SCOPES: dict[ApiScope, tuple[ApiScope, ...]] = {
-    ApiScope.ADMIN: tuple(ApiScope),
-    ApiScope.PROJECTS_WRITE: (ApiScope.PROJECTS_READ,),
-    ApiScope.FILES_WRITE: (ApiScope.FILES_READ,),
-    ApiScope.CHAT_WRITE: (ApiScope.CHAT_READ,),
-    ApiScope.TOOLS_EXEC: (ApiScope.TOOLS_SAFE,),
-}
-
-
-def expand_scopes(scopes: Iterable[ApiScope]) -> frozenset[ApiScope]:
-    """Return the transitive closure of granted scopes under the scope hierarchy."""
-    granted: set[ApiScope] = set()
-    pending: deque[ApiScope] = deque(scopes)
-    while pending:
-        scope = pending.popleft()
-        if scope in granted:
-            continue
-        granted.add(scope)
-        for implied in _IMPLIED_SCOPES.get(scope, ()):
-            if implied not in granted:
-                pending.append(implied)
-    return frozenset(granted)
+__all__ = ["expand_scopes", "has_effective_scope", "require_scope"]
 
 
 def has_effective_scope(principal: AuthPrincipal, required: ApiScope) -> bool:

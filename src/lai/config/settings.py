@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import yaml
-from pydantic import Field
+from pydantic import Field, ValidationError
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -111,7 +111,11 @@ def load_yaml_mapping(config_path: Path) -> dict[str, object]:
         msg = f"Configuration file not found: {config_path}"
         raise ValidationFailedError(msg, details={"path": str(config_path)})
     raw_text = config_path.read_text(encoding="utf-8")
-    loaded: object = yaml.safe_load(raw_text)
+    try:
+        loaded: object = yaml.safe_load(raw_text)
+    except yaml.YAMLError as exc:
+        msg = f"Invalid YAML syntax in configuration file {config_path}: {exc}"
+        raise ValidationFailedError(msg, details={"path": str(config_path)}) from exc
     if loaded is None:
         return {}
     if not isinstance(loaded, dict):
@@ -119,6 +123,22 @@ def load_yaml_mapping(config_path: Path) -> dict[str, object]:
         raise ValidationFailedError(msg, details={"path": str(config_path)})
     mapping = cast("dict[object, object]", loaded)
     return {str(key): value for key, value in mapping.items()}
+
+
+def _wrap_settings_validation_error(
+    exc: ValidationError,
+    resolved_path: Path | None,
+) -> ValidationFailedError:
+    """Convert raw Pydantic ValidationError into structured ValidationFailedError."""
+    errors = exc.errors()
+    summary = "; ".join(
+        f"{'.'.join(str(part) for part in err['loc']) or 'config'}: {err['msg']}" for err in errors
+    )
+    details: dict[str, str] = {"error_count": str(len(errors))}
+    if resolved_path is not None:
+        details["path"] = str(resolved_path)
+    msg = f"Invalid configuration settings: {summary}"
+    return ValidationFailedError(msg, details=details)
 
 
 def load_settings(
@@ -154,5 +174,9 @@ def load_settings(
                 file_secret_settings,
             )
 
-    loaded = _ConfiguredLaiSettings()
-    return LaiSettings.model_validate(loaded.model_dump())
+    try:
+        loaded = _ConfiguredLaiSettings()
+        validated = LaiSettings.model_validate(loaded.model_dump())
+    except ValidationError as exc:
+        raise _wrap_settings_validation_error(exc, resolved_path) from exc
+    return validated

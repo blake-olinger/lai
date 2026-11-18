@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING, cast
@@ -13,21 +14,21 @@ if TYPE_CHECKING:
 
 _HEADER_REQUEST_ID = b"x-request-id"
 _MAX_REQUEST_ID_LEN = 128
+_REQUEST_ID_PATTERN = re.compile(rf"[A-Za-z0-9._:-]{{1,{_MAX_REQUEST_ID_LEN}}}")
 _MS_PER_SECOND = 1000.0
 _logger = get_component_logger("api")
 
 
 def _sanitize_request_id(raw_value: bytes | None) -> str:
-    """Validate incoming X-Request-Id or mint a fresh req_ identifier."""
+    """Validate incoming X-Request-Id as strict ASCII token or mint a fresh req_ ID."""
     if raw_value is not None:
-        decoded = raw_value.decode("ascii", errors="ignore").strip()
-        if (
-            decoded
-            and len(decoded) <= _MAX_REQUEST_ID_LEN
-            and "\r" not in decoded
-            and "\n" not in decoded
-        ):
-            return decoded
+        try:
+            decoded = raw_value.decode("ascii", errors="strict")
+        except UnicodeDecodeError:
+            decoded = ""
+        candidate = decoded.strip(" \t")
+        if _REQUEST_ID_PATTERN.fullmatch(candidate) is not None:
+            return candidate
     return f"req_{uuid.uuid4().hex}"
 
 

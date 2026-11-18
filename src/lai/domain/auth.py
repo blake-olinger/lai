@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import Field
 
 from lai.domain.base import StrictModel, utc_now
 from lai.domain.ids import new_api_key_id
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 class ApiScope(StrEnum):
@@ -24,6 +29,30 @@ class ApiScope(StrEnum):
     TOOLS_EXEC = "tools:exec"
     TOOLS_APPROVE = "tools:approve"
     ADMIN = "admin"
+
+
+_IMPLIED_SCOPES: dict[ApiScope, tuple[ApiScope, ...]] = {
+    ApiScope.ADMIN: tuple(ApiScope),
+    ApiScope.PROJECTS_WRITE: (ApiScope.PROJECTS_READ,),
+    ApiScope.FILES_WRITE: (ApiScope.FILES_READ,),
+    ApiScope.CHAT_WRITE: (ApiScope.CHAT_READ,),
+    ApiScope.TOOLS_EXEC: (ApiScope.TOOLS_SAFE,),
+}
+
+
+def expand_scopes(scopes: Iterable[ApiScope]) -> frozenset[ApiScope]:
+    """Return the transitive closure of granted scopes under the scope hierarchy."""
+    granted: set[ApiScope] = set()
+    pending: deque[ApiScope] = deque(scopes)
+    while pending:
+        scope = pending.popleft()
+        if scope in granted:
+            continue
+        granted.add(scope)
+        for implied in _IMPLIED_SCOPES.get(scope, ()):
+            if implied not in granted:
+                pending.append(implied)
+    return frozenset(granted)
 
 
 class AuthMethod(StrEnum):
@@ -75,8 +104,8 @@ class AuthPrincipal(StrictModel):
     subject: str | None = None
 
     def has_scope(self, scope: ApiScope) -> bool:
-        """Return True if the principal holds the requested scope or admin."""
-        return ApiScope.ADMIN in self.scopes or scope in self.scopes
+        """Return True if the principal holds the requested scope directly or via hierarchy."""
+        return scope in expand_scopes(self.scopes)
 
 
 class RequestCredentials(StrictModel):
