@@ -70,7 +70,7 @@ def cmd_typecheck() -> int:
     """Run basedpyright (strict) and mypy (strict)."""
     steps: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("basedpyright", ("--pythonpath", sys.executable, "src", "tests", "scripts")),
-        ("mypy", ("--explicit-package-bases", "src", "tests", "scripts")),
+        ("mypy", ("src", "tests", "scripts")),
     )
     for module, args in steps:
         rc = _run_python_module(module, *args)

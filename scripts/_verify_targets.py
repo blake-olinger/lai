@@ -17,10 +17,11 @@ CRITICAL_MUTATION_TARGETS: tuple[str, ...] = (
     "src/lai/tools/policy.py",
     "src/lai/scheduler/fair_queue.py",
     "src/lai/scheduler/session_gate.py",
-    "src/lai/ingestion/rrf.py",
+    "src/lai/domain/rrf.py",
     "src/lai/orchestrator/classifier.py",
     "src/lai/orchestrator/windower.py",
-    # High-risk security, guardrail, tool dispatch, and API modules
+    # High-risk domain, security, guardrail, tool dispatch, and API modules
+    "src/lai/domain/auth.py",
     "src/lai/security/cloudflare.py",
     "src/lai/security/oidc_provider.py",
     "src/lai/security/api_key_provider.py",
