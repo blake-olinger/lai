@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from lai import db, guardrails, inference, ingestion, orchestrator, scheduler, security, tools
+from lai.config.settings import LaiSettings
 from lai.domain.auth import ApiKeyRecord, ApiScope, AuthMethod, AuthPrincipal
 from lai.domain.chat import (
     ApprovalRequiredEvent,
@@ -36,13 +40,10 @@ from lai.domain.files import (
     LogSeverity,
     ScoredChunk,
 )
+from lai.domain.guardrails import GuardrailConfig
 from lai.domain.scheduler import JobPriority, LeaseRequest, SpoolerSnapshot
 from lai.domain.tools import PermissionTier, ToolExecutionTarget, ToolSpec
-from lai.ports import (
-    AuthenticatorPort,
-    AuthProviderPort,
-    EdgeVerifierPort,
-)
+from lai.ports import AuthenticatorPort, AuthProviderPort, EdgeVerifierPort
 from lai.ports.inference import InferenceProviderPort, InferenceSupervisorPort
 from lai.ports.orchestrator import OrchestratorPort
 from lai.ports.repositories import (
@@ -66,6 +67,9 @@ from lai.ports.tools import (
     ToolPolicyPort,
     ToolRegistryPort,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 DEFAULT_MAX_QUEUED_JOBS = 64
 
@@ -208,32 +212,121 @@ def test_file_and_scheduler_domain_models() -> None:
     assert turn_in.client_tools[0].execution_target is ToolExecutionTarget.CLIENT
 
 
-def test_ports_are_runtime_checkable_protocols() -> None:
-    """All infrastructure and orchestrator ports expose runtime-checkable protocols."""
-    protocols: tuple[type[object], ...] = (
-        AuthProviderPort,
-        EdgeVerifierPort,
-        AuthenticatorPort,
-        ApiKeyRepositoryPort,
-        ClientAppRepositoryPort,
-        ProjectRepositoryPort,
-        SessionRepositoryPort,
-        FileRepositoryPort,
-        ToolAuditRepositoryPort,
-        BlobStorePort,
-        EmbedderPort,
-        VectorStorePort,
-        IngestionPipelinePort,
-        InferenceProviderPort,
-        InferenceSupervisorPort,
-        ToolPluginPort,
-        ToolRegistryPort,
-        ToolPolicyPort,
-        ToolExecutorPort,
-        SessionGatePort,
-        InferenceSpoolerPort,
-        OrchestratorPort,
-    )
-    dummy = object()
-    for proto in protocols:
-        assert not isinstance(dummy, proto)
+class _NonConformingAdapterStub:
+    """Minimal stub lacking every runtime-checkable port method."""
+
+
+async def test_ports_are_runtime_checkable_protocols(tmp_path: Path) -> None:
+    """All concrete infrastructure and orchestrator adapters satisfy their ports."""
+    async with (
+        db.SqliteDatabase(tmp_path / "ports.db") as sqlite_db,
+        httpx.AsyncClient() as http_client,
+    ):
+        api_key_repo = db.SqliteApiKeyRepository(sqlite_db)
+        client_app_repo = db.SqliteClientAppRepository(sqlite_db)
+        project_repo = db.SqliteProjectRepository(sqlite_db)
+        session_repo = db.SqliteSessionRepository(sqlite_db)
+        file_repo = db.SqliteFileRepository(sqlite_db)
+        tool_audit_repo = db.SqliteToolAuditRepository(sqlite_db)
+
+        api_key_auth = security.ApiKeyAuthProvider(api_key_repo)
+        oidc_auth = security.OidcJwtAuthProvider(
+            security.OidcProviderConfig(), http_client=http_client
+        )
+        edge_verifier = security.CloudflareEdgeVerifier(
+            security.CloudflareEdgeConfig(), http_client=http_client
+        )
+        authenticator = security.CompositeAuthenticator(
+            providers=(api_key_auth, oidc_auth), edge_verifier=edge_verifier
+        )
+
+        blob_store = ingestion.LocalBlobStore(tmp_path / "blobs")
+        fastembed = ingestion.FastEmbedCpuAdapter(cache_dir=tmp_path / "fastembed")
+        hash_embedder = ingestion.DeterministicHashEmbedder()
+        vector_store = ingestion.LanceDbVectorStore(
+            tmp_path / "lancedb", dimensions=fastembed.dimensions
+        )
+        pipeline = ingestion.LocalIngestionPipeline(
+            blob_store=blob_store,
+            file_repo=file_repo,
+            embedder=fastembed,
+            vector_store=vector_store,
+        )
+
+        llama_provider = inference.LlamaCppProvider(client=http_client)
+        openai_provider = inference.OpenAICompatProvider(
+            "http://127.0.0.1:11434", client=http_client
+        )
+        llama_supervisor = inference.LlamaCppSupervisor(
+            executable_path=tmp_path / "llama-server",
+            models_dir=tmp_path / "models",
+            log_dir=tmp_path / "logs",
+        )
+        ollama_supervisor = inference.OllamaSupervisor(log_dir=tmp_path / "logs")
+
+        search_plugin = tools.SearchFilesPlugin(
+            file_repo, embedder=fastembed, vector_store=vector_store
+        )
+        read_plugin = tools.ReadFileLinesPlugin(file_repo, blob_store)
+        overview_plugin = tools.GetFileOverviewPlugin(file_repo)
+        registry = tools.InMemoryToolRegistry((search_plugin, read_plugin, overview_plugin))
+        policy = tools.DefaultToolPolicy()
+        executor = tools.GuardedToolExecutor(registry, tool_audit_repo, policy)
+        session_gate = scheduler.SessionGate()
+        spooler = scheduler.InferenceSpooler()
+
+        with guardrails.CompositeGuardrailPipeline(
+            GuardrailConfig(enabled=False),
+            providers=(guardrails.AllowAllGuardrailProvider(),),
+            log_dir=tmp_path / "audit",
+        ) as guardrail_pipeline:
+            turn_orchestrator = orchestrator.TurnOrchestrator(
+                settings=LaiSettings(),
+                session_repo=session_repo,
+                file_repo=file_repo,
+                blob_store=blob_store,
+                inference_provider=llama_provider,
+                spooler=spooler,
+                session_gate=session_gate,
+                guardrail_pipeline=guardrail_pipeline,
+                tool_registry=registry,
+                tool_executor=executor,
+                embedder=fastembed,
+                vector_store=vector_store,
+                client_app_repo=client_app_repo,
+            )
+
+            checks: tuple[tuple[object, type[object]], ...] = (
+                (api_key_auth, AuthProviderPort),
+                (oidc_auth, AuthProviderPort),
+                (edge_verifier, EdgeVerifierPort),
+                (authenticator, AuthenticatorPort),
+                (api_key_repo, ApiKeyRepositoryPort),
+                (client_app_repo, ClientAppRepositoryPort),
+                (project_repo, ProjectRepositoryPort),
+                (session_repo, SessionRepositoryPort),
+                (file_repo, FileRepositoryPort),
+                (tool_audit_repo, ToolAuditRepositoryPort),
+                (blob_store, BlobStorePort),
+                (fastembed, EmbedderPort),
+                (hash_embedder, EmbedderPort),
+                (vector_store, VectorStorePort),
+                (pipeline, IngestionPipelinePort),
+                (llama_provider, InferenceProviderPort),
+                (openai_provider, InferenceProviderPort),
+                (llama_supervisor, InferenceSupervisorPort),
+                (ollama_supervisor, InferenceSupervisorPort),
+                (search_plugin, ToolPluginPort),
+                (read_plugin, ToolPluginPort),
+                (overview_plugin, ToolPluginPort),
+                (registry, ToolRegistryPort),
+                (policy, ToolPolicyPort),
+                (executor, ToolExecutorPort),
+                (session_gate, SessionGatePort),
+                (spooler, InferenceSpoolerPort),
+                (turn_orchestrator, OrchestratorPort),
+            )
+            stub = _NonConformingAdapterStub()
+            for adapter_instance, proto in checks:
+                assert isinstance(adapter_instance, proto)
+                assert not isinstance(stub, proto)

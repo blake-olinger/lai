@@ -32,6 +32,10 @@ run = "uv run python scripts/verify.py boundaries"
 description = "Run unit and integration tests with coverage"
 run = "uv run python scripts/verify.py test --cov-fail-under 90"
 
+[tasks.test-hardware]
+description = "Run opt-in hardware tests against live ONNX models and local binaries"
+run = "uv run python -m pytest tests/hardware -m hardware -v"
+
 [tasks.schema]
 description = "Validate exported OpenAPI schema"
 run = "uv run python scripts/verify.py schema"
