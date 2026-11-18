@@ -30,16 +30,20 @@ run = "uv run python scripts/verify.py boundaries"
 
 [tasks.test]
 description = "Run unit and integration tests with coverage"
-run = "uv run python scripts/verify.py test"
+run = "uv run python scripts/verify.py test --cov-fail-under 90"
 
 [tasks.schema]
 description = "Validate exported OpenAPI schema"
 run = "uv run python scripts/verify.py schema"
 
 [tasks.mutate]
-description = "Run mutation tests with pytest-gremlins"
-run = "uv run python scripts/verify.py mutate"
+description = "Run critical-tier mutation tests with pytest-gremlins"
+run = "uv run python scripts/verify.py mutate --tier critical"
+
+[tasks.mutate-full]
+description = "Run full-tier mutation tests with pytest-gremlins"
+run = "uv run python scripts/verify.py mutate --tier full"
 
 [tasks.verify]
 description = "Run full local verification suite"
-run = "uv run python scripts/verify.py all --skip-mutate"
+run = "uv run python scripts/verify.py all --skip-mutate --cov-fail-under 90"

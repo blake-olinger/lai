@@ -7,6 +7,8 @@ on:
   pull_request:
     branches:
       - main
+  schedule:
+    - cron: "0 4 * * 1"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -47,7 +49,12 @@ jobs:
         run: uv run python scripts/verify.py schema
 
       - name: Run unit and integration tests with coverage
-        run: uv run python scripts/verify.py test --cov-fail-under 85
+        run: uv run python scripts/verify.py test --cov-fail-under 90
 
-      - name: Run mutation tests
-        run: uv run python scripts/verify.py mutate
+      - name: Run critical mutation tests
+        if: github.event_name != 'schedule'
+        run: uv run python scripts/verify.py mutate --tier critical
+
+      - name: Run full mutation tests (scheduled)
+        if: github.event_name == 'schedule'
+        run: uv run python scripts/verify.py mutate --tier full
