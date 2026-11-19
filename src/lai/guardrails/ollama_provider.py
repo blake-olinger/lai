@@ -91,6 +91,10 @@ class OllamaShieldGemmaProvider(GuardrailProviderPort):
         """Return the base HTTP URL for the Ollama daemon."""
         return _normalize_ollama_url(self._config.ollama_base_url)
 
+    def reconfigure(self, config: GuardrailConfig) -> None:
+        """Update guardrail policy parameters in place without restarting Ollama."""
+        self._config = config
+
     async def evaluate(self, prompt: str) -> GuardrailDecision:
         """Evaluate prompt across safety principles using CPU-pinned ShieldGemma."""
         if self._client is not None:

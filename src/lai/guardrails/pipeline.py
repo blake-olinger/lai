@@ -71,9 +71,30 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
             self._owns_audit_logger = True
         self._log = get_component_logger("guardrails")
 
+    @property
+    def providers(self) -> tuple[GuardrailProviderPort, ...]:
+        """Return a snapshot of registered guardrail providers."""
+        return tuple(self._providers)
+
     def register_provider(self, provider: GuardrailProviderPort) -> None:
         """Append a guardrail provider to the sequential evaluation chain."""
         self._providers.append(provider)
+
+    def reconfigure(
+        self,
+        config: GuardrailConfig,
+        *,
+        providers: Sequence[GuardrailProviderPort] | None = None,
+    ) -> None:
+        """Hot-swap guardrail policy (and optionally providers) in place."""
+        self._config = config
+        if providers is not None:
+            self._providers = list(providers)
+            return
+        for provider in self._providers:
+            reconfigure_fn = getattr(provider, "reconfigure", None)
+            if callable(reconfigure_fn):
+                reconfigure_fn(config)
 
     def close(self) -> None:
         """Close the owned rotating PromptAuditLogger if created by this pipeline."""

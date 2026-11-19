@@ -148,6 +148,13 @@ class LocalBlobStore(BlobStorePort):
         """Return the maximum permitted upload payload size in bytes."""
         return self._max_upload_bytes
 
+    def set_max_upload_bytes(self, max_upload_bytes: int) -> None:
+        """Update maximum upload payload size in bytes in place."""
+        if max_upload_bytes < 1:
+            msg = "max_upload_bytes must be >= 1."
+            raise ValidationFailedError(msg, details={"max_upload_bytes": str(max_upload_bytes)})
+        self._max_upload_bytes = max_upload_bytes
+
     def _resolve_blob_path(self, blob_path: Path) -> Path:
         """Resolve blob_path and verify it stays strictly within blobs_dir."""
         candidate = (

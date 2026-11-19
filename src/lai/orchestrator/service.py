@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from lai.domain.chat import (
@@ -122,6 +123,12 @@ class TurnOrchestrator(OrchestratorPort):
             window_tokens=settings.map_window_tokens,
             overlap_tokens=settings.map_window_overlap_tokens,
         )
+
+    def update_settings(self, settings: LaiSettings) -> None:
+        """Refresh orchestrator settings snapshot in place for subsequent turns."""
+        self._settings = settings
+        self._prep_deps = replace(self._prep_deps, settings=settings)
+        self._resume_deps.settings = settings
 
     async def run_turn_stream(
         self,

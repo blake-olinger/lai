@@ -51,6 +51,25 @@ class TokenBucketRateLimiter:
         self._buckets: dict[str, _BucketState] = {}
         self._lock = asyncio.Lock()
 
+    def reconfigure(
+        self,
+        *,
+        requests_per_minute: int,
+        burst_capacity: int | None = None,
+    ) -> None:
+        """Update refill rate and burst capacity in place without clearing existing buckets."""
+        if requests_per_minute < 1:
+            msg = "requests_per_minute must be >= 1."
+            raise ValueError(msg)
+        capacity = float(burst_capacity if burst_capacity is not None else requests_per_minute)
+        if capacity < 1.0:
+            msg = "burst_capacity must be >= 1."
+            raise ValueError(msg)
+        self._rate_per_second = requests_per_minute / 60.0
+        self._capacity = capacity
+        for bucket in self._buckets.values():
+            bucket.tokens = min(bucket.tokens, capacity)
+
     async def acquire(self, principal_id: str, *, tokens: float = 1.0) -> None:
         """Consume `tokens` for `principal_id` or raise RateLimitExceededError."""
         if tokens <= 0.0 or tokens > self._capacity:

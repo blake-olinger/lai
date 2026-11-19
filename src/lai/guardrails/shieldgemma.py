@@ -78,6 +78,10 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
         """Return the base HTTP URL for the ShieldGemma llama-server instance."""
         return f"http://{self._config.host}:{self._config.port}"
 
+    def reconfigure(self, config: GuardrailConfig) -> None:
+        """Update guardrail policy parameters in place without restarting llama-server."""
+        self._config = config
+
     async def evaluate(self, prompt: str) -> GuardrailDecision:
         """Evaluate prompt sequentially across principles, short-circuiting on violation."""
         if self._client is not None:

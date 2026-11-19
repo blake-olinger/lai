@@ -141,6 +141,22 @@ class FairPriorityQueue:
         """Return the optional per-principal waiting job quota."""
         return self._max_queued_jobs_per_principal
 
+    def reconfigure(
+        self,
+        *,
+        max_queued_jobs: int,
+        max_queued_jobs_per_principal: int | None,
+    ) -> None:
+        """Update queue capacity limits in place without dropping currently queued jobs."""
+        if max_queued_jobs < 1:
+            msg = "max_queued_jobs must be at least 1."
+            raise ValidationFailedError(msg)
+        if max_queued_jobs_per_principal is not None and max_queued_jobs_per_principal < 1:
+            msg = "max_queued_jobs_per_principal must be at least 1 when set."
+            raise ValidationFailedError(msg)
+        self._max_queued_jobs = max_queued_jobs
+        self._max_queued_jobs_per_principal = max_queued_jobs_per_principal
+
     def __len__(self) -> int:
         """Return the total number of waiting jobs across all priority bands."""
         return len(self._by_job_id)

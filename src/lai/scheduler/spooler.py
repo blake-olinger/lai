@@ -48,6 +48,18 @@ class InferenceSpooler(InferenceSpoolerPort):
         self._total_wait_ms = 0.0
         self._wait_samples = 0
 
+    def reconfigure(
+        self,
+        *,
+        max_queued_jobs: int,
+        max_queued_jobs_per_principal: int | None,
+    ) -> None:
+        """Update queue capacity limits in place without dropping queued or active leases."""
+        self._queue.reconfigure(
+            max_queued_jobs=max_queued_jobs,
+            max_queued_jobs_per_principal=max_queued_jobs_per_principal,
+        )
+
     @asynccontextmanager
     async def lease(
         self,

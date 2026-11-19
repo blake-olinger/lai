@@ -178,6 +178,10 @@ class OidcJwtAuthProvider(AuthProviderPort):
         """Return provider identifier."""
         return "oidc"
 
+    def reconfigure(self, config: OidcProviderConfig) -> None:
+        """Update OIDC policy claims and allowlists in place without clearing cached JWKS."""
+        self._config = config
+
     def supports(self, credentials: RequestCredentials) -> bool:
         """Return True when OIDC is enabled and credentials carry a 3-part JWT."""
         if not self._config.enabled:

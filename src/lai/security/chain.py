@@ -36,6 +36,13 @@ class CompositeAuthenticator(AuthenticatorPort):
                 return
         self._providers.append(provider)
 
+    def get_provider(self, name: str) -> AuthProviderPort | None:
+        """Return the registered authentication provider with the given name, or None."""
+        for provider in self._providers:
+            if provider.name == name:
+                return provider
+        return None
+
     async def authenticate(self, credentials: RequestCredentials) -> AuthPrincipal:
         """Validate edge assertions and authenticate via the first matching provider."""
         if self._edge_verifier is not None:
