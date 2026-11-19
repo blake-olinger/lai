@@ -113,7 +113,7 @@ async def test_shieldgemma_provider_allow_and_short_circuit_block() -> None:
         assert decision.verdict is GuardrailVerdict.ALLOW
         assert route.call_count == EXPECTED_DEFAULT_PRINCIPLES
         sent_body = json.loads(cast("httpx.Request", route.calls[0].request).content.decode())
-        assert sent_body["n_predict"] == 4  # noqa: PLR2004
+        assert sent_body["n_predict"] == 4
         assert sent_body["temperature"] == 0.0
         assert sent_body["stop"] == ["\n", "<end_of_turn>"]
 
@@ -162,7 +162,7 @@ async def test_shieldgemma_provider_timeout_alert_errors_and_health(tmp_path: Pa
             )
             healthy = await provider.health()
             assert healthy.healthy is True
-            assert healthy.slots_idle == 2  # noqa: PLR2004
+            assert healthy.slots_idle == 2
 
         with respx.mock(assert_all_called=True) as mock:
             mock.get(health_url).mock(

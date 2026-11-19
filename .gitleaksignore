@@ -1,0 +1,7 @@
+# Historical synthetic test-fixture commits pre-dating inline `# gitleaks:allow` annotations.
+abf5cc64dd17ad7cc22a0dee3fce04689cb47f20:tests/integration/test_orchestrator_modes.py:generic-api-key:211
+aef9c8c8cfa9cfc63c2c7308e06085c806e4937a:tests/integration/test_db_repos.py:generic-api-key:109
+7dedb6ac876dd06dde09b890564cd28ff29d3e67:tests/unit/test_scrubber_and_prompt_audit.py:generic-api-key:90
+7dedb6ac876dd06dde09b890564cd28ff29d3e67:tests/unit/test_scrubber_and_prompt_audit.py:generic-api-key:91
+7dedb6ac876dd06dde09b890564cd28ff29d3e67:tests/unit/test_scrubber_and_prompt_audit.py:generic-api-key:92
+7dedb6ac876dd06dde09b890564cd28ff29d3e67:tests/unit/test_scrubber_and_prompt_audit.py:generic-api-key:94

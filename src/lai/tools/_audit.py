@@ -39,7 +39,7 @@ def normalize_optional_id(value: str | None) -> str | None:
     if value is None:
         return None
     stripped = value.strip()
-    return stripped if stripped else None
+    return stripped or None
 
 
 def serialize_arguments(arguments: dict[str, Any]) -> str:

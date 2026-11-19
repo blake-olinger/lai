@@ -34,10 +34,7 @@ _STOP_TOKENS: tuple[str, ...] = ("\n", "<end_of_turn>")
 
 
 def _normalize_ollama_url(base_url: str) -> str:
-    cleaned = base_url.strip().rstrip("/")
-    if cleaned.endswith("/v1"):
-        cleaned = cleaned[:-3]
-    return cleaned
+    return base_url.strip().rstrip("/").removesuffix("/v1")
 
 
 def _parse_json_dict(response: httpx.Response) -> dict[str, object] | None:

@@ -655,7 +655,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
-    { name = "python-multipart", specifier = ">=0.0.18" },
+    { name = "python-multipart", specifier = ">=0.0.27" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sse-starlette", specifier = ">=2.2" },
     { name = "structlog", specifier = ">=24.4" },

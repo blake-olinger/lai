@@ -320,6 +320,6 @@ async def test_pipeline_audit_logger_ownership_and_ruling_log_dedup(tmp_path: Pa
         json.loads(line)["event"]
         for line in (log_dir / "lai.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert events.count("guardrail_ruling") == 3  # noqa: PLR2004
+    assert events.count("guardrail_ruling") == 3
     assert events.count("guardrail_unconfigured_fail_closed") == 1
     assert events.count("guardrail_fail_closed") == 1

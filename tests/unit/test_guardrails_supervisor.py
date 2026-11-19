@@ -341,7 +341,7 @@ def test_process_tree_suppression_and_posix_group_branches(
     raw = _FakeProc(FAKE_PID, OSError)
     terminate_asyncio_process_tree(cast("asyncio.subprocess.Process", raw))
     kill_popen_process_group(cast("subprocess.Popen[bytes]", raw))
-    assert len(pg_signals) == 2  # noqa: PLR2004
+    assert len(pg_signals) == 2
     assert raw.calls == 0
     monkeypatch.setattr(os, "killpg", _deny, raising=False)
     kill_asyncio_process_tree(cast("asyncio.subprocess.Process", raw))

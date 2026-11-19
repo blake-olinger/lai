@@ -89,7 +89,7 @@ async def test_api_key_repository_crud_touch_and_revoke(tmp_path: Path) -> None:
         now = datetime(2026, 11, 17, 10, 0, tzinfo=UTC)
         rec = ApiKeyRecord(
             name="primary",
-            key_prefix="lai_sk_abcdef1",
+            key_prefix="lai_sk_abcdef1",  # gitleaks:allow
             key_hash="a" * 64,
             scopes=(ApiScope.PROJECTS_READ, ApiScope.CHAT_WRITE),
             created_at=now,

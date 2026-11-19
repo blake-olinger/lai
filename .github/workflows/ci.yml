@@ -51,6 +51,9 @@ jobs:
       - name: Validate OpenAPI 3.1 schema
         run: uv run python scripts/verify.py schema
 
+      - name: Verify sdist and wheel build
+        run: uv build --no-sources
+
       - name: Run unit and integration tests with coverage
         run: uv run python scripts/verify.py test --cov-fail-under 90
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from pathlib import Path  # noqa: TC003 - evaluated at runtime by Typer
+from pathlib import Path
 from typing import Annotated
 
 import typer

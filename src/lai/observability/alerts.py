@@ -223,7 +223,7 @@ def _opt_str(value: object) -> str | None:
     if value is None:
         return None
     text = str(value)
-    return text if text else None
+    return text or None
 
 
 class AlertingLogHandler(logging.Handler):

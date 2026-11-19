@@ -1,20 +1,23 @@
 [tools]
-python = "3.13"
-uv = "latest"
+uv = "0.13"
 
 [tasks.setup]
-description = "Install Python 3.13 and sync project dependencies"
+description = "Install Python 3.13 and sync locked project dependencies"
 run = [
     "uv python install 3.13",
-    "uv sync",
+    "uv sync --locked",
 ]
 
 [tasks.fmt]
-description = "Format source and tests with ruff"
+description = "Autofix lint issues then format source and tests with ruff"
 run = [
-    "uv run python -m ruff format src tests scripts",
     "uv run python -m ruff check --fix src tests scripts",
+    "uv run python -m ruff format src tests scripts",
 ]
+
+[tasks.build]
+description = "Build sdist and wheel without local source overrides"
+run = "uv build --no-sources"
 
 [tasks.lint]
 description = "Run ruff lint, format check, and 350-line file size guard"

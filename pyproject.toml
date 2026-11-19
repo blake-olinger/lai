@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local AI platform for multi-project chat, log and code analysis, and guarded tool execution"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13,<3.14"
 authors = [{ name = "Blake Olinger", email = "hello@blakeolinger.dev" }]
 keywords = [
@@ -45,7 +46,7 @@ dependencies = [
     "lancedb>=0.17",
     "fastembed>=0.5",
     "httpx>=0.28",
-    "python-multipart>=0.0.18",
+    "python-multipart>=0.0.27",
     "sse-starlette>=2.2",
     "structlog>=24.4",
     "typer>=0.15",
@@ -87,13 +88,26 @@ packages = ["src/lai"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-pythonpath = ["src"]
 filterwarnings = ["error"]
+xfail_strict = true
 tmp_path_retention_policy = "none"
 markers = [
     "hardware: Opt-in tests exercising live ONNX models and local inference binaries",
 ]
-addopts = "-m 'not hardware'"
+addopts = "--strict-markers --strict-config -ra -m 'not hardware'"
+
+[tool.coverage.run]
+branch = true
+source_pkgs = ["lai"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    'if __name__ == "__main__":',
+]
 
 [tool.ruff]
 target-version = "py313"
@@ -120,7 +134,6 @@ select = [
     "T20",
     "PIE",
     "PT",
-    "Q",
     "RSE",
     "RET",
     "SLF",
@@ -135,10 +148,18 @@ select = [
     "PERF",
     "RUF",
     "C901",
+    "FAST",
+    "FURB",
+    "LOG",
+    "G",
+    "PGH",
 ]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 [tool.ruff.lint.flake8-type-checking]
 runtime-evaluated-base-classes = [
@@ -150,15 +171,20 @@ runtime-evaluated-base-classes = [
 runtime-evaluated-decorators = [
     "fastapi.FastAPI.get",
     "fastapi.FastAPI.post",
+    "fastapi.FastAPI.put",
+    "fastapi.FastAPI.patch",
+    "fastapi.FastAPI.delete",
     "fastapi.APIRouter.get",
     "fastapi.APIRouter.post",
     "fastapi.APIRouter.put",
     "fastapi.APIRouter.patch",
     "fastapi.APIRouter.delete",
+    "typer.Typer.command",
+    "typer.Typer.callback",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "PLR2004"]
 
 [tool.basedpyright]
 typeCheckingMode = "strict"
@@ -168,7 +194,9 @@ reportMissingTypeStubs = false
 
 [tool.mypy]
 python_version = "3.13"
+files = ["src", "tests", "scripts"]
 strict = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 plugins = ["pydantic.mypy"]
 
 [tool.pydantic-mypy]
@@ -182,6 +210,7 @@ ignore_missing_imports = true
 
 [tool.importlinter]
 root_package = "lai"
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Clean architectural layers"
@@ -207,4 +236,30 @@ modules = [
     "lai.ingestion",
     "lai.tools",
     "lai.scheduler",
+    "lai.config",
+]
+
+[[tool.importlinter.contracts]]
+name = "Domain and ports stay framework-free"
+type = "forbidden"
+source_modules = [
+    "lai.domain",
+    "lai.ports",
+]
+forbidden_modules = [
+    "fastapi",
+    "uvicorn",
+    "typer",
+    "httpx",
+    "aiosqlite",
+    "lancedb",
+    "fastembed",
+    "pydantic_settings",
+    "yaml",
+    "structlog",
+    "jwt",
+    "sse_starlette",
+    "huggingface_hub",
+    "tiktoken",
+    "python_multipart",
 ]

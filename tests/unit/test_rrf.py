@@ -107,7 +107,7 @@ async def test_deterministic_and_fastembed_cpu_adapters() -> None:
     vecs = await hash_embedder.embed_texts(
         ["database connection timeout", "css margin padding", "a", ""]
     )
-    assert len(vecs) == 4  # noqa: PLR2004
+    assert len(vecs) == 4
     for vec in vecs:
         assert len(vec) == TEST_DIM
         assert math.isclose(math.sqrt(sum(v * v for v in vec)), 1.0, rel_tol=1e-6)
@@ -123,7 +123,7 @@ async def test_deterministic_and_fastembed_cpu_adapters() -> None:
         backend_factory=lambda: fake_backend,
     )
     assert cpu_adapter.model_name == "BAAI/bge-small-en-v1.5"
-    assert cpu_adapter.dimensions == 4  # noqa: PLR2004
+    assert cpu_adapter.dimensions == 4
     assert await cpu_adapter.embed_texts([]) == []
     assert fake_backend.embedded_batches == []
 

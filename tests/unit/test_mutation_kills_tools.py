@@ -67,7 +67,7 @@ class _MemAuditRepo(ToolAuditRepositoryPort):
 
     async def get_approval(self, approval_id: str) -> ToolApprovalRecord | None:
         self._get_calls += 1
-        if self._return_none_on_second_get and self._get_calls >= 3:  # noqa: PLR2004
+        if self._return_none_on_second_get and self._get_calls >= 3:
             return None
         return self.approvals.get(approval_id)
 

@@ -84,8 +84,10 @@ EMBEDDED_EXCEPTION_RE = re.compile(
     r"\b(?P<exc>[A-Za-z_][\w.]*(?:Error|Exception))\b(?:\s*:\s*(?P<msg>[^\r\n]+))?"
 )
 
-_UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
-_HEX_RE = re.compile(r"\b0x[0-9a-f]+\b", re.I)
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE
+)
+_HEX_RE = re.compile(r"\b0x[0-9a-f]+\b", re.IGNORECASE)
 _ISO_TS_RE = re.compile(
     r"\b\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b"
 )

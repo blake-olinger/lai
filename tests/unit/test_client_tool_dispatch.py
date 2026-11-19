@@ -211,7 +211,7 @@ async def test_client_dispatch_lease_scrub_truncation_and_payload_cap() -> None:
         principal_id="usr_1",
     )
     assert ok_res.truncated is True
-    assert len(ok_res.output) <= 25  # noqa: PLR2004
+    assert len(ok_res.output) <= 25
     assert "lai_sk_1234567890abcd" not in ok_res.output
     assert "[REDACTED_EMAIL]" in (ok_res.error or "")
 

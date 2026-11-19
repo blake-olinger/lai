@@ -108,10 +108,8 @@ class SearchFilesPlugin(ToolPluginPort):
         for fid in requested_file_ids:
             validate_allowed_file_id(fid, context)
 
-        scoped_file_ids: tuple[str, ...] | None = (
-            requested_file_ids
-            if requested_file_ids
-            else (context.allowed_file_ids if context.allowed_file_ids else None)
+        scoped_file_ids: tuple[str, ...] | None = requested_file_ids or (
+            context.allowed_file_ids or None
         )
 
         ranked = await self._run_search(

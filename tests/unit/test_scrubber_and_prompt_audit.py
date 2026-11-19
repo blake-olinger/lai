@@ -130,11 +130,11 @@ async def test_guardrail_domain_settings_and_port_contracts(tmp_path: Path) -> N
 
 def test_scrub_sensitive_text_redacts_secrets_and_pii_without_breaking_code() -> None:
     """Scrubber redacts keys, JWTs, passwords, emails, and PII while preserving code/logs."""
-    lai_key = "lai_sk_test_998877665544"
-    openai_key = "sk-proj-1234567890abcdef"
-    gh_key = "ghp_1234567890abcdef"
+    lai_key = "lai_sk_test_998877665544"  # gitleaks:allow
+    openai_key = "sk-proj-1234567890abcdef"  # gitleaks:allow
+    gh_key = "ghp_1234567890abcdef"  # gitleaks:allow
     gh_pat = "github_pat_1234567890abcdef"
-    aws_key = "AKIA1234567890ABCDEF"
+    aws_key = "AKIA1234567890ABCDEF"  # gitleaks:allow
     jwt_tok = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signaturepart"
     raw = (
         f"Authorization: Bearer {lai_key}\n"
