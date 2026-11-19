@@ -24,6 +24,7 @@ max_queued_jobs: 64
 keepalive_interval_seconds: 10.0
 json_keepalive_threshold_seconds: 20.0
 rate_limit_rpm: 120
+ip_rate_limit_rpm: 240
 
 # Multi-tenant per-principal quotas (enforced for all non-admin principals)
 max_projects_per_principal: 10

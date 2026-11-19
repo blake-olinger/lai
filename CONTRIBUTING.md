@@ -97,7 +97,12 @@ Before opening a pull request, run the full verification suite:
 uv run python scripts/verify.py all --tier critical --cov-fail-under 90
 ```
 
+> **Note:** `mise run verify` runs the fast local loop (`--skip-mutate`); run `mise run mutate` (or
+> the command above) before opening a PR to match CI.
+
 - Keep commits focused and free of local artifacts (`config/config.yaml`, `data/`, `models/`,
   `bin/`, `site/`, `deploy/cloudflared/config.yml`).
 - Update unit/integration tests and regenerate `openapi.json` + `docs/api-reference.md` in the
   same PR whenever API behavior changes.
+- Update public guides under `docs/` (`docs/deployment.md`, `docs/client-apps-and-projects.md`)
+  when CLI subcommands, lifecycle workflows, or configuration options change.

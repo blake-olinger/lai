@@ -29,20 +29,20 @@ or accepting static client secrets, LAI binds registered client apps to Google O
 
 1. Register the client ID via `POST /v1/client-apps` or `lai apps create --oauth-client-id <ID>`.
 2. On OIDC requests, LAI extracts `azp` (when present, required to match `oidc_audiences`) or the
-   matched `aud` claim and attaches it to `AuthPrincipal.oauth_client_id`.
-3. Client-executed tool dispatch verifies that the caller's verified `oauth_client_id` matches the
-   active `ClientAppRecord.oauth_client_id` with zero client secrets transmitted or stored.
+   matched `aud` claim as the caller's verified `oauth_client_id`.
+3. Client-executed tool dispatch verifies that the caller's verified `oauth_client_id` matches an
+   active registered client app with zero client secrets transmitted or stored.
 
 ## Multi-Tenant Isolation & Per-Principal Quotas
 
 - **Owner scoping & `404` anti-enumeration**: Projects, files, sessions, messages, and approvals are
-  owned by `owner_principal_id`. Non-admin lookups or mutations targeting another principal's
-  resources fail with `404 Not Found` (`not_found`) so resource IDs cannot be probed.
+  scoped to the principal that created them. Non-admin lookups or mutations targeting another
+  principal's resources fail with `404 Not Found` (`not_found`) so resource IDs cannot be probed.
 - **Per-principal quotas**: Fail-closed limits cap active projects (`max_projects_per_principal`),
   cumulative file bytes (`max_storage_bytes_per_principal`), and queued jobs
   (`max_queued_jobs_per_principal`).
-- **Two-level fair scheduling**: The spooler schedules round-robin across `principal_id` first and
-  `session_id` lanes second so one tenant cannot starve others.
+- **Fair scheduling**: Queued inference jobs are scheduled round-robin across users first and
+  sessions second so one tenant cannot starve others.
 
 ## Standard Headers & Error Envelope
 
