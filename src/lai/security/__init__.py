@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from lai.security.api_key_provider import ApiKeyAuthProvider
 from lai.security.chain import CompositeAuthenticator
-from lai.security.client_apps import build_client_app
+from lai.security.client_apps import build_client_app, update_client_app
 from lai.security.cloudflare import CloudflareEdgeConfig, CloudflareEdgeVerifier
 from lai.security.keys import (
     API_KEY_PREFIX,
@@ -31,5 +31,6 @@ __all__ = [
     "has_effective_scope",
     "hash_api_key",
     "require_scope",
+    "update_client_app",
     "verify_key_hash",
 ]

@@ -53,6 +53,10 @@ class ClientAppRepositoryPort(Protocol):
         """Persist a new client application record."""
         ...
 
+    async def update(self, record: ClientAppRecord) -> ClientAppRecord:
+        """Persist updated metadata for an existing non-revoked client application."""
+        ...
+
     async def get_by_id(self, app_id: str) -> ClientAppRecord | None:
         """Fetch a client application record by ID."""
         ...

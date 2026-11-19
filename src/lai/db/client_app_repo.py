@@ -7,8 +7,9 @@ import sqlite3
 from typing import TYPE_CHECKING, cast
 
 from lai.db._codecs import format_dt, format_opt_dt, parse_dt, parse_opt_dt
+from lai.domain.base import utc_now
 from lai.domain.client_apps import ClientAppRecord
-from lai.domain.errors import ConflictError
+from lai.domain.errors import ConflictError, NotFoundError
 from lai.domain.tools import PermissionTier, ToolSpec
 from lai.ports.repositories import ClientAppRepositoryPort
 
@@ -45,6 +46,27 @@ def _row_to_client_app(row: aiosqlite.Row) -> ClientAppRecord:
     )
 
 
+async def _revoke_expired_duplicates(
+    conn: aiosqlite.Connection,
+    oauth_client_id: str,
+    now: datetime,
+) -> None:
+    """Auto-revoke any expired non-revoked rows for oauth_client_id before re-registration."""
+    cursor = await conn.execute(
+        "SELECT id, expires_at FROM client_apps WHERE oauth_client_id = ? AND revoked_at IS NULL;",
+        (oauth_client_id,),
+    )
+    rows = await cursor.fetchall()
+    revoked_iso = format_dt(now)
+    for row in rows:
+        expires_at = parse_opt_dt(cast("str | None", row["expires_at"]))
+        if expires_at is not None and now >= expires_at:
+            await conn.execute(
+                "UPDATE client_apps SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL;",
+                (revoked_iso, str(row["id"])),
+            )
+
+
 class SqliteClientAppRepository(ClientAppRepositoryPort):
     """SQLite persistence adapter implementing ClientAppRepositoryPort."""
 
@@ -52,11 +74,12 @@ class SqliteClientAppRepository(ClientAppRepositoryPort):
         self._db = db
 
     async def create(self, record: ClientAppRecord) -> ClientAppRecord:
-        """Persist a new client application record."""
+        """Persist a new client application record, auto-revoking expired duplicates."""
         tiers_json = json.dumps([tier.value for tier in record.allowed_tiers])
         tools_json = json.dumps([spec.model_dump(mode="json") for spec in record.registered_tools])
         projects_json = json.dumps(list(record.allowed_project_ids))
         async with self._db.write_transaction() as conn:
+            await _revoke_expired_duplicates(conn, record.oauth_client_id, utc_now())
             try:
                 await conn.execute(
                     """
@@ -88,6 +111,36 @@ class SqliteClientAppRepository(ClientAppRepositoryPort):
                     msg,
                     details={"oauth_client_id": record.oauth_client_id},
                 ) from exc
+        return record
+
+    async def update(self, record: ClientAppRecord) -> ClientAppRecord:
+        """Persist updated mutable metadata for an existing non-revoked client app."""
+        tiers_json = json.dumps([tier.value for tier in record.allowed_tiers])
+        tools_json = json.dumps([spec.model_dump(mode="json") for spec in record.registered_tools])
+        projects_json = json.dumps(list(record.allowed_project_ids))
+        updated = await self._db.execute_write(
+            """
+            UPDATE client_apps
+               SET name = ?,
+                   allowed_tiers_json = ?,
+                   registered_tools_json = ?,
+                   allowed_project_ids_json = ?,
+                   expires_at = ?
+             WHERE id = ?
+               AND revoked_at IS NULL;
+            """,
+            (
+                record.name,
+                tiers_json,
+                tools_json,
+                projects_json,
+                format_opt_dt(record.expires_at),
+                record.id,
+            ),
+        )
+        if updated == 0:
+            msg = f"Client app {record.id!r} not found or already revoked."
+            raise NotFoundError(msg, details={"app_id": record.id})
         return record
 
     async def get_by_id(self, app_id: str) -> ClientAppRecord | None:

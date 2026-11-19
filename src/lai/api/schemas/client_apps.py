@@ -25,6 +25,16 @@ class CreateClientAppRequest(StrictModel):
     expires_at: datetime | None = None
 
 
+class UpdateClientAppRequest(StrictModel):
+    """Partial update payload for an active OIDC-bound client application."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    allowed_tiers: tuple[PermissionTier, ...] | None = None
+    registered_tools: tuple[ToolSpec, ...] | None = None
+    allowed_project_ids: tuple[str, ...] | None = None
+    expires_at: datetime | None = None
+
+
 class ClientAppResponse(StrictModel):
     """Public metadata for a registered OIDC-bound client application."""
 
