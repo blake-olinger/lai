@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -157,3 +158,44 @@ def test_github_workflows_and_dependabot_parse_with_expected_triggers_and_jobs()
     updates = cast("list[dict[str, object]]", dependabot["updates"])
     ecosystems = {entry["package-ecosystem"] for entry in updates}
     assert ecosystems == {"uv", "github-actions"}
+
+
+def _load_toml_mapping(path: Path) -> dict[str, object]:
+    loaded = tomllib.loads(path.read_text(encoding="utf-8"))
+    return cast("dict[str, object]", loaded)
+
+
+def test_supply_chain_cooldown_and_locked_pip_audit_configuration() -> None:
+    """Validate 7-day release cooldowns and isolated, hash-locked pip-audit CI config."""
+    audit_project_dir = REPO_ROOT / ".github" / "tools" / "pip-audit"
+    for project_dir in (REPO_ROOT, audit_project_dir):
+        pyproject = _load_toml_mapping(project_dir / "pyproject.toml")
+        tool_cfg = cast("dict[str, object]", pyproject["tool"])
+        uv_cfg = cast("dict[str, object]", tool_cfg["uv"])
+        assert uv_cfg.get("exclude-newer") == "7 days"
+
+        lock_data = _load_toml_mapping(project_dir / "uv.lock")
+        lock_options = cast("dict[str, object]", lock_data["options"])
+        assert lock_options.get("exclude-newer-span") == "P7D"
+
+    security = _load_yaml_mapping(REPO_ROOT / ".github" / "workflows" / "security.yml")
+    sec_jobs = cast("dict[str, dict[str, object]]", security["jobs"])
+    sec_steps = cast("list[dict[str, object]]", sec_jobs["security"].get("steps", []))
+    run_blocks = "\n".join(str(step.get("run", "")) for step in sec_steps)
+    assert "uv tool run pip-audit" not in run_blocks
+    assert "--no-hashes" not in run_blocks
+    assert "--project .github/tools/pip-audit --locked --isolated" in run_blocks
+    assert "python -m pip_audit --disable-pip" in run_blocks
+
+    dependabot = _load_yaml_mapping(REPO_ROOT / ".github" / "dependabot.yml")
+    updates = cast("list[dict[str, object]]", dependabot["updates"])
+    uv_dirs = {
+        str(entry["directory"]) for entry in updates if entry.get("package-ecosystem") == "uv"
+    }
+    assert uv_dirs == {"/", "/.github/tools/pip-audit"}
+    for entry in updates:
+        cooldown = cast("dict[str, object]", entry.get("cooldown"))
+        assert isinstance(cooldown, dict)
+        default_days = cooldown.get("default-days")
+        assert isinstance(default_days, int)
+        assert default_days >= 7

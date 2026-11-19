@@ -1,0 +1,12 @@
+[project]
+name = "lai-pip-audit"
+version = "0.0.0"
+description = "Isolated, hash-locked pip-audit runner for LAI CI security workflows"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "pip-audit>=2.10",
+]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days"

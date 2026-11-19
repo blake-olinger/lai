@@ -90,6 +90,7 @@ Every push and pull request runs automated CI security checks:
 
 - **Secret scanning** across full git history (`gitleaks`)
 - **Static security linting** (`ruff` Bandit rules across source and scripts)
-- **Dependency vulnerability auditing** (`pip-audit` against the locked dependency graph)
+- **Dependency vulnerability auditing** (isolated, hash-locked `pip-audit` against hashed exports of the locked dependency graph)
 - **Supply-chain hardening** via SHA-pinned GitHub Actions workflows, least-privilege job
-  permissions, and automated weekly Dependabot updates
+  permissions, 7-day release cooldowns (`tool.uv.exclude-newer` and Dependabot `cooldown`), and
+  automated weekly Dependabot updates
