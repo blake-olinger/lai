@@ -10,6 +10,7 @@ from lai.domain.base import StrictModel
 from lai.domain.inference import BackendHealth
 from lai.domain.observability import AlertEvent
 from lai.domain.scheduler import SpoolerSnapshot
+from lai.domain.version import PACKAGE_VERSION
 
 
 class ErrorDetail(StrictModel):
@@ -38,7 +39,7 @@ class HealthResponse(StrictModel):
     """Unauthenticated liveness probe payload."""
 
     status: Literal["ok"] = "ok"
-    version: str = "0.1.0"
+    version: str = PACKAGE_VERSION
 
 
 class GpuStatusDTO(StrictModel):

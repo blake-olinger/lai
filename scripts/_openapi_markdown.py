@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
+from lai.domain.version import PACKAGE_VERSION
+
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "options", "head"})
 _MAX_ENUM_PREVIEW = 8
 
@@ -308,7 +310,7 @@ def render_api_reference_markdown(schema: Mapping[str, Any]) -> str:
     root = _as_mapping(schema)
     info = _as_mapping(root.get("info"))
     title = str(info.get("title", "LAI Local AI Server"))
-    version = str(info.get("version", "0.1.0"))
+    version = str(info.get("version", PACKAGE_VERSION))
     openapi_version = str(root.get("openapi", "3.1.0"))
     info_desc = info.get("description")
 
