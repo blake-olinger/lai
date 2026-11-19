@@ -127,11 +127,83 @@ def _validate_cors_header_name(header: str) -> None:
         raise ValueError(msg)
 
 
+def _validate_email_address(address: str, field_name: str) -> None:
+    """Reject empty, header-injectable, or syntactically invalid email addresses."""
+    if "\r" in address or "\n" in address:
+        msg = f"Invalid email address in {field_name}: control characters are not permitted."
+        raise ValueError(msg)
+    cleaned = address.strip()
+    local, sep, domain = cleaned.partition("@")
+    if (
+        not cleaned
+        or not sep
+        or not local
+        or not domain
+        or "@" in domain
+        or any(ch.isspace() for ch in cleaned)
+    ):
+        msg = f"Invalid email address {address!r} in {field_name}."
+        raise ValueError(msg)
+
+
+def _validate_webhook_url(url: str) -> None:
+    """Require an explicit http:// or https:// URL with hostname for alert webhooks."""
+    cleaned = url.strip()
+    if not cleaned or cleaned != url or any(ch.isspace() for ch in cleaned):
+        msg = f"Invalid alert_webhook_url {url!r}: must not be empty or contain whitespace."
+        raise ValueError(msg)
+    parsed = urlsplit(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        msg = f"Invalid alert_webhook_url {url!r}: must be a valid http:// or https:// URL."
+        raise ValueError(msg)
+
+
+def _validate_alerting_settings(settings: LaiSettings) -> None:
+    """Enforce fail-closed validation on webhook and outbound SMTP alerting settings."""
+    if settings.logging.alert_webhook_url is not None:
+        _validate_webhook_url(settings.logging.alert_webhook_url)
+
+    smtp = settings.logging.alert_smtp
+    if _has_text(smtp.password) and not _has_text(smtp.username):
+        msg = "logging.alert_smtp.password requires logging.alert_smtp.username to be configured."
+        raise ValueError(msg)
+    if "\r" in smtp.subject_prefix or "\n" in smtp.subject_prefix:
+        msg = "logging.alert_smtp.subject_prefix must not contain CR/LF characters."
+        raise ValueError(msg)
+    if not smtp.enabled:
+        return
+
+    if not _has_text(smtp.host) or any(ch.isspace() for ch in (smtp.host or "").strip()):
+        msg = "logging.alert_smtp.host must be a non-empty hostname when SMTP alerting is enabled."
+        raise ValueError(msg)
+    if not _has_text(smtp.from_address):
+        msg = "logging.alert_smtp.from_address is required when SMTP alerting is enabled."
+        raise ValueError(msg)
+    _validate_email_address(smtp.from_address or "", "logging.alert_smtp.from_address")
+
+    explicit = [item.strip() for item in smtp.to_addresses if item.strip()]
+    fallback = (
+        [item.strip() for item in settings.oidc_admin_emails if item.strip()]
+        if smtp.use_admin_emails_fallback
+        else []
+    )
+    recipients = explicit or fallback
+    if not recipients:
+        msg = (
+            "SMTP alerting requires non-empty logging.alert_smtp.to_addresses "
+            "or oidc_admin_emails when use_admin_emails_fallback is enabled."
+        )
+        raise ValueError(msg)
+    for recipient in recipients:
+        _validate_email_address(recipient, "logging.alert_smtp.to_addresses")
+
+
 def validate_lai_settings(settings: LaiSettings) -> None:
-    """Run all fail-closed security and CORS checks on LaiSettings."""
+    """Run all fail-closed security, CORS, and alerting checks on LaiSettings."""
     _validate_oidc_settings(settings)
     _validate_cloudflare_settings(settings)
     for origin in settings.cors_allowed_origins:
         _validate_single_cors_origin(origin)
     for header in settings.cors_extra_allow_headers:
         _validate_cors_header_name(header)
+    _validate_alerting_settings(settings)

@@ -39,8 +39,8 @@ class WebhookAlertSink(AlertSinkPort):
         self._timeout_seconds = timeout_seconds
         self._client = client
 
-    async def send_alert(self, event: AlertEvent) -> None:
-        """Post an alert payload to the configured webhook without raising on failure."""
+    async def send_alert_strict(self, event: AlertEvent) -> None:
+        """Post an alert payload to the configured webhook, raising on HTTP/transport error."""
         summary = (
             f"[{event.severity.value.upper()}] {event.component} "
             f"({event.category.value}): {event.message}"
@@ -50,13 +50,17 @@ class WebhookAlertSink(AlertSinkPort):
             "content": summary,
             "event": event.model_dump(mode="json"),
         }
+        if self._client is not None:
+            response = await self._client.post(self._webhook_url, json=payload)
+        else:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                response = await client.post(self._webhook_url, json=payload)
+        response.raise_for_status()
+
+    async def send_alert(self, event: AlertEvent) -> None:
+        """Post an alert payload to the configured webhook without raising on failure."""
         try:
-            if self._client is not None:
-                response = await self._client.post(self._webhook_url, json=payload)
-            else:
-                async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                    response = await client.post(self._webhook_url, json=payload)
-            response.raise_for_status()
+            await self.send_alert_strict(event)
         except (httpx.HTTPError, OSError) as exc:
             sys.stderr.write(f"WebhookAlertSink delivery failed: {exc}\n")
 
@@ -94,6 +98,23 @@ class AlertManager(AlertManagerPort):
             else None
         )
 
+    @property
+    def sinks(self) -> tuple[AlertSinkPort, ...]:
+        """Return a snapshot of currently active alert sinks."""
+        with self._lock:
+            return self._sinks
+
+    def reconfigure(
+        self,
+        *,
+        sinks: Sequence[AlertSinkPort],
+        cooldown_seconds: float,
+    ) -> None:
+        """Hot-swap active alert sinks and cooldown window without clearing recent history."""
+        with self._lock:
+            self._sinks = tuple(sinks)
+            self._cooldown_seconds = cooldown_seconds
+
     def emit(self, event: AlertEvent) -> None:
         """Record an alert event unless suppressed by cooldown, and dispatch to sinks."""
         dedup_key = (event.component, event.category, event.exception_type)
@@ -106,12 +127,17 @@ class AlertManager(AlertManagerPort):
             self._recent.append(event)
             if self._writer is not None:
                 self._writer.write_line(event.model_dump_json())
+            active_sinks = self._sinks
 
-        if not self._sinks:
+        if not active_sinks:
             return
-        self._schedule_delivery(event)
+        self._schedule_delivery(event, active_sinks)
 
-    def _schedule_delivery(self, event: AlertEvent) -> None:
+    def _schedule_delivery(
+        self,
+        event: AlertEvent,
+        sinks: tuple[AlertSinkPort, ...] | None = None,
+    ) -> None:
         """Dispatch event to all sinks on the running event loop or defer until flush."""
         try:
             loop = asyncio.get_running_loop()
@@ -120,7 +146,8 @@ class AlertManager(AlertManagerPort):
                 self._deferred.append(event)
             return
 
-        for sink in self._sinks:
+        targets = sinks if sinks is not None else self.sinks
+        for sink in targets:
             task = loop.create_task(sink.send_alert(event))
             self._pending_tasks.add(task)
             task.add_done_callback(self._pending_tasks.discard)
@@ -183,39 +210,57 @@ def _extract_exception_info(
     return exc_type_name, tb_excerpt
 
 
-def _resolve_category(
+def _parse_explicit_category(
+    record: logging.LogRecord,
+    payload: dict[str, object],
+) -> AlertCategory | None:
+    """Parse an explicit alert_category field from log payload or record attribute."""
+    raw_cat = payload.get("alert_category") or getattr(record, "alert_category", None)
+    if not isinstance(raw_cat, str):
+        return None
+    try:
+        return AlertCategory(raw_cat)
+    except ValueError:
+        return None
+
+
+def _is_timeout_signal(message: str, exception_type: str | None) -> bool:
+    """Return True if message or exception class name indicates a timeout."""
+    lower_msg = message.lower()
+    if "timeout" in lower_msg or "timed out" in lower_msg:
+        return True
+    return exception_type is not None and "timeout" in exception_type.lower()
+
+
+def _resolve_category(  # noqa: PLR0913
     record: logging.LogRecord,
     payload: dict[str, object],
     message: str,
     exception_type: str | None,
     *,
     alert_on_timeouts: bool,
+    alert_on_errors: bool,
 ) -> AlertCategory | None:
-    """Resolve AlertCategory for critical records, explicit alerts, or timeouts."""
-    raw_cat = payload.get("alert_category") or getattr(record, "alert_category", None)
-    if isinstance(raw_cat, str):
-        try:
-            category = AlertCategory(raw_cat)
-        except ValueError:
-            category = None
-        if category is not None:
-            if (
-                category is AlertCategory.TIMEOUT
-                and not alert_on_timeouts
-                and record.levelno < logging.CRITICAL
-            ):
-                return None
-            return category
+    """Resolve AlertCategory for critical records, explicit alerts, timeouts, or plain errors."""
+    is_critical = record.levelno >= logging.CRITICAL
+    explicit = _parse_explicit_category(record, payload)
+    if explicit is not None:
+        if explicit is AlertCategory.TIMEOUT and not alert_on_timeouts and not is_critical:
+            return None
+        return explicit
 
-    lower_msg = message.lower()
-    is_timeout = "timeout" in lower_msg or "timed out" in lower_msg
-    if exception_type is not None and "timeout" in exception_type.lower():
-        is_timeout = True
-    if is_timeout and alert_on_timeouts:
-        return AlertCategory.TIMEOUT
-    if record.levelno >= logging.CRITICAL:
+    if _is_timeout_signal(message, exception_type):
+        if alert_on_timeouts:
+            return AlertCategory.TIMEOUT
+        if not is_critical:
+            return None
+    if is_critical:
         return AlertCategory.FATAL_EXCEPTION
-    return None
+    return (
+        AlertCategory.APPLICATION_ERROR
+        if alert_on_errors and record.levelno >= logging.ERROR
+        else None
+    )
 
 
 def _opt_str(value: object) -> str | None:
@@ -227,17 +272,29 @@ def _opt_str(value: object) -> str | None:
 
 
 class AlertingLogHandler(logging.Handler):
-    """Logging handler emitting AlertEvents for critical and timeout/alert errors."""
+    """Logging handler emitting AlertEvents for critical, timeout, and error records."""
 
     def __init__(
         self,
         alert_manager: AlertManagerPort,
         *,
         alert_on_timeouts: bool = True,
+        alert_on_errors: bool = False,
     ) -> None:
         super().__init__(level=logging.ERROR)
         self._alert_manager = alert_manager
         self._alert_on_timeouts = alert_on_timeouts
+        self._alert_on_errors = alert_on_errors
+
+    def reconfigure(
+        self,
+        *,
+        alert_on_timeouts: bool,
+        alert_on_errors: bool,
+    ) -> None:
+        """Update timeout and plain-error alerting toggles live."""
+        self._alert_on_timeouts = alert_on_timeouts
+        self._alert_on_errors = alert_on_errors
 
     def emit(self, record: logging.LogRecord) -> None:
         """Inspect ERROR/CRITICAL log records and emit matching AlertEvents."""
@@ -253,6 +310,7 @@ class AlertingLogHandler(logging.Handler):
             message,
             exception_type,
             alert_on_timeouts=self._alert_on_timeouts,
+            alert_on_errors=self._alert_on_errors,
         )
         if category is None:
             return

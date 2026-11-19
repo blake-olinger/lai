@@ -190,19 +190,12 @@ async def test_timeout_emits_alert_and_records_audit(tmp_path: Path) -> None:
         "RuntimeError: disk error",
     )
     alerts = manager.recent_alerts()
-    assert len(alerts) == 1
-    assert len(sink.events) == 1
-    assert (
-        alerts[0].category,
-        alerts[0].severity,
-        alerts[0].component,
-        alerts[0].exception_type,
-    ) == (
-        AlertCategory.TIMEOUT,
-        AlertSeverity.ERROR,
-        "tools",
-        "TimeoutError",
-    )
+    assert len(alerts) == EXPECTED_TWO
+    assert len(sink.events) == EXPECTED_TWO
+    assert [(a.category, a.severity, a.component, a.exception_type) for a in alerts] == [
+        (AlertCategory.APPLICATION_ERROR, AlertSeverity.ERROR, "tools", "RuntimeError"),
+        (AlertCategory.TIMEOUT, AlertSeverity.ERROR, "tools", "TimeoutError"),
+    ]
     assert len(repo.audits) == EXPECTED_TWO
     assert repo.audits[0].error == "timeout"
     assert repo.audits[1].success is False

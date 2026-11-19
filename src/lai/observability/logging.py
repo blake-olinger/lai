@@ -10,14 +10,18 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from lai.observability.alerts import AlertingLogHandler, AlertManager, WebhookAlertSink
+from lai.observability.alerts import AlertingLogHandler, AlertManager
 from lai.observability.rotation import create_daily_rotating_handler
+from lai.observability.smtp import build_alert_sinks
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Sequence
 
     from lai.domain.observability import LoggingConfig
-    from lai.ports.observability import AlertSinkPort
+
+_VALID_LOG_LEVELS: frozenset[str] = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+_ERROR_LOG_HANDLER_NAME = "lai_error_logs"
+_ALERT_LOG_HANDLER_NAME = "lai_alert_handler"
 
 
 class _UnsetType:
@@ -137,13 +141,11 @@ def _close_existing_handlers(root_logger: logging.Logger) -> None:
 def configure_observability(
     config: LoggingConfig,
     alert_manager: AlertManager | None = None,
+    *,
+    fallback_admin_emails: Sequence[str] = (),
 ) -> AlertManager:
     """Configure structlog, console/file 24h rotating handlers, and alerting."""
-    sinks: tuple[AlertSinkPort, ...] = (
-        (WebhookAlertSink(config.alert_webhook_url),)
-        if config.alert_webhook_url is not None
-        else ()
-    )
+    sinks = build_alert_sinks(config, fallback_admin_emails=fallback_admin_emails)
     manager = alert_manager or AlertManager(
         sinks=sinks,
         cooldown_seconds=config.alert_cooldown_seconds,
@@ -199,12 +201,18 @@ def configure_observability(
             when=config.rotation_when,
             interval=config.rotation_interval,
         )
+        error_logs_handler.name = _ERROR_LOG_HANDLER_NAME
         error_logs_handler.setFormatter(
             _build_processor_formatter(shared_processors, json_renderer)
         )
         root_logger.addHandler(error_logs_handler)
 
-    alert_handler = AlertingLogHandler(manager, alert_on_timeouts=config.alert_on_timeouts)
+    alert_handler = AlertingLogHandler(
+        manager,
+        alert_on_timeouts=config.alert_on_timeouts,
+        alert_on_errors=config.alert_on_errors,
+    )
+    alert_handler.name = _ALERT_LOG_HANDLER_NAME
     root_logger.addHandler(alert_handler)
 
     structlog.configure(
@@ -218,6 +226,46 @@ def configure_observability(
         cache_logger_on_first_use=False,
     )
     return manager
+
+
+def reconfigure_observability_alerting(
+    alert_manager: AlertManager,
+    config: LoggingConfig,
+    *,
+    fallback_admin_emails: Sequence[str] = (),
+) -> None:
+    """Hot-swap alert sinks, cooldown, and handler toggles without restarting log files."""
+    sinks = build_alert_sinks(config, fallback_admin_emails=fallback_admin_emails)
+    alert_manager.reconfigure(
+        sinks=sinks,
+        cooldown_seconds=config.alert_cooldown_seconds,
+    )
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, AlertingLogHandler):
+            handler.reconfigure(
+                alert_on_timeouts=config.alert_on_timeouts,
+                alert_on_errors=config.alert_on_errors,
+            )
+
+
+def set_runtime_log_level(level: str) -> str:
+    """Update root and non-error handler log levels in place without rotating file handles."""
+    normalized = level.strip().upper()
+    if normalized not in _VALID_LOG_LEVELS:
+        allowed = ", ".join(sorted(_VALID_LOG_LEVELS))
+        msg = f"Invalid log level {level!r}; expected one of: {allowed}."
+        raise ValueError(msg)
+    numeric_level = getattr(logging, normalized)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(numeric_level)
+    for handler in root_logger.handlers:
+        if handler.name in {_ERROR_LOG_HANDLER_NAME, _ALERT_LOG_HANDLER_NAME}:
+            continue
+        if isinstance(handler, AlertingLogHandler):
+            continue
+        handler.setLevel(numeric_level)
+    return normalized
 
 
 def get_component_logger(component: str) -> structlog.stdlib.BoundLogger:
