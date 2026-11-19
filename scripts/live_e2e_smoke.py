@@ -16,6 +16,7 @@ BASE_URL = os.environ.get("LAI_E2E_URL", "http://127.0.0.1:8400").rstrip("/")
 OLLAMA_URL = os.environ.get("LAI_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 ADMIN_KEY = os.environ["LAI_E2E_ADMIN_KEY"]
 CLIENT_KEY = os.environ["LAI_E2E_CLIENT_KEY"]
+EXPECTED_GPU_SUBSTRING = os.environ.get("LAI_E2E_GPU_SUBSTRING", "").strip()
 LOG_DIR = Path(os.environ.get("LAI_E2E_LOG_DIR", "data/logs"))
 _HTTP_OK, _HTTP_CREATED, _HTTP_NOT_FOUND = 200, 201, 404
 _MIN_OVERSIZED_TOKENS, _MIN_MAP_WINDOWS, _CONCURRENT_JOBS = 12_000, 2, 4
@@ -160,7 +161,9 @@ async def _step1_and_2_health_direct(c: httpx.AsyncClient) -> tuple[str, str]:
     gpu = st["gpu"]
     if gpu is None:
         raise SmokeCheckError(repr(st))
-    _require("RTX 5080" in gpu["gpu_name"], repr(gpu))
+    _require(bool(str(gpu.get("gpu_name", "")).strip()), repr(gpu))
+    if EXPECTED_GPU_SUBSTRING:
+        _require(EXPECTED_GPU_SUBSTRING in gpu["gpu_name"], repr(gpu))
     _out(f"[1] Health OK: {gpu['gpu_name']} ({gpu['memory_used_mb']}/{gpu['memory_total_mb']} MB)")
 
     proj_r = await _post(c, "/v1/projects", ADMIN_KEY, {"name": "e2e"}, _HTTP_CREATED)

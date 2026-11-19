@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING
 import yaml
 from typer.testing import CliRunner
 
+from lai import __version__
 from lai.cli._common import open_api_key_repo, resolve_llama_executable, resolve_log_dir
 from lai.cli.app import app as cli_app
+from lai.cli.tunnel_cmd import render_cloudflared_config
 from lai.config.settings import LaiSettings
 from lai.domain.auth import ApiScope
 from lai.domain.base import utc_now
@@ -242,3 +244,32 @@ def test_resolve_llama_executable_all_branches(
 
     monkeypatch.setattr(shutil, "which", _which_none)
     assert resolve_llama_executable(bin_missing) == bin_missing / "llama" / binary_name
+
+
+def test_cli_version_flag_and_tunnel_platform_credentials_default() -> None:
+    """Verify --version/-V prints package version and tunnel creds expand home on Windows."""
+    runner = CliRunner()
+    for flag in ("--version", "-V"):
+        res = runner.invoke(cli_app, [flag])
+        assert res.exit_code == 0, res.output
+        assert res.output.strip() == f"lai {__version__}"
+
+    win_cfg = yaml.safe_load(
+        render_cloudflared_config(
+            tunnel="t-win",
+            hostname="ai.example.com",
+            origin_url="http://127.0.0.1:8400",
+            platform_name="win32",
+        )
+    )
+    assert win_cfg["credentials-file"] == str(Path.home() / ".cloudflared" / "t-win.json")
+
+    linux_cfg = yaml.safe_load(
+        render_cloudflared_config(
+            tunnel="t-lin",
+            hostname="ai.example.com",
+            origin_url="http://127.0.0.1:8400",
+            platform_name="linux",
+        )
+    )
+    assert linux_cfg["credentials-file"] == "~/.cloudflared/t-lin.json"

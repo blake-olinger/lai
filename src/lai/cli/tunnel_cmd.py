@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -17,16 +18,27 @@ tunnel_app = typer.Typer(
 )
 
 
+def _default_credentials_file(tunnel: str, *, platform_name: str | None = None) -> str:
+    """Resolve default cloudflared credentials path, expanding home on Windows."""
+    target = (platform_name or sys.platform).lower()
+    if target == "win32":
+        return str(Path.home() / ".cloudflared" / f"{tunnel}.json")
+    return f"~/.cloudflared/{tunnel}.json"
+
+
 def render_cloudflared_config(
     *,
     tunnel: str,
     hostname: str,
     origin_url: str,
     credentials_file: Path | None = None,
+    platform_name: str | None = None,
 ) -> str:
     """Render a cloudflared YAML configuration routing hostname to the local LAI server."""
     creds_str = (
-        str(credentials_file) if credentials_file is not None else f"~/.cloudflared/{tunnel}.json"
+        str(credentials_file)
+        if credentials_file is not None
+        else _default_credentials_file(tunnel, platform_name=platform_name)
     )
     payload: dict[str, object] = {
         "tunnel": tunnel,

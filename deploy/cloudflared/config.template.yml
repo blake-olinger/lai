@@ -6,6 +6,8 @@
 #   cloudflared tunnel --config deploy/cloudflared/config.yml run
 
 tunnel: "<REPLACE_WITH_TUNNEL_UUID>"
+# On Windows, use an absolute path (e.g. C:\Users\<USER>\.cloudflared\<TUNNEL_UUID>.json);
+# `lai tunnel render-config` resolves your home directory automatically on Windows.
 credentials-file: "~/.cloudflared/<REPLACE_WITH_TUNNEL_UUID>.json"
 
 ingress:

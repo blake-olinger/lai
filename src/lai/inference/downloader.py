@@ -1,8 +1,9 @@
-"""Downloader for llama.cpp Windows CUDA binaries and HuggingFace GGUF models."""
+"""Downloader for llama.cpp CUDA binaries (Windows & Linux) and HuggingFace GGUF models."""
 
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
@@ -19,7 +20,8 @@ from lai.domain.errors import InferenceBackendError
 from lai.domain.observability import AlertCategory
 from lai.inference._archive import (
     parse_release_assets,
-    safe_extract_zip,
+    resolve_platform_spec,
+    safe_extract_archive,
     select_llama_cuda_assets,
 )
 from lai.observability.logging import get_component_logger
@@ -36,6 +38,7 @@ _DEFAULT_GITHUB_REPO = "ggml-org/llama.cpp"
 _GITHUB_API_BASE = "https://api.github.com/repos"
 _HTTP_ERROR_THRESHOLD = 400
 _DOWNLOAD_CHUNK_BYTES = 65536
+_POSIX_EXEC_BITS = 0o111
 
 
 def _logger() -> structlog.stdlib.BoundLogger:
@@ -77,7 +80,7 @@ def _default_hf_download(
 
 
 class ModelDownloader:
-    """Fetches official llama.cpp CUDA binaries and GGUF model files."""
+    """Fetches official llama.cpp CUDA binaries (Windows/Linux) and GGUF model files."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -88,6 +91,7 @@ class ModelDownloader:
         timeout_seconds: float = 120.0,
         http_client: httpx.AsyncClient | None = None,
         hf_downloader: HfDownloader | None = None,
+        platform_name: str | None = None,
     ) -> None:
         self._bin_dir = bin_dir
         self._models_dir = models_dir
@@ -95,6 +99,7 @@ class ModelDownloader:
         self._timeout_seconds = timeout_seconds
         self._http_client = http_client
         self._hf_downloader: HfDownloader = hf_downloader or _default_hf_download
+        self._platform_name = platform_name or sys.platform
 
     @asynccontextmanager
     async def _client_ctx(self) -> AsyncGenerator[httpx.AsyncClient]:
@@ -154,16 +159,20 @@ class ModelDownloader:
         tag: str | None,
         cuda_version: str | None,
     ) -> tuple[tuple[str, str], tuple[str, str] | None]:
-        """Resolve Windows CUDA assets from latest/tag release, falling back to recent releases."""
+        """Resolve CUDA assets from latest/tag release, falling back to recent releases."""
         latest_assets = await self._fetch_release_assets(client, tag)
+        plat = self._platform_name
         try:
-            return select_llama_cuda_assets(latest_assets, cuda_version=cuda_version)
+            return select_llama_cuda_assets(
+                latest_assets, cuda_version=cuda_version, platform_name=plat
+            )
         except InferenceBackendError:
             if tag is not None:
                 raise
 
-        list_url = f"{_GITHUB_API_BASE}/{self._github_repo}/releases?per_page=10"
-        raw_releases = await self._get_github_json(client, list_url)
+        raw_releases = await self._get_github_json(
+            client, f"{_GITHUB_API_BASE}/{self._github_repo}/releases?per_page=10"
+        )
         if isinstance(raw_releases, list):
             for release in cast("list[object]", raw_releases):
                 candidate_assets = parse_release_assets(release)
@@ -171,12 +180,13 @@ class ModelDownloader:
                     continue
                 try:
                     return select_llama_cuda_assets(
-                        candidate_assets,
-                        cuda_version=cuda_version,
+                        candidate_assets, cuda_version=cuda_version, platform_name=plat
                     )
                 except InferenceBackendError:
                     continue
-        return select_llama_cuda_assets(latest_assets, cuda_version=cuda_version)
+        return select_llama_cuda_assets(
+            latest_assets, cuda_version=cuda_version, platform_name=plat
+        )
 
     @staticmethod
     def _unlink_quietly(path: Path) -> None:
@@ -186,20 +196,20 @@ class ModelDownloader:
         self,
         client: httpx.AsyncClient,
         url: str,
-        zip_path: Path,
+        archive_path: Path,
         dest_dir: Path,
     ) -> None:
-        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             async with client.stream("GET", url, timeout=self._timeout_seconds) as response:
                 if response.status_code >= _HTTP_ERROR_THRESHOLD:
                     msg = f"Binary asset download failed with HTTP {response.status_code}: {url}"
                     raise InferenceBackendError(msg)
-                with zip_path.open("wb") as handle:
+                with archive_path.open("wb") as handle:
                     async for chunk in response.aiter_bytes(chunk_size=_DOWNLOAD_CHUNK_BYTES):
                         handle.write(chunk)
         except httpx.TimeoutException as exc:
-            await asyncio.to_thread(self._unlink_quietly, zip_path)
+            await asyncio.to_thread(self._unlink_quietly, archive_path)
             _logger().exception(
                 "binary_download_timeout",
                 url=url,
@@ -209,14 +219,14 @@ class ModelDownloader:
             msg = f"Binary asset download timed out: {exc}"
             raise InferenceBackendError(msg) from exc
         except httpx.HTTPError as exc:
-            await asyncio.to_thread(self._unlink_quietly, zip_path)
+            await asyncio.to_thread(self._unlink_quietly, archive_path)
             msg = f"Binary asset download failed: {exc}"
             raise InferenceBackendError(msg) from exc
 
         try:
-            await asyncio.to_thread(safe_extract_zip, zip_path, dest_dir)
+            await asyncio.to_thread(safe_extract_archive, archive_path, dest_dir)
         finally:
-            await asyncio.to_thread(self._unlink_quietly, zip_path)
+            await asyncio.to_thread(self._unlink_quietly, archive_path)
 
     async def download_llama_binaries(
         self,
@@ -225,9 +235,10 @@ class ModelDownloader:
         cuda_version: str | None = None,
         force: bool = False,
     ) -> Path:
-        """Fetch official llama.cpp Windows CUDA x64 release binaries into bin/llama/."""
+        """Fetch official llama.cpp CUDA x64 release binaries for Windows or Linux."""
+        _label, _main_re, _cudart_re, binary_name = resolve_platform_spec(self._platform_name)
         llama_dir = self._bin_dir / "llama"
-        existing = llama_dir / "llama-server.exe"
+        existing = llama_dir / binary_name
         if not force and existing.exists():
             return existing
 
@@ -243,12 +254,12 @@ class ModelDownloader:
                 llama_dir / f".{main_name}.tmp",
                 llama_dir,
             )
-            exe_path = (
-                existing if existing.exists() else next(llama_dir.rglob("llama-server.exe"), None)
-            )
+            exe_path = existing if existing.exists() else next(llama_dir.rglob(binary_name), None)
             if exe_path is None:
-                msg = "Downloaded llama.cpp archive did not contain llama-server.exe."
+                msg = f"Downloaded llama.cpp archive did not contain {binary_name}."
                 raise InferenceBackendError(msg)
+            if sys.platform != "win32":
+                exe_path.chmod(exe_path.stat().st_mode | _POSIX_EXEC_BITS)
 
             if cudart is not None:
                 cudart_name, cudart_url = cudart
