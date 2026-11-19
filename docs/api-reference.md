@@ -584,6 +584,73 @@ Unauthenticated liveness probe.
 | --- | --- | --- |
 | `200` | Successful Response | `application/json`: [`HealthResponse`](#schema-healthresponse) |
 
+### `GET /v1/system/alerting`
+
+**Get Alerting Config**
+
+Return active redacted SMTP and webhook alerting configuration.
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`AlertingConfigResponse`](#schema-alertingconfigresponse) |
+
+### `PATCH /v1/system/alerting`
+
+**Patch Alerting Config**
+
+Hot-swap non-secret alerting settings and persist across restarts.
+
+**Request Body** (required)
+
+- `application/json`: [`UpdateAlertingConfigRequest`](#schema-updatealertingconfigrequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `alert_cooldown_seconds` | number \| null | no | - |
+| `alert_on_errors` | boolean \| null | no | - |
+| `alert_on_timeouts` | boolean \| null | no | - |
+| `alert_webhook_categories` | array[[`AlertCategory`](#schema-alertcategory)] \| null | no | - |
+| `alert_webhook_enabled` | boolean \| null | no | - |
+| `alert_webhook_min_severity` | [`AlertSeverity`](#schema-alertseverity) \| null | no | - |
+| `smtp_categories` | array[[`AlertCategory`](#schema-alertcategory)] \| null | no | - |
+| `smtp_enabled` | boolean \| null | no | - |
+| `smtp_from_address` | string \| null | no | - |
+| `smtp_host` | string \| null | no | - |
+| `smtp_min_severity` | [`AlertSeverity`](#schema-alertseverity) \| null | no | - |
+| `smtp_port` | integer \| null | no | - |
+| `smtp_subject_prefix` | string \| null | no | - |
+| `smtp_timeout_seconds` | number \| null | no | - |
+| `smtp_tls_mode` | [`SmtpTlsMode`](#schema-smtptlsmode) \| null | no | - |
+| `smtp_to_addresses` | array[string] \| null | no | - |
+| `smtp_use_admin_emails_fallback` | boolean \| null | no | - |
+| `smtp_username` | string \| null | no | - |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`AlertingConfigResponse`](#schema-alertingconfigresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `POST /v1/system/alerting/test`
+
+**Send Test Alert**
+
+Send a synthetic test alert through active sinks and await delivery status.
+
+**Request Body** (optional)
+
+- `application/json`: [`TestAlertRequest`](#schema-testalertrequest) \| null
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`TestAlertResponse`](#schema-testalertresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
 ### `GET /v1/system/alerts`
 
 **Get System Alerts**
@@ -601,6 +668,233 @@ Return recent fatal, timeout, crash, storage, and security alerts.
 | Status | Description | Schema |
 | --- | --- | --- |
 | `200` | Successful Response | `application/json`: [`AlertsListResponse`](#schema-alertslistresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `GET /v1/system/analytics`
+
+**Get Usage Analytics**
+
+Return endpoint, principal/client-app, token, and hourly rollup usage metrics.
+
+**Parameters**
+
+| Name | In | Required | Type | Details |
+| --- | --- | --- | --- | --- |
+| `window_hours` | query | no | integer | default=`24`; minimum=1; maximum=2160 |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`AnalyticsReport`](#schema-analyticsreport) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `GET /v1/system/analytics/config`
+
+**Get Analytics Config**
+
+Return live endpoint usage analytics toggle and retention settings.
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`AnalyticsConfigResponse`](#schema-analyticsconfigresponse) |
+
+### `PATCH /v1/system/analytics/config`
+
+**Patch Analytics Config**
+
+Hot-swap endpoint usage analytics enablement and retention days.
+
+**Request Body** (required)
+
+- `application/json`: [`UpdateAnalyticsConfigRequest`](#schema-updateanalyticsconfigrequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `enabled` | boolean \| null | no | - |
+| `retention_days` | integer \| null | no | - |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`AnalyticsConfigResponse`](#schema-analyticsconfigresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `GET /v1/system/config/cors`
+
+**Get Cors Runtime Config**
+
+Return live browser CORS origins and allowed headers.
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`CorsRuntimeConfigResponse`](#schema-corsruntimeconfigresponse) |
+
+### `PATCH /v1/system/config/cors`
+
+**Patch Cors Runtime Config**
+
+Hot-swap browser CORS origins and headers live without restarting.
+
+**Request Body** (required)
+
+- `application/json`: [`UpdateCorsConfigRequest`](#schema-updatecorsconfigrequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `cors_allowed_origins` | array[string] \| null | no | - |
+| `cors_extra_allow_headers` | array[string] \| null | no | - |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`CorsRuntimeConfigResponse`](#schema-corsruntimeconfigresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `GET /v1/system/config/guardrails`
+
+**Get Guardrails Runtime Config**
+
+Return live pre-flight guardrail enforcement policy.
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`GuardrailsPolicyConfigResponse`](#schema-guardrailspolicyconfigresponse) |
+
+### `PATCH /v1/system/config/guardrails`
+
+**Patch Guardrails Runtime Config**
+
+Hot-swap guardrail enforcement policy without restarting inference subprocesses.
+
+**Request Body** (required)
+
+- `application/json`: [`UpdateGuardrailsPolicyRequest`](#schema-updateguardrailspolicyrequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `block_mode` | [`GuardrailBlockMode`](#schema-guardrailblockmode) \| null | no | - |
+| `enabled` | boolean \| null | no | - |
+| `fail_open` | boolean \| null | no | - |
+| `refusal_text` | string \| null | no | - |
+| `timeout_seconds` | number \| null | no | - |
+| `violation_threshold` | number \| null | no | - |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`GuardrailsPolicyConfigResponse`](#schema-guardrailspolicyconfigresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `GET /v1/system/config/limits`
+
+**Get Limits Runtime Config**
+
+Return live rate limits, principal quotas, queue limits, keepalives, and log level.
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`LimitsRuntimeConfigResponse`](#schema-limitsruntimeconfigresponse) |
+
+### `PATCH /v1/system/config/limits`
+
+**Patch Limits Runtime Config**
+
+Hot-swap limits, quotas, and log level in place without dropping buckets or queues.
+
+**Request Body** (required)
+
+- `application/json`: [`UpdateLimitsConfigRequest`](#schema-updatelimitsconfigrequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `ip_rate_limit_rpm` | integer \| null | no | - |
+| `json_keepalive_threshold_seconds` | number \| null | no | - |
+| `keepalive_interval_seconds` | number \| null | no | - |
+| `log_level` | string \| null | no | - |
+| `max_projects_per_principal` | integer \| null | no | - |
+| `max_queued_jobs` | integer \| null | no | - |
+| `max_queued_jobs_per_principal` | integer \| null | no | - |
+| `max_storage_bytes_per_principal` | integer \| null | no | - |
+| `max_upload_bytes` | integer \| null | no | - |
+| `rate_limit_rpm` | integer \| null | no | - |
+| `trust_cloudflare_headers` | boolean \| null | no | - |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`LimitsRuntimeConfigResponse`](#schema-limitsruntimeconfigresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `GET /v1/system/config/oidc`
+
+**Get Oidc Runtime Config**
+
+Return live OIDC audiences, allowlists, admin emails, scopes, and leeway.
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`OidcRuntimeConfigResponse`](#schema-oidcruntimeconfigresponse) |
+
+### `PATCH /v1/system/config/oidc`
+
+**Patch Oidc Runtime Config**
+
+Hot-swap OIDC authorization policy in place while preserving cached JWKS.
+
+**Request Body** (required)
+
+- `application/json`: [`UpdateOidcConfigRequest`](#schema-updateoidcconfigrequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `oidc_admin_emails` | array[string] \| null | no | - |
+| `oidc_allowed_domains` | array[string] \| null | no | - |
+| `oidc_allowed_emails` | array[string] \| null | no | - |
+| `oidc_audiences` | array[string] \| null | no | - |
+| `oidc_default_scopes` | array[string] \| null | no | - |
+| `oidc_leeway_seconds` | number \| null | no | - |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`OidcRuntimeConfigResponse`](#schema-oidcruntimeconfigresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `POST /v1/system/config/reload`
+
+**Reload Scoped Config**
+
+Reload only the explicitly requested section(s) from YAML and environment variables.
+
+**Request Body** (required)
+
+- `application/json`: [`ScopedConfigReloadRequest`](#schema-scopedconfigreloadrequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `sections` | array[string] | yes | minItems=1 |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`ScopedConfigReloadResponse`](#schema-scopedconfigreloadresponse) |
 | `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
 
 ### `GET /v1/system/status`
@@ -716,7 +1010,7 @@ List registered tool plugins and their permission tiers.
 
 Failure classification attached to automated alert events.
 
-**Enum values**: `timeout`, `fatal_exception`, `subprocess_crash`, `storage_failure`, `security_alert`
+**Enum values**: `timeout`, `fatal_exception`, `subprocess_crash`, `storage_failure`, `security_alert`, `application_error`
 
 <a id="schema-alertevent"></a>
 ### `AlertEvent`
@@ -746,6 +1040,48 @@ Severity level for automated operational alerts.
 
 **Enum values**: `error`, `critical`
 
+<a id="schema-alertsinkdeliveryresult"></a>
+### `AlertSinkDeliveryResult`
+
+Per-sink delivery outcome returned when sending synthetic test alerts.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `delivered` | boolean | yes | - |
+| `error` | string \| null | no | - |
+| `sink_name` | string | yes | minLength=1 |
+| `skipped` | boolean | no | default=`False` |
+
+<a id="schema-alertingconfigresponse"></a>
+### `AlertingConfigResponse`
+
+Redacted live operational alerting configuration (never returns secrets).
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `alert_cooldown_seconds` | number | yes | minimum=0.0 |
+| `alert_on_errors` | boolean | yes | - |
+| `alert_on_timeouts` | boolean | yes | - |
+| `alert_webhook_categories` | array[[`AlertCategory`](#schema-alertcategory)] | no | - |
+| `alert_webhook_configured` | boolean | yes | - |
+| `alert_webhook_enabled` | boolean | yes | - |
+| `alert_webhook_min_severity` | [`AlertSeverity`](#schema-alertseverity) | yes | - |
+| `alert_webhook_target` | string \| null | no | - |
+| `effective_smtp_recipients` | array[string] | no | - |
+| `smtp_categories` | array[[`AlertCategory`](#schema-alertcategory)] | no | - |
+| `smtp_enabled` | boolean | yes | - |
+| `smtp_from_address` | string \| null | no | - |
+| `smtp_host` | string \| null | no | - |
+| `smtp_min_severity` | [`AlertSeverity`](#schema-alertseverity) | yes | - |
+| `smtp_password_configured` | boolean | yes | - |
+| `smtp_port` | integer | yes | minimum=1.0; maximum=65535.0 |
+| `smtp_subject_prefix` | string | yes | - |
+| `smtp_timeout_seconds` | number | yes | maximum=60.0; exclusiveMinimum=0.0 |
+| `smtp_tls_mode` | [`SmtpTlsMode`](#schema-smtptlsmode) | yes | - |
+| `smtp_to_addresses` | array[string] | no | - |
+| `smtp_use_admin_emails_fallback` | boolean | yes | - |
+| `smtp_username` | string \| null | no | - |
+
 <a id="schema-alertslistresponse"></a>
 ### `AlertsListResponse`
 
@@ -755,6 +1091,37 @@ Recent operational alerts captured by the AlertManager.
 | --- | --- | --- | --- |
 | `count` | integer | yes | minimum=0.0 |
 | `items` | array[[`AlertEvent`](#schema-alertevent)] | yes | - |
+
+<a id="schema-analyticsconfigresponse"></a>
+### `AnalyticsConfigResponse`
+
+Live configuration for built-in endpoint usage analytics.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `enabled` | boolean | yes | - |
+| `retention_days` | integer | yes | minimum=1.0; maximum=3650.0 |
+
+<a id="schema-analyticsreport"></a>
+### `AnalyticsReport`
+
+Windowed usage analytics report returned by GET /v1/system/analytics.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `endpoints` | array[[`EndpointUsageSummary`](#schema-endpointusagesummary)] | no | - |
+| `error_count` | integer | yes | minimum=0.0 |
+| `error_rate` | number | yes | minimum=0.0; maximum=1.0 |
+| `generated_at` | string (date-time) | no | - |
+| `hourly` | array[[`HourlyUsageBucket`](#schema-hourlyusagebucket)] | no | - |
+| `principals` | array[[`PrincipalUsageSummary`](#schema-principalusagesummary)] | no | - |
+| `total_completion_tokens` | integer | yes | minimum=0.0 |
+| `total_prompt_tokens` | integer | yes | minimum=0.0 |
+| `total_requests` | integer | yes | minimum=0.0 |
+| `total_tokens` | integer | yes | minimum=0.0 |
+| `unique_client_apps` | integer | yes | minimum=0.0 |
+| `unique_principals` | integer | yes | minimum=0.0 |
+| `window_hours` | integer | yes | minimum=1.0 |
 
 <a id="schema-apiscope"></a>
 ### `ApiScope`
@@ -871,6 +1238,17 @@ Strategy used by the orchestrator to feed attached files into context.
 
 **Enum values**: `auto`, `direct`, `map_reduce`, `retrieval`
 
+<a id="schema-corsruntimeconfigresponse"></a>
+### `CorsRuntimeConfigResponse`
+
+Live browser CORS origin and allowed-header policy.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `cors_allowed_origins` | array[string] | no | - |
+| `cors_extra_allow_headers` | array[string] | no | - |
+| `effective_allow_headers` | array[string] | no | - |
+
 <a id="schema-createclientapprequest"></a>
 ### `CreateClientAppRequest`
 
@@ -894,6 +1272,22 @@ Confirmation envelope returned by DELETE endpoints.
 | --- | --- | --- | --- |
 | `deleted` | boolean | yes | - |
 | `id` | string | yes | minLength=1 |
+
+<a id="schema-endpointusagesummary"></a>
+### `EndpointUsageSummary`
+
+Aggregated request volume, status class breakdown, and latency per route template.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `avg_duration_ms` | number | yes | minimum=0.0 |
+| `max_duration_ms` | number | yes | minimum=0.0 |
+| `method` | string | yes | minLength=1 |
+| `request_count` | integer | yes | minimum=0.0 |
+| `route` | string | yes | minLength=1 |
+| `status_2xx` | integer | yes | minimum=0.0 |
+| `status_4xx` | integer | yes | minimum=0.0 |
+| `status_5xx` | integer | yes | minimum=0.0 |
 
 <a id="schema-exceptionfingerprint"></a>
 ### `ExceptionFingerprint`
@@ -1000,6 +1394,28 @@ GPU utilization and VRAM snapshot reported by nvidia-smi.
 | `temperature_c` | number \| null | no | - |
 | `utilization_percent` | integer | yes | minimum=0.0; maximum=100.0 |
 
+<a id="schema-guardrailblockmode"></a>
+### `GuardrailBlockMode`
+
+Response mode when a prompt is blocked by the guardrail policy.
+
+**Enum values**: `refusal_message`, `http_error`
+
+<a id="schema-guardrailspolicyconfigresponse"></a>
+### `GuardrailsPolicyConfigResponse`
+
+Live pre-flight guardrail enforcement policy.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `backend` | string | yes | enum: `llamacpp`, `ollama` |
+| `block_mode` | [`GuardrailBlockMode`](#schema-guardrailblockmode) | yes | - |
+| `enabled` | boolean | yes | - |
+| `fail_open` | boolean | yes | - |
+| `refusal_text` | string | yes | - |
+| `timeout_seconds` | number | yes | exclusiveMinimum=0.0 |
+| `violation_threshold` | number | yes | exclusiveMinimum=0.0 |
+
 <a id="schema-httpvalidationerror"></a>
 ### `HTTPValidationError`
 
@@ -1016,6 +1432,18 @@ Unauthenticated liveness probe payload.
 | --- | --- | --- | --- |
 | `status` | string | no | const=`'ok'`; default=`'ok'` |
 | `version` | string | no | default=`'0.1.0'` |
+
+<a id="schema-hourlyusagebucket"></a>
+### `HourlyUsageBucket`
+
+UTC hourly rollup point for time-series request, error, and token trends.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `bucket_hour` | string (date-time) | yes | - |
+| `error_count` | integer | yes | minimum=0.0 |
+| `request_count` | integer | yes | minimum=0.0 |
+| `total_tokens` | integer | yes | minimum=0.0 |
 
 <a id="schema-inferencetoolcall"></a>
 ### `InferenceToolCall`
@@ -1034,6 +1462,25 @@ Tool invocation emitted by the inference model.
 Priority order for inference spooler scheduling (lower runs first).
 
 **Enum values**: `10`, `20`, `30`
+
+<a id="schema-limitsruntimeconfigresponse"></a>
+### `LimitsRuntimeConfigResponse`
+
+Live rate limits, per-principal quotas, upload limits, keepalive, and log level.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `ip_rate_limit_rpm` | integer | yes | minimum=1.0 |
+| `json_keepalive_threshold_seconds` | number | yes | exclusiveMinimum=0.0 |
+| `keepalive_interval_seconds` | number | yes | exclusiveMinimum=0.0 |
+| `log_level` | string | yes | - |
+| `max_projects_per_principal` | integer | yes | minimum=1.0 |
+| `max_queued_jobs` | integer | yes | minimum=1.0 |
+| `max_queued_jobs_per_principal` | integer | yes | minimum=1.0 |
+| `max_storage_bytes_per_principal` | integer | yes | minimum=1.0 |
+| `max_upload_bytes` | integer | yes | minimum=1.0 |
+| `rate_limit_rpm` | integer | yes | minimum=1.0 |
+| `trust_cloudflare_headers` | boolean | yes | - |
 
 <a id="schema-logfilesummary"></a>
 ### `LogFileSummary`
@@ -1083,6 +1530,23 @@ Persisted message within a chat session.
 Conversation message role.
 
 **Enum values**: `system`, `user`, `assistant`, `tool`
+
+<a id="schema-oidcruntimeconfigresponse"></a>
+### `OidcRuntimeConfigResponse`
+
+Live OIDC authorization policy settings.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `enabled` | boolean | yes | - |
+| `issuer_url` | string | yes | - |
+| `jwks_url` | string | yes | - |
+| `oidc_admin_emails` | array[string] | no | - |
+| `oidc_allowed_domains` | array[string] | no | - |
+| `oidc_allowed_emails` | array[string] | no | - |
+| `oidc_audiences` | array[string] | no | - |
+| `oidc_default_scopes` | array[string] | no | - |
+| `oidc_leeway_seconds` | number | yes | minimum=0.0; maximum=300.0 |
 
 <a id="schema-openaichatchoice"></a>
 ### `OpenAIChatChoice`
@@ -1215,6 +1679,21 @@ Risk classification governing default tool execution policy.
 
 **Enum values**: `read`, `write`, `exec`, `network`
 
+<a id="schema-principalusagesummary"></a>
+### `PrincipalUsageSummary`
+
+Aggregated request, error, and token totals per opaque principal and OAuth client app.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `completion_tokens` | integer | yes | minimum=0.0 |
+| `error_count` | integer | yes | minimum=0.0 |
+| `oauth_client_id` | string \| null | no | - |
+| `principal_id` | string | yes | minLength=1 |
+| `prompt_tokens` | integer | yes | minimum=0.0 |
+| `request_count` | integer | yes | minimum=0.0 |
+| `total_tokens` | integer | yes | minimum=0.0 |
+
 <a id="schema-project"></a>
 ### `Project`
 
@@ -1260,6 +1739,26 @@ Payload for approving or denying a pending high-risk tool invocation.
 | --- | --- | --- | --- |
 | `approved` | boolean | yes | - |
 | `note` | string \| null | no | - |
+
+<a id="schema-scopedconfigreloadrequest"></a>
+### `ScopedConfigReloadRequest`
+
+Explicit list of configuration sections to reload from YAML and environment variables.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `sections` | array[string] | yes | minItems=1 |
+
+<a id="schema-scopedconfigreloadresponse"></a>
+### `ScopedConfigReloadResponse`
+
+Summary of sections reloaded from YAML/env versus left untouched.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `config_path` | string \| null | no | - |
+| `reloaded_sections` | array[string] | no | - |
+| `unchanged_sections` | array[string] | no | - |
 
 <a id="schema-session"></a>
 ### `Session`
@@ -1325,6 +1824,13 @@ User turn payload posted to a chat session.
 | `stream` | boolean | no | default=`False` |
 | `temperature` | number \| null | no | - |
 
+<a id="schema-smtptlsmode"></a>
+### `SmtpTlsMode`
+
+Transport security mode used when connecting to an outbound SMTP server.
+
+**Enum values**: `starttls`, `ssl`, `none`
+
 <a id="schema-spoolersnapshot"></a>
 ### `SpoolerSnapshot`
 
@@ -1370,6 +1876,31 @@ Comprehensive runtime health, GPU, guardrail, and spooler telemetry.
 | `recent_alert_count` | integer | yes | minimum=0.0 |
 | `spooler` | [`SpoolerSnapshot`](#schema-spoolersnapshot) | yes | - |
 | `status` | string | yes | enum: `ok`, `degraded` |
+
+<a id="schema-testalertrequest"></a>
+### `TestAlertRequest`
+
+Payload for dispatching a synthetic test alert through active alert sinks.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `bypass_filters` | boolean | no | default=`True` |
+| `category` | [`AlertCategory`](#schema-alertcategory) | no | default=`'application_error'` |
+| `message` | string | no | default=`'Synthetic pre-flight test alert from LAI.'`; minLength=1; maxLength=500 |
+| `severity` | [`AlertSeverity`](#schema-alertseverity) | no | default=`'critical'` |
+
+<a id="schema-testalertresponse"></a>
+### `TestAlertResponse`
+
+Per-sink delivery results from POST /v1/system/alerting/test.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `alert_id` | string | yes | minLength=1 |
+| `delivered_count` | integer | yes | minimum=0.0 |
+| `failed_count` | integer | yes | minimum=0.0 |
+| `results` | array[[`AlertSinkDeliveryResult`](#schema-alertsinkdeliveryresult)] | no | - |
+| `skipped_count` | integer | yes | minimum=0.0 |
 
 <a id="schema-tokenusage"></a>
 ### `TokenUsage`
@@ -1473,6 +2004,42 @@ Final result of a completed orchestrator turn.
 | `session_id` | string | yes | minLength=1 |
 | `usage` | [`TokenUsage`](#schema-tokenusage) | yes | - |
 
+<a id="schema-updatealertingconfigrequest"></a>
+### `UpdateAlertingConfigRequest`
+
+Partial update for live non-secret alerting settings (secrets stay YAML/env-only).
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `alert_cooldown_seconds` | number \| null | no | - |
+| `alert_on_errors` | boolean \| null | no | - |
+| `alert_on_timeouts` | boolean \| null | no | - |
+| `alert_webhook_categories` | array[[`AlertCategory`](#schema-alertcategory)] \| null | no | - |
+| `alert_webhook_enabled` | boolean \| null | no | - |
+| `alert_webhook_min_severity` | [`AlertSeverity`](#schema-alertseverity) \| null | no | - |
+| `smtp_categories` | array[[`AlertCategory`](#schema-alertcategory)] \| null | no | - |
+| `smtp_enabled` | boolean \| null | no | - |
+| `smtp_from_address` | string \| null | no | - |
+| `smtp_host` | string \| null | no | - |
+| `smtp_min_severity` | [`AlertSeverity`](#schema-alertseverity) \| null | no | - |
+| `smtp_port` | integer \| null | no | - |
+| `smtp_subject_prefix` | string \| null | no | - |
+| `smtp_timeout_seconds` | number \| null | no | - |
+| `smtp_tls_mode` | [`SmtpTlsMode`](#schema-smtptlsmode) \| null | no | - |
+| `smtp_to_addresses` | array[string] \| null | no | - |
+| `smtp_use_admin_emails_fallback` | boolean \| null | no | - |
+| `smtp_username` | string \| null | no | - |
+
+<a id="schema-updateanalyticsconfigrequest"></a>
+### `UpdateAnalyticsConfigRequest`
+
+Partial live update for endpoint usage analytics collection and retention.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `enabled` | boolean \| null | no | - |
+| `retention_days` | integer \| null | no | - |
+
 <a id="schema-updateclientapprequest"></a>
 ### `UpdateClientAppRequest`
 
@@ -1485,6 +2052,63 @@ Partial update payload for an active OIDC-bound client application.
 | `expires_at` | string (date-time) \| null | no | - |
 | `name` | string \| null | no | - |
 | `registered_tools` | array[[`ToolSpec`](#schema-toolspec)] \| null | no | - |
+
+<a id="schema-updatecorsconfigrequest"></a>
+### `UpdateCorsConfigRequest`
+
+Partial live update for CORS allowed origins and extra request headers.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `cors_allowed_origins` | array[string] \| null | no | - |
+| `cors_extra_allow_headers` | array[string] \| null | no | - |
+
+<a id="schema-updateguardrailspolicyrequest"></a>
+### `UpdateGuardrailsPolicyRequest`
+
+Partial live update for guardrail enforcement policy without restarting subprocesses.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `block_mode` | [`GuardrailBlockMode`](#schema-guardrailblockmode) \| null | no | - |
+| `enabled` | boolean \| null | no | - |
+| `fail_open` | boolean \| null | no | - |
+| `refusal_text` | string \| null | no | - |
+| `timeout_seconds` | number \| null | no | - |
+| `violation_threshold` | number \| null | no | - |
+
+<a id="schema-updatelimitsconfigrequest"></a>
+### `UpdateLimitsConfigRequest`
+
+Partial live update for rate limits, quotas, queue bounds, keepalive, and log level.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `ip_rate_limit_rpm` | integer \| null | no | - |
+| `json_keepalive_threshold_seconds` | number \| null | no | - |
+| `keepalive_interval_seconds` | number \| null | no | - |
+| `log_level` | string \| null | no | - |
+| `max_projects_per_principal` | integer \| null | no | - |
+| `max_queued_jobs` | integer \| null | no | - |
+| `max_queued_jobs_per_principal` | integer \| null | no | - |
+| `max_storage_bytes_per_principal` | integer \| null | no | - |
+| `max_upload_bytes` | integer \| null | no | - |
+| `rate_limit_rpm` | integer \| null | no | - |
+| `trust_cloudflare_headers` | boolean \| null | no | - |
+
+<a id="schema-updateoidcconfigrequest"></a>
+### `UpdateOidcConfigRequest`
+
+Partial live update for OIDC audiences, allowlists, scopes, and clock leeway.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `oidc_admin_emails` | array[string] \| null | no | - |
+| `oidc_allowed_domains` | array[string] \| null | no | - |
+| `oidc_allowed_emails` | array[string] \| null | no | - |
+| `oidc_audiences` | array[string] \| null | no | - |
+| `oidc_default_scopes` | array[string] \| null | no | - |
+| `oidc_leeway_seconds` | number \| null | no | - |
 
 <a id="schema-validationerror"></a>
 ### `ValidationError`

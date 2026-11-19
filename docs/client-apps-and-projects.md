@@ -11,11 +11,14 @@ onboarding through updates, credential rotation, and decommissioning.
 When external apps connect to LAI using Google OIDC, access is controlled at **two separate
 layers**:
 
-1. **Authentication Layer (`config/config.yaml`)**
+1. **Authentication Layer (`config/config.yaml` or live Admin API)**
    - `oidc_audiences` defines which Google OAuth 2.0 Client IDs are accepted for login.
    - `oidc_allowed_emails` / `oidc_allowed_domains` define which verified users may authenticate.
    - `cors_allowed_origins` defines which browser origins may call LAI directly from a SPA.
-   - Changes to `config/config.yaml` require restarting LAI.
+   - These settings can be hot-swapped live without restarting LAI via
+     `PATCH /v1/system/config/oidc` and `PATCH /v1/system/config/cors` (persisted across restarts),
+     or reloaded cleanly from `config/config.yaml` via `POST /v1/system/config/reload` with
+     `{"sections": ["oidc", "cors"]}`.
 
 2. **Client App Registration Layer (`lai apps` CLI / `/v1/client-apps` Admin API)**
    - Registers a Google OAuth 2.0 Client ID (`oauth_client_id`) as a named application with
@@ -64,7 +67,9 @@ cors_allowed_origins:
   - "https://newapp.example.com"
 ```
 
-Restart LAI so the updated OIDC audiences and CORS allowlist take effect.
+Apply the change live without restarting via `PATCH /v1/system/config/oidc` and
+`PATCH /v1/system/config/cors` (or edit `config/config.yaml` and run
+`POST /v1/system/config/reload` with `{"sections": ["oidc", "cors"]}`).
 
 #### Step 3: Register the Client App in LAI
 
@@ -204,8 +209,9 @@ curl.exe -X PATCH http://127.0.0.1:8400/v1/client-apps/app_<ID> `
 When migrating an app to a new Google OAuth Client ID without downtime:
 
 1. Create the new OAuth 2.0 Client ID in Google Cloud Console.
-2. Add the new Client ID **alongside** the old Client ID in `oidc_audiences` in
-   `config/config.yaml`, then restart LAI.
+2. Add the new Client ID **alongside** the old Client ID in `oidc_audiences` via
+   `PATCH /v1/system/config/oidc` (or edit `config/config.yaml` and run
+   `POST /v1/system/config/reload` with `{"sections": ["oidc"]}`).
 3. Register the new Client ID in LAI (`lai apps create` or `POST /v1/client-apps`) with matching
    tiers, project scope, and tools.
 4. Deploy the updated Client ID to your SPA or desktop app.
@@ -222,11 +228,13 @@ To completely retire a client application so it can neither execute client tools
    uv run python -m lai.cli apps revoke app_<ID> --config config/config.yaml
    ```
    *(Or `DELETE /v1/client-apps/app_<ID>`.)*
-2. **Remove the OAuth Client ID from `oidc_audiences`** in `config/config.yaml` (so tokens minted
-   for that client can no longer log in to LAI at all).
-3. **Remove the app's origin from `cors_allowed_origins`** in `config/config.yaml` (for browser
-   SPAs).
-4. **Restart LAI** to apply the updated configuration.
+2. **Remove the OAuth Client ID from `oidc_audiences`** via `PATCH /v1/system/config/oidc` (or
+   edit `config/config.yaml` and reload `["oidc"]`) so tokens minted for that client can no longer
+   log in to LAI at all.
+3. **Remove the app's origin from `cors_allowed_origins`** via `PATCH /v1/system/config/cors` (for
+   browser SPAs), or edit `config/config.yaml` and reload `["cors"]`.
+4. **Verify live configuration** with `GET /v1/system/config/oidc` and `GET /v1/system/config/cors`
+   (no server restart required).
 5. **Delete or disable the OAuth 2.0 Client ID in Google Cloud Console** so no new ID tokens can be
    issued.
 6. **Optional cleanup:** Revoke any service/automation API keys created for the app
@@ -358,11 +366,12 @@ revoke the old key.
 
 ### Offboarding an OIDC User
 
-1. Remove the user's email from `oidc_allowed_emails` and `oidc_admin_emails` in
-   `config/config.yaml` (or suspend/delete the account in Google Workspace if using
-   `oidc_allowed_domains`).
-2. **Restart LAI** if you edited `config/config.yaml` — access is revoked immediately on restart.
-   *(Note: if relying solely on Google Workspace suspension without changing `config/config.yaml`,
+1. Remove the user's email from `oidc_allowed_emails` and `oidc_admin_emails` live via
+   `PATCH /v1/system/config/oidc` (or update `config/config.yaml` and call
+   `POST /v1/system/config/reload` with `{"sections": ["oidc"]}` — or suspend/delete the account in
+   Google Workspace if using `oidc_allowed_domains`).
+2. Access is revoked immediately on the next request without restarting LAI.
+   *(Note: if relying solely on Google Workspace suspension without updating the allowlist,
    already-issued Google ID tokens remain cryptographically valid until their 1-hour `exp` claim
    expires.)*
 3. As an admin, audit and delete or transfer any projects owned by the departed user via

@@ -27,8 +27,10 @@ OpenAI-compatible remote access over Cloudflare Named Tunnels.
 - **Multi-Tenant Security & Quotas**: Authenticate via API keys or Google OIDC (supporting multiple
   web and desktop clients with zero static client secrets), backed by per-user project, storage,
   and queue quotas, fair scheduling, and rate limiting.
-- **Remote Access & Observability**: Expose your local server safely over HTTPS with a Cloudflare
-  Named Tunnel, strict CORS allowlisting, 24-hour rotating structured logs, and webhook alerts.
+- **Remote Access, Alerting & Usage Analytics**: Expose your local server safely over HTTPS with a
+  Cloudflare Named Tunnel, strict live-editable CORS allowlisting, 24-hour rotating structured logs,
+  configurable outbound SMTP email & webhook alerts, built-in hourly endpoint/token usage analytics,
+  and isolated zero-restart configuration hot-swapping.
 
 ## Prerequisites & Installation
 
@@ -214,17 +216,22 @@ cf_access_enabled: false
 See the [Deployment & Operations Guide](docs/deployment.md) for the full Google Cloud OIDC and
 Cloudflare setup walkthrough.
 
-## Logging & Operational Alerts
+## Logging, Operational Alerts & Analytics
 
 Structured JSONL logs rotate daily at UTC midnight under `data/logs/`:
 
-- `lai.jsonl` — Application events (14-day compressed retention by default).
+- `lai.jsonl` — Application events and HTTP request telemetry (14-day compressed retention by default).
 - `errors.jsonl` — Errors and tracebacks (30-day retention).
 - `prompts_audit.jsonl` — Scrubbed prompt audit records and guardrail verdicts (30-day retention).
-- `alerts.jsonl` — Fatal error, timeout, crash, storage, and security alerts.
+- `alerts.jsonl` — Fatal error, application error, timeout, crash, storage, and security alerts.
 
-Configure `logging.alert_webhook_url` for real-time webhook notifications (with cooldown
-deduplication) or inspect recent alerts via `GET /v1/system/alerts` (`admin` scope).
+Configure outbound **SMTP email alerting** (`logging.alert_smtp` with `LAI_LOGGING__ALERT_SMTP__PASSWORD`)
+and/or optional webhooks (`logging.alert_webhook_url`) with per-sink severity/category filters and
+cooldown deduplication. Verify delivery with `POST /v1/system/alerting/test`, inspect recent alerts
+via `GET /v1/system/alerts`, query privacy-preserving hourly endpoint and token usage via
+`GET /v1/system/analytics`, or hot-swap alerting, analytics, OIDC, CORS, quota, and guardrail
+policies live via `/v1/system/config/*` (`admin` scope). See the
+[Deployment & Operations Guide](docs/deployment.md) for full details.
 
 ## Documentation
 

@@ -8,7 +8,8 @@
           "fatal_exception",
           "subprocess_crash",
           "storage_failure",
-          "security_alert"
+          "security_alert",
+          "application_error"
         ],
         "title": "AlertCategory",
         "type": "string"
@@ -133,6 +134,197 @@
         "title": "AlertSeverity",
         "type": "string"
       },
+      "AlertSinkDeliveryResult": {
+        "additionalProperties": false,
+        "description": "Per-sink delivery outcome returned when sending synthetic test alerts.",
+        "properties": {
+          "delivered": {
+            "title": "Delivered",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "sink_name": {
+            "minLength": 1,
+            "title": "Sink Name",
+            "type": "string"
+          },
+          "skipped": {
+            "default": false,
+            "title": "Skipped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sink_name",
+          "delivered"
+        ],
+        "title": "AlertSinkDeliveryResult",
+        "type": "object"
+      },
+      "AlertingConfigResponse": {
+        "additionalProperties": false,
+        "description": "Redacted live operational alerting configuration (never returns secrets).",
+        "properties": {
+          "alert_cooldown_seconds": {
+            "minimum": 0.0,
+            "title": "Alert Cooldown Seconds",
+            "type": "number"
+          },
+          "alert_on_errors": {
+            "title": "Alert On Errors",
+            "type": "boolean"
+          },
+          "alert_on_timeouts": {
+            "title": "Alert On Timeouts",
+            "type": "boolean"
+          },
+          "alert_webhook_categories": {
+            "items": {
+              "$ref": "#/components/schemas/AlertCategory"
+            },
+            "title": "Alert Webhook Categories",
+            "type": "array"
+          },
+          "alert_webhook_configured": {
+            "title": "Alert Webhook Configured",
+            "type": "boolean"
+          },
+          "alert_webhook_enabled": {
+            "title": "Alert Webhook Enabled",
+            "type": "boolean"
+          },
+          "alert_webhook_min_severity": {
+            "$ref": "#/components/schemas/AlertSeverity"
+          },
+          "alert_webhook_target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Webhook Target"
+          },
+          "effective_smtp_recipients": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Effective Smtp Recipients",
+            "type": "array"
+          },
+          "smtp_categories": {
+            "items": {
+              "$ref": "#/components/schemas/AlertCategory"
+            },
+            "title": "Smtp Categories",
+            "type": "array"
+          },
+          "smtp_enabled": {
+            "title": "Smtp Enabled",
+            "type": "boolean"
+          },
+          "smtp_from_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp From Address"
+          },
+          "smtp_host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Host"
+          },
+          "smtp_min_severity": {
+            "$ref": "#/components/schemas/AlertSeverity"
+          },
+          "smtp_password_configured": {
+            "title": "Smtp Password Configured",
+            "type": "boolean"
+          },
+          "smtp_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Smtp Port",
+            "type": "integer"
+          },
+          "smtp_subject_prefix": {
+            "title": "Smtp Subject Prefix",
+            "type": "string"
+          },
+          "smtp_timeout_seconds": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 60.0,
+            "title": "Smtp Timeout Seconds",
+            "type": "number"
+          },
+          "smtp_tls_mode": {
+            "$ref": "#/components/schemas/SmtpTlsMode"
+          },
+          "smtp_to_addresses": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Smtp To Addresses",
+            "type": "array"
+          },
+          "smtp_use_admin_emails_fallback": {
+            "title": "Smtp Use Admin Emails Fallback",
+            "type": "boolean"
+          },
+          "smtp_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Username"
+          }
+        },
+        "required": [
+          "alert_cooldown_seconds",
+          "alert_on_timeouts",
+          "alert_on_errors",
+          "alert_webhook_enabled",
+          "alert_webhook_configured",
+          "alert_webhook_min_severity",
+          "smtp_enabled",
+          "smtp_port",
+          "smtp_tls_mode",
+          "smtp_password_configured",
+          "smtp_use_admin_emails_fallback",
+          "smtp_subject_prefix",
+          "smtp_timeout_seconds",
+          "smtp_min_severity"
+        ],
+        "title": "AlertingConfigResponse",
+        "type": "object"
+      },
       "AlertsListResponse": {
         "additionalProperties": false,
         "description": "Recent operational alerts captured by the AlertManager.",
@@ -155,6 +347,119 @@
           "count"
         ],
         "title": "AlertsListResponse",
+        "type": "object"
+      },
+      "AnalyticsConfigResponse": {
+        "additionalProperties": false,
+        "description": "Live configuration for built-in endpoint usage analytics.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "retention_days": {
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "Retention Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "retention_days"
+        ],
+        "title": "AnalyticsConfigResponse",
+        "type": "object"
+      },
+      "AnalyticsReport": {
+        "additionalProperties": false,
+        "description": "Windowed usage analytics report returned by GET /v1/system/analytics.",
+        "properties": {
+          "endpoints": {
+            "items": {
+              "$ref": "#/components/schemas/EndpointUsageSummary"
+            },
+            "title": "Endpoints",
+            "type": "array"
+          },
+          "error_count": {
+            "minimum": 0.0,
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "error_rate": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Error Rate",
+            "type": "number"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "hourly": {
+            "items": {
+              "$ref": "#/components/schemas/HourlyUsageBucket"
+            },
+            "title": "Hourly",
+            "type": "array"
+          },
+          "principals": {
+            "items": {
+              "$ref": "#/components/schemas/PrincipalUsageSummary"
+            },
+            "title": "Principals",
+            "type": "array"
+          },
+          "total_completion_tokens": {
+            "minimum": 0.0,
+            "title": "Total Completion Tokens",
+            "type": "integer"
+          },
+          "total_prompt_tokens": {
+            "minimum": 0.0,
+            "title": "Total Prompt Tokens",
+            "type": "integer"
+          },
+          "total_requests": {
+            "minimum": 0.0,
+            "title": "Total Requests",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "minimum": 0.0,
+            "title": "Total Tokens",
+            "type": "integer"
+          },
+          "unique_client_apps": {
+            "minimum": 0.0,
+            "title": "Unique Client Apps",
+            "type": "integer"
+          },
+          "unique_principals": {
+            "minimum": 0.0,
+            "title": "Unique Principals",
+            "type": "integer"
+          },
+          "window_hours": {
+            "minimum": 1.0,
+            "title": "Window Hours",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "window_hours",
+          "total_requests",
+          "error_count",
+          "error_rate",
+          "unique_principals",
+          "unique_client_apps",
+          "total_prompt_tokens",
+          "total_completion_tokens",
+          "total_tokens"
+        ],
+        "title": "AnalyticsReport",
         "type": "object"
       },
       "ApiScope": {
@@ -582,6 +887,35 @@
         "title": "ContextMode",
         "type": "string"
       },
+      "CorsRuntimeConfigResponse": {
+        "additionalProperties": false,
+        "description": "Live browser CORS origin and allowed-header policy.",
+        "properties": {
+          "cors_allowed_origins": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cors Allowed Origins",
+            "type": "array"
+          },
+          "cors_extra_allow_headers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cors Extra Allow Headers",
+            "type": "array"
+          },
+          "effective_allow_headers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Effective Allow Headers",
+            "type": "array"
+          }
+        },
+        "title": "CorsRuntimeConfigResponse",
+        "type": "object"
+      },
       "CreateClientAppRequest": {
         "additionalProperties": false,
         "description": "Payload for registering a new OIDC-bound client application.",
@@ -663,6 +997,64 @@
           "deleted"
         ],
         "title": "DeleteResponse",
+        "type": "object"
+      },
+      "EndpointUsageSummary": {
+        "additionalProperties": false,
+        "description": "Aggregated request volume, status class breakdown, and latency per route template.",
+        "properties": {
+          "avg_duration_ms": {
+            "minimum": 0.0,
+            "title": "Avg Duration Ms",
+            "type": "number"
+          },
+          "max_duration_ms": {
+            "minimum": 0.0,
+            "title": "Max Duration Ms",
+            "type": "number"
+          },
+          "method": {
+            "minLength": 1,
+            "title": "Method",
+            "type": "string"
+          },
+          "request_count": {
+            "minimum": 0.0,
+            "title": "Request Count",
+            "type": "integer"
+          },
+          "route": {
+            "minLength": 1,
+            "title": "Route",
+            "type": "string"
+          },
+          "status_2xx": {
+            "minimum": 0.0,
+            "title": "Status 2Xx",
+            "type": "integer"
+          },
+          "status_4xx": {
+            "minimum": 0.0,
+            "title": "Status 4Xx",
+            "type": "integer"
+          },
+          "status_5xx": {
+            "minimum": 0.0,
+            "title": "Status 5Xx",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "method",
+          "route",
+          "request_count",
+          "status_2xx",
+          "status_4xx",
+          "status_5xx",
+          "avg_duration_ms",
+          "max_duration_ms"
+        ],
+        "title": "EndpointUsageSummary",
         "type": "object"
       },
       "ExceptionFingerprint": {
@@ -1028,6 +1420,66 @@
         "title": "GpuStatusDTO",
         "type": "object"
       },
+      "GuardrailBlockMode": {
+        "description": "Response mode when a prompt is blocked by the guardrail policy.",
+        "enum": [
+          "refusal_message",
+          "http_error"
+        ],
+        "title": "GuardrailBlockMode",
+        "type": "string"
+      },
+      "GuardrailsPolicyConfigResponse": {
+        "additionalProperties": false,
+        "description": "Live pre-flight guardrail enforcement policy.",
+        "properties": {
+          "backend": {
+            "enum": [
+              "llamacpp",
+              "ollama"
+            ],
+            "title": "Backend",
+            "type": "string"
+          },
+          "block_mode": {
+            "$ref": "#/components/schemas/GuardrailBlockMode"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "fail_open": {
+            "title": "Fail Open",
+            "type": "boolean"
+          },
+          "refusal_text": {
+            "title": "Refusal Text",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Timeout Seconds",
+            "type": "number"
+          },
+          "violation_threshold": {
+            "exclusiveMaximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Violation Threshold",
+            "type": "number"
+          }
+        },
+        "required": [
+          "enabled",
+          "backend",
+          "block_mode",
+          "refusal_text",
+          "violation_threshold",
+          "fail_open",
+          "timeout_seconds"
+        ],
+        "title": "GuardrailsPolicyConfigResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1058,6 +1510,40 @@
           }
         },
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "HourlyUsageBucket": {
+        "additionalProperties": false,
+        "description": "UTC hourly rollup point for time-series request, error, and token trends.",
+        "properties": {
+          "bucket_hour": {
+            "format": "date-time",
+            "title": "Bucket Hour",
+            "type": "string"
+          },
+          "error_count": {
+            "minimum": 0.0,
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "request_count": {
+            "minimum": 0.0,
+            "title": "Request Count",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "minimum": 0.0,
+            "title": "Total Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bucket_hour",
+          "request_count",
+          "error_count",
+          "total_tokens"
+        ],
+        "title": "HourlyUsageBucket",
         "type": "object"
       },
       "InferenceToolCall": {
@@ -1096,6 +1582,80 @@
         ],
         "title": "JobPriority",
         "type": "integer"
+      },
+      "LimitsRuntimeConfigResponse": {
+        "additionalProperties": false,
+        "description": "Live rate limits, per-principal quotas, upload limits, keepalive, and log level.",
+        "properties": {
+          "ip_rate_limit_rpm": {
+            "minimum": 1.0,
+            "title": "Ip Rate Limit Rpm",
+            "type": "integer"
+          },
+          "json_keepalive_threshold_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Json Keepalive Threshold Seconds",
+            "type": "number"
+          },
+          "keepalive_interval_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Keepalive Interval Seconds",
+            "type": "number"
+          },
+          "log_level": {
+            "title": "Log Level",
+            "type": "string"
+          },
+          "max_projects_per_principal": {
+            "minimum": 1.0,
+            "title": "Max Projects Per Principal",
+            "type": "integer"
+          },
+          "max_queued_jobs": {
+            "minimum": 1.0,
+            "title": "Max Queued Jobs",
+            "type": "integer"
+          },
+          "max_queued_jobs_per_principal": {
+            "minimum": 1.0,
+            "title": "Max Queued Jobs Per Principal",
+            "type": "integer"
+          },
+          "max_storage_bytes_per_principal": {
+            "minimum": 1.0,
+            "title": "Max Storage Bytes Per Principal",
+            "type": "integer"
+          },
+          "max_upload_bytes": {
+            "minimum": 1.0,
+            "title": "Max Upload Bytes",
+            "type": "integer"
+          },
+          "rate_limit_rpm": {
+            "minimum": 1.0,
+            "title": "Rate Limit Rpm",
+            "type": "integer"
+          },
+          "trust_cloudflare_headers": {
+            "title": "Trust Cloudflare Headers",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rate_limit_rpm",
+          "ip_rate_limit_rpm",
+          "max_projects_per_principal",
+          "max_storage_bytes_per_principal",
+          "max_queued_jobs",
+          "max_queued_jobs_per_principal",
+          "max_upload_bytes",
+          "keepalive_interval_seconds",
+          "json_keepalive_threshold_seconds",
+          "trust_cloudflare_headers",
+          "log_level"
+        ],
+        "title": "LimitsRuntimeConfigResponse",
+        "type": "object"
       },
       "LogFileSummary": {
         "additionalProperties": false,
@@ -1287,6 +1847,73 @@
         ],
         "title": "MessageRole",
         "type": "string"
+      },
+      "OidcRuntimeConfigResponse": {
+        "additionalProperties": false,
+        "description": "Live OIDC authorization policy settings.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "issuer_url": {
+            "title": "Issuer Url",
+            "type": "string"
+          },
+          "jwks_url": {
+            "title": "Jwks Url",
+            "type": "string"
+          },
+          "oidc_admin_emails": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Admin Emails",
+            "type": "array"
+          },
+          "oidc_allowed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Allowed Domains",
+            "type": "array"
+          },
+          "oidc_allowed_emails": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Allowed Emails",
+            "type": "array"
+          },
+          "oidc_audiences": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Audiences",
+            "type": "array"
+          },
+          "oidc_default_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Default Scopes",
+            "type": "array"
+          },
+          "oidc_leeway_seconds": {
+            "maximum": 300.0,
+            "minimum": 0.0,
+            "title": "Oidc Leeway Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "enabled",
+          "issuer_url",
+          "jwks_url",
+          "oidc_leeway_seconds"
+        ],
+        "title": "OidcRuntimeConfigResponse",
+        "type": "object"
       },
       "OpenAIChatChoice": {
         "additionalProperties": false,
@@ -1741,6 +2368,63 @@
         "title": "PermissionTier",
         "type": "string"
       },
+      "PrincipalUsageSummary": {
+        "additionalProperties": false,
+        "description": "Aggregated request, error, and token totals per opaque principal and OAuth client app.",
+        "properties": {
+          "completion_tokens": {
+            "minimum": 0.0,
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "error_count": {
+            "minimum": 0.0,
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "oauth_client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Client Id"
+          },
+          "principal_id": {
+            "minLength": 1,
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "minimum": 0.0,
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "request_count": {
+            "minimum": 0.0,
+            "title": "Request Count",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "minimum": 0.0,
+            "title": "Total Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "principal_id",
+          "request_count",
+          "error_count",
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
+        "title": "PrincipalUsageSummary",
+        "type": "object"
+      },
       "Project": {
         "additionalProperties": false,
         "description": "Isolated workspace project containing files, sessions, and indexes.",
@@ -1864,6 +2548,82 @@
           "approved"
         ],
         "title": "ResolveApprovalRequest",
+        "type": "object"
+      },
+      "ScopedConfigReloadRequest": {
+        "additionalProperties": false,
+        "description": "Explicit list of configuration sections to reload from YAML and environment variables.",
+        "properties": {
+          "sections": {
+            "items": {
+              "enum": [
+                "alerting",
+                "analytics",
+                "oidc",
+                "cors",
+                "limits",
+                "guardrails"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Sections",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sections"
+        ],
+        "title": "ScopedConfigReloadRequest",
+        "type": "object"
+      },
+      "ScopedConfigReloadResponse": {
+        "additionalProperties": false,
+        "description": "Summary of sections reloaded from YAML/env versus left untouched.",
+        "properties": {
+          "config_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config Path"
+          },
+          "reloaded_sections": {
+            "items": {
+              "enum": [
+                "alerting",
+                "analytics",
+                "oidc",
+                "cors",
+                "limits",
+                "guardrails"
+              ],
+              "type": "string"
+            },
+            "title": "Reloaded Sections",
+            "type": "array"
+          },
+          "unchanged_sections": {
+            "items": {
+              "enum": [
+                "alerting",
+                "analytics",
+                "oidc",
+                "cors",
+                "limits",
+                "guardrails"
+              ],
+              "type": "string"
+            },
+            "title": "Unchanged Sections",
+            "type": "array"
+          }
+        },
+        "title": "ScopedConfigReloadResponse",
         "type": "object"
       },
       "Session": {
@@ -2086,6 +2846,16 @@
         "title": "SessionMessageRequest",
         "type": "object"
       },
+      "SmtpTlsMode": {
+        "description": "Transport security mode used when connecting to an outbound SMTP server.",
+        "enum": [
+          "starttls",
+          "ssl",
+          "none"
+        ],
+        "title": "SmtpTlsMode",
+        "type": "string"
+      },
       "SpoolerSnapshot": {
         "additionalProperties": false,
         "description": "Point-in-time status of the single-slot inference spooler.",
@@ -2268,6 +3038,75 @@
           "recent_alert_count"
         ],
         "title": "SystemStatusResponse",
+        "type": "object"
+      },
+      "TestAlertRequest": {
+        "additionalProperties": false,
+        "description": "Payload for dispatching a synthetic test alert through active alert sinks.",
+        "properties": {
+          "bypass_filters": {
+            "default": true,
+            "title": "Bypass Filters",
+            "type": "boolean"
+          },
+          "category": {
+            "$ref": "#/components/schemas/AlertCategory",
+            "default": "application_error"
+          },
+          "message": {
+            "default": "Synthetic pre-flight test alert from LAI.",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/AlertSeverity",
+            "default": "critical"
+          }
+        },
+        "title": "TestAlertRequest",
+        "type": "object"
+      },
+      "TestAlertResponse": {
+        "additionalProperties": false,
+        "description": "Per-sink delivery results from POST /v1/system/alerting/test.",
+        "properties": {
+          "alert_id": {
+            "minLength": 1,
+            "title": "Alert Id",
+            "type": "string"
+          },
+          "delivered_count": {
+            "minimum": 0.0,
+            "title": "Delivered Count",
+            "type": "integer"
+          },
+          "failed_count": {
+            "minimum": 0.0,
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/AlertSinkDeliveryResult"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "skipped_count": {
+            "minimum": 0.0,
+            "title": "Skipped Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "alert_id",
+          "delivered_count",
+          "failed_count",
+          "skipped_count"
+        ],
+        "title": "TestAlertResponse",
         "type": "object"
       },
       "TokenUsage": {
@@ -2654,6 +3493,257 @@
         "title": "TurnOutput",
         "type": "object"
       },
+      "UpdateAlertingConfigRequest": {
+        "additionalProperties": false,
+        "description": "Partial update for live non-secret alerting settings (secrets stay YAML/env-only).",
+        "properties": {
+          "alert_cooldown_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Cooldown Seconds"
+          },
+          "alert_on_errors": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert On Errors"
+          },
+          "alert_on_timeouts": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert On Timeouts"
+          },
+          "alert_webhook_categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AlertCategory"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Webhook Categories"
+          },
+          "alert_webhook_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Webhook Enabled"
+          },
+          "alert_webhook_min_severity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AlertSeverity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "smtp_categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AlertCategory"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Categories"
+          },
+          "smtp_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Enabled"
+          },
+          "smtp_from_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp From Address"
+          },
+          "smtp_host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Host"
+          },
+          "smtp_min_severity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AlertSeverity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "smtp_port": {
+            "anyOf": [
+              {
+                "maximum": 65535.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Port"
+          },
+          "smtp_subject_prefix": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Subject Prefix"
+          },
+          "smtp_timeout_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 60.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Timeout Seconds"
+          },
+          "smtp_tls_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmtpTlsMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "smtp_to_addresses": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp To Addresses"
+          },
+          "smtp_use_admin_emails_fallback": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Use Admin Emails Fallback"
+          },
+          "smtp_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Smtp Username"
+          }
+        },
+        "title": "UpdateAlertingConfigRequest",
+        "type": "object"
+      },
+      "UpdateAnalyticsConfigRequest": {
+        "additionalProperties": false,
+        "description": "Partial live update for endpoint usage analytics collection and retention.",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Days"
+          }
+        },
+        "title": "UpdateAnalyticsConfigRequest",
+        "type": "object"
+      },
       "UpdateClientAppRequest": {
         "additionalProperties": false,
         "description": "Partial update payload for an active OIDC-bound client application.",
@@ -2727,6 +3817,348 @@
           }
         },
         "title": "UpdateClientAppRequest",
+        "type": "object"
+      },
+      "UpdateCorsConfigRequest": {
+        "additionalProperties": false,
+        "description": "Partial live update for CORS allowed origins and extra request headers.",
+        "properties": {
+          "cors_allowed_origins": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cors Allowed Origins"
+          },
+          "cors_extra_allow_headers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cors Extra Allow Headers"
+          }
+        },
+        "title": "UpdateCorsConfigRequest",
+        "type": "object"
+      },
+      "UpdateGuardrailsPolicyRequest": {
+        "additionalProperties": false,
+        "description": "Partial live update for guardrail enforcement policy without restarting subprocesses.",
+        "properties": {
+          "block_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GuardrailBlockMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "fail_open": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fail Open"
+          },
+          "refusal_text": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refusal Text"
+          },
+          "timeout_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Seconds"
+          },
+          "violation_threshold": {
+            "anyOf": [
+              {
+                "exclusiveMaximum": 1.0,
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Violation Threshold"
+          }
+        },
+        "title": "UpdateGuardrailsPolicyRequest",
+        "type": "object"
+      },
+      "UpdateLimitsConfigRequest": {
+        "additionalProperties": false,
+        "description": "Partial live update for rate limits, quotas, queue bounds, keepalive, and log level.",
+        "properties": {
+          "ip_rate_limit_rpm": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip Rate Limit Rpm"
+          },
+          "json_keepalive_threshold_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Json Keepalive Threshold Seconds"
+          },
+          "keepalive_interval_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keepalive Interval Seconds"
+          },
+          "log_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Level"
+          },
+          "max_projects_per_principal": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Projects Per Principal"
+          },
+          "max_queued_jobs": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Queued Jobs"
+          },
+          "max_queued_jobs_per_principal": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Queued Jobs Per Principal"
+          },
+          "max_storage_bytes_per_principal": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Storage Bytes Per Principal"
+          },
+          "max_upload_bytes": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Upload Bytes"
+          },
+          "rate_limit_rpm": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Limit Rpm"
+          },
+          "trust_cloudflare_headers": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trust Cloudflare Headers"
+          }
+        },
+        "title": "UpdateLimitsConfigRequest",
+        "type": "object"
+      },
+      "UpdateOidcConfigRequest": {
+        "additionalProperties": false,
+        "description": "Partial live update for OIDC audiences, allowlists, scopes, and clock leeway.",
+        "properties": {
+          "oidc_admin_emails": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Admin Emails"
+          },
+          "oidc_allowed_domains": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Allowed Domains"
+          },
+          "oidc_allowed_emails": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Allowed Emails"
+          },
+          "oidc_audiences": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Audiences"
+          },
+          "oidc_default_scopes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Default Scopes"
+          },
+          "oidc_leeway_seconds": {
+            "anyOf": [
+              {
+                "maximum": 300.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Leeway Seconds"
+          }
+        },
+        "title": "UpdateOidcConfigRequest",
         "type": "object"
       },
       "ValidationError": {
@@ -3897,6 +5329,117 @@
         ]
       }
     },
+    "/v1/system/alerting": {
+      "get": {
+        "description": "Return active redacted SMTP and webhook alerting configuration.",
+        "operationId": "get_alerting_config_v1_system_alerting_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertingConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Alerting Config",
+        "tags": [
+          "system"
+        ]
+      },
+      "patch": {
+        "description": "Hot-swap non-secret alerting settings and persist across restarts.",
+        "operationId": "patch_alerting_config_v1_system_alerting_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAlertingConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertingConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Alerting Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/alerting/test": {
+      "post": {
+        "description": "Send a synthetic test alert through active sinks and await delivery status.",
+        "operationId": "send_test_alert_v1_system_alerting_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/TestAlertRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestAlertResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Send Test Alert",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/v1/system/alerts": {
       "get": {
         "description": "Return recent fatal, timeout, crash, storage, and security alerts.",
@@ -3938,6 +5481,404 @@
           }
         },
         "summary": "Get System Alerts",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/analytics": {
+      "get": {
+        "description": "Return endpoint, principal/client-app, token, and hourly rollup usage metrics.",
+        "operationId": "get_usage_analytics_v1_system_analytics_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "window_hours",
+            "required": false,
+            "schema": {
+              "default": 24,
+              "maximum": 2160,
+              "minimum": 1,
+              "title": "Window Hours",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Usage Analytics",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/analytics/config": {
+      "get": {
+        "description": "Return live endpoint usage analytics toggle and retention settings.",
+        "operationId": "get_analytics_config_v1_system_analytics_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Analytics Config",
+        "tags": [
+          "system"
+        ]
+      },
+      "patch": {
+        "description": "Hot-swap endpoint usage analytics enablement and retention days.",
+        "operationId": "patch_analytics_config_v1_system_analytics_config_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAnalyticsConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Analytics Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/config/cors": {
+      "get": {
+        "description": "Return live browser CORS origins and allowed headers.",
+        "operationId": "get_cors_runtime_config_v1_system_config_cors_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CorsRuntimeConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Cors Runtime Config",
+        "tags": [
+          "system"
+        ]
+      },
+      "patch": {
+        "description": "Hot-swap browser CORS origins and headers live without restarting.",
+        "operationId": "patch_cors_runtime_config_v1_system_config_cors_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCorsConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CorsRuntimeConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Cors Runtime Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/config/guardrails": {
+      "get": {
+        "description": "Return live pre-flight guardrail enforcement policy.",
+        "operationId": "get_guardrails_runtime_config_v1_system_config_guardrails_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuardrailsPolicyConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Guardrails Runtime Config",
+        "tags": [
+          "system"
+        ]
+      },
+      "patch": {
+        "description": "Hot-swap guardrail enforcement policy without restarting inference subprocesses.",
+        "operationId": "patch_guardrails_runtime_config_v1_system_config_guardrails_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateGuardrailsPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuardrailsPolicyConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Guardrails Runtime Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/config/limits": {
+      "get": {
+        "description": "Return live rate limits, principal quotas, queue limits, keepalives, and log level.",
+        "operationId": "get_limits_runtime_config_v1_system_config_limits_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LimitsRuntimeConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Limits Runtime Config",
+        "tags": [
+          "system"
+        ]
+      },
+      "patch": {
+        "description": "Hot-swap limits, quotas, and log level in place without dropping buckets or queues.",
+        "operationId": "patch_limits_runtime_config_v1_system_config_limits_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateLimitsConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LimitsRuntimeConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Limits Runtime Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/config/oidc": {
+      "get": {
+        "description": "Return live OIDC audiences, allowlists, admin emails, scopes, and leeway.",
+        "operationId": "get_oidc_runtime_config_v1_system_config_oidc_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcRuntimeConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Oidc Runtime Config",
+        "tags": [
+          "system"
+        ]
+      },
+      "patch": {
+        "description": "Hot-swap OIDC authorization policy in place while preserving cached JWKS.",
+        "operationId": "patch_oidc_runtime_config_v1_system_config_oidc_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOidcConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcRuntimeConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Oidc Runtime Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/config/reload": {
+      "post": {
+        "description": "Reload only the explicitly requested section(s) from YAML and environment variables.",
+        "operationId": "reload_scoped_config_v1_system_config_reload_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScopedConfigReloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScopedConfigReloadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reload Scoped Config",
         "tags": [
           "system"
         ]

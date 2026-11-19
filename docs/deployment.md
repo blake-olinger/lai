@@ -224,6 +224,105 @@ Or on Windows, launch and supervise both together with `scripts/start-lai.ps1`:
 
 ---
 
+## Operational Alerting (SMTP Email & Webhooks)
+
+LAI automatically captures `CRITICAL` failures, timeouts, crashes, storage/security errors, and
+(by default) plain `ERROR`-level events with cooldown deduplication. All outbound alert targets are
+fully configurable with zero hardcoded hosts or recipients.
+
+### 1. Configure Outbound SMTP Email Alerts
+
+Enable SMTP alerting in `config/config.yaml` and pass the SMTP password strictly via environment
+variable (`LAI_LOGGING__ALERT_SMTP__PASSWORD`) so credentials are never committed to disk:
+
+```yaml
+logging:
+  alert_cooldown_seconds: 60.0
+  alert_on_timeouts: true
+  alert_on_errors: true
+  alert_smtp:
+    enabled: true
+    host: "smtp.example.com"
+    port: 587
+    tls_mode: "starttls"        # "starttls", "ssl", or "none"
+    username: "alerts@example.com"
+    from_address: "alerts@example.com"
+    to_addresses:
+      - "oncall@example.com"
+    use_admin_emails_fallback: true
+    subject_prefix: "[LAI Alert]"
+    min_severity: "error"       # "error" or "critical"
+    categories: []              # empty = all categories
+```
+
+```powershell
+# Set SMTP password via environment variable before launching `lai serve`
+$env:LAI_LOGGING__ALERT_SMTP__PASSWORD = "<app-password-or-smtp-token>"
+```
+
+- If `to_addresses` is left empty and `use_admin_emails_fallback: true`, LAI delivers email alerts
+  to all addresses in `oidc_admin_emails`.
+- Startup and live updates validate fail-closed: enabling SMTP requires a valid host,
+  `from_address`, and at least one effective recipient.
+- Optional webhook notifications (`logging.alert_webhook_url`, or `LAI_LOGGING__ALERT_WEBHOOK_URL`)
+  remain supported alongside SMTP, each with independent `min_severity` and `categories` filters.
+
+### 2. Test Alert Delivery Before Go-Live
+
+Send a synthetic test alert through all configured sinks and inspect per-sink delivery status:
+
+```powershell
+curl.exe -X POST https://ai.example.com/v1/system/alerting/test `
+  -H "Authorization: Bearer $env:LAI_ADMIN_KEY" `
+  -H "Content-Type: application/json" `
+  -d '{"message":"Pre-flight SMTP verification"}'
+```
+
+---
+
+## Usage Analytics & Live Configuration Hot-Swapping
+
+### Endpoint & Token Usage Analytics
+
+LAI aggregates privacy-preserving UTC hourly rollups in SQLite (opaque principal IDs and OAuth
+client IDs only — never raw prompts, emails, or IP addresses) with automatic retention pruning
+(`analytics.retention_days`, default `90` days).
+
+```powershell
+# Query trailing 24-hour (or up to 2160-hour / 90-day) usage summary
+curl.exe "https://ai.example.com/v1/system/analytics?window_hours=24" `
+  -H "Authorization: Bearer $env:LAI_ADMIN_KEY"
+```
+
+### Zero-Restart Isolated Configuration Hot-Swapping
+
+Administrators (`admin` scope) can inspect and update operational settings live without restarting
+LAI or disrupting active requests, OIDC JWKS caches, or rate-limit buckets. Non-secret live edits
+persist in SQLite across restarts, while secrets (`LAI_LOGGING__ALERT_SMTP__PASSWORD`,
+`LAI_LOGGING__ALERT_WEBHOOK_URL`) stay strictly in YAML/environment variables and are never
+returned by `GET` endpoints.
+
+| Subsystem | Admin Endpoints | Live Editable Settings |
+| --- | --- | --- |
+| **Alerting** | `GET` / `PATCH /v1/system/alerting`, `POST /v1/system/alerting/test` | SMTP host/port/TLS/recipients/filters, webhook toggle/filters, cooldown, `alert_on_errors`, `alert_on_timeouts` |
+| **Analytics** | `GET /v1/system/analytics`, `GET` / `PATCH /v1/system/analytics/config` | `enabled`, `retention_days` (prunes expired buckets immediately) |
+| **OIDC / Auth** | `GET` / `PATCH /v1/system/config/oidc` | `oidc_audiences`, `oidc_allowed_emails`, `oidc_allowed_domains`, `oidc_admin_emails`, `oidc_default_scopes`, `oidc_leeway_seconds` |
+| **CORS** | `GET` / `PATCH /v1/system/config/cors` | `cors_allowed_origins`, `cors_extra_allow_headers` |
+| **Limits & Logging** | `GET` / `PATCH /v1/system/config/limits` | `rate_limit_rpm`, `ip_rate_limit_rpm`, per-principal quotas, queue bounds, `max_upload_bytes`, keepalive timings, `trust_cloudflare_headers`, `log_level` |
+| **Guardrails Policy** | `GET` / `PATCH /v1/system/config/guardrails` | `enabled`, `block_mode`, `refusal_text`, `violation_threshold`, `fail_open`, `timeout_seconds` |
+
+To pull updated values from `config/config.yaml` and `LAI_*` environment variables for **only**
+specific section(s) (clearing their persisted runtime overrides without touching unrelated sections):
+
+```powershell
+curl.exe -X POST https://ai.example.com/v1/system/config/reload `
+  -H "Authorization: Bearer $env:LAI_ADMIN_KEY" `
+  -H "Content-Type: application/json" `
+  -d '{"sections":["alerting","cors"]}'
+```
+
+---
+
 ## Production Configuration Checklist
 
 Before opening traffic, verify these settings in `config/config.yaml`:
@@ -239,7 +338,10 @@ Before opening traffic, verify these settings in `config/config.yaml`:
 - [ ] Quotas & rate limits reviewed (`max_projects_per_principal`,
   `max_storage_bytes_per_principal`, `max_queued_jobs_per_principal`, `rate_limit_rpm`,
   `ip_rate_limit_rpm`)
-- [ ] `logging.enable_file_logs: true` and optional `logging.alert_webhook_url` configured
+- [ ] `logging.enable_file_logs: true`, `logging.alert_on_errors: true`, and outbound SMTP email
+  alerting (`logging.alert_smtp` + `LAI_LOGGING__ALERT_SMTP__PASSWORD`) or webhook configured and
+  verified via `POST /v1/system/alerting/test`
+- [ ] `analytics.enabled: true` and `analytics.retention_days` reviewed
 
 ---
 
@@ -263,5 +365,15 @@ curl.exe -i https://ai.example.com/v1/projects
 
 # 5. Verify admin health telemetry (GPU, inference backend, guardrail backend)
 curl.exe -i https://ai.example.com/v1/system/status `
+  -H "Authorization: Bearer $env:LAI_ADMIN_KEY"
+
+# 6. Verify outbound SMTP/webhook alert delivery
+curl.exe -i -X POST https://ai.example.com/v1/system/alerting/test `
+  -H "Authorization: Bearer $env:LAI_ADMIN_KEY" `
+  -H "Content-Type: application/json" `
+  -d '{"message":"Post-deploy alert test"}'
+
+# 7. Verify endpoint usage analytics collection
+curl.exe -i "https://ai.example.com/v1/system/analytics?window_hours=1" `
   -H "Authorization: Bearer $env:LAI_ADMIN_KEY"
 ```

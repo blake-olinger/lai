@@ -95,7 +95,7 @@ guardrails:
   fail_open: false
   max_logged_prompt_chars: 2000
 
-# 24-hour rotating structured logs & fatal/timeout alerting
+# 24-hour rotating structured logs, error routing, SMTP email & webhook alerting
 log_level: "INFO"
 log_json: false
 logging:
@@ -108,6 +108,32 @@ logging:
   retention_days: 14
   error_retention_days: 30
   compress_rotated: true
-  alert_webhook_url: null
   alert_cooldown_seconds: 60.0
   alert_on_timeouts: true
+  # Emit deduplicated alerts for plain ERROR-level logs (not just CRITICAL/timeouts)
+  alert_on_errors: true
+  # Optional secondary webhook sink (set secret URL via LAI_LOGGING__ALERT_WEBHOOK_URL)
+  alert_webhook_url: null
+  alert_webhook_enabled: true
+  alert_webhook_min_severity: "error" # "error" or "critical"
+  alert_webhook_categories: [] # empty = all categories
+  # Optional primary outbound SMTP email alert sink (set password via LAI_LOGGING__ALERT_SMTP__PASSWORD)
+  alert_smtp:
+    enabled: false
+    host: null # e.g. "smtp.gmail.com" or "smtp.mailgun.org"
+    port: 587
+    tls_mode: "starttls" # "starttls", "ssl", or "none"
+    username: null
+    password: null # Prefer env var LAI_LOGGING__ALERT_SMTP__PASSWORD instead of committing in YAML
+    from_address: null # e.g. "alerts@yourcompany.com"
+    to_addresses: [] # Explicit recipients; if empty and fallback is true, uses oidc_admin_emails
+    use_admin_emails_fallback: true
+    subject_prefix: "[LAI Alert]"
+    timeout_seconds: 10.0
+    min_severity: "error" # "error" or "critical"
+    categories: [] # empty = all categories
+
+# Built-in privacy-preserving hourly endpoint & token usage analytics
+analytics:
+  enabled: true
+  retention_days: 90
