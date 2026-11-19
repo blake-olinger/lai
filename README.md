@@ -70,9 +70,10 @@ Copy-Item config/config.example.yaml config/config.yaml
    uv run python -m lai.cli models setup
    ```
 
-   > **Note:** Automated `llama.cpp` binary downloads target Windows CUDA x64. On Linux, either use
-   > `inference_backend: "ollama"` (`lai models setup --backend ollama`) or install `llama-server`
-   > on your `PATH` and run `lai models setup --skip-binaries`.
+   > **Note:** Automated `llama.cpp` CUDA binary downloads support both **Windows x64** and
+   > **Linux x64**. On other platforms, use `inference_backend: "ollama"`
+   > (`lai models setup --backend ollama`) or install `llama-server` on your `PATH` and run
+   > `lai models setup --skip-binaries`.
 
 4. **Start the server** (inference backend, CPU guardrail, and API server on `127.0.0.1:8400`):
 
@@ -188,7 +189,6 @@ cloudflared tunnel route dns lai-local ai.example.com
 uv run python -m lai.cli tunnel render-config `
   --tunnel "<TUNNEL_UUID>" `
   --hostname "ai.example.com" `
-  --credentials-file "$env:USERPROFILE\.cloudflared\<TUNNEL_UUID>.json" `
   --output deploy/cloudflared/config.yml
 
 cloudflared tunnel --config deploy/cloudflared/config.yml run
@@ -234,6 +234,7 @@ deduplication) or inspect recent alerts via `GET /v1/system/alerts` (`admin` sco
 - **Deployment & Operations Guide**: [docs/deployment.md](docs/deployment.md)
 - **Client App & Project Lifecycle**: [docs/client-apps-and-projects.md](docs/client-apps-and-projects.md)
 - **Security Policy**: [SECURITY.md](SECURITY.md)
+- **Changelog**: [CHANGELOG.md](CHANGELOG.md)
 - **Contributing Guide**: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Security, Contributing & License

@@ -1780,17 +1780,6 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
-          },
-          "workspace_root": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Workspace Root"
           }
         },
         "required": [
@@ -1818,17 +1807,6 @@
             "minLength": 1,
             "title": "Name",
             "type": "string"
-          },
-          "workspace_root": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Workspace Root"
           }
         },
         "required": [
@@ -2676,6 +2654,81 @@
         "title": "TurnOutput",
         "type": "object"
       },
+      "UpdateClientAppRequest": {
+        "additionalProperties": false,
+        "description": "Partial update payload for an active OIDC-bound client application.",
+        "properties": {
+          "allowed_project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Project Ids"
+          },
+          "allowed_tiers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PermissionTier"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Tiers"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "registered_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ToolSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Registered Tools"
+          }
+        },
+        "title": "UpdateClientAppRequest",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -2932,6 +2985,57 @@
           }
         },
         "summary": "Revoke Client App",
+        "tags": [
+          "client-apps"
+        ]
+      },
+      "patch": {
+        "description": "Update mutable settings on an active (non-revoked) client application.",
+        "operationId": "patch_client_app_v1_client_apps__app_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "app_id",
+            "required": true,
+            "schema": {
+              "title": "App Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateClientAppRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientAppResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Client App",
         "tags": [
           "client-apps"
         ]

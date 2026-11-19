@@ -72,7 +72,7 @@ If the app only calls standard project/file/chat endpoints without client-side t
 sufficient. If the app registers or invokes **client-executed tools**, register it in LAI via
 either the CLI or the Admin REST API.
 
-**Option A — CLI (quickest for apps sending `client_tools` per turn):**
+**Option A — CLI (`lai apps create`):**
 
 ```powershell
 uv run python -m lai.cli apps create `
@@ -82,19 +82,19 @@ uv run python -m lai.cli apps create `
   --tier read `
   --tier write `
   --project-id "prj_0123456789abcdef" `
+  --registered-tools tools.json `
   --expires-days 180
 ```
 
 - `--tier` is repeatable (`read`, `write`, `exec`, `network`); defaults to `read`.
 - `--project-id` is optional and repeatable; omit it to allow client tools across any project the
   caller owns (or all projects for admins).
+- `--registered-tools` is optional; pass a path to a JSON array of `ToolSpec` definitions to
+  pre-register static client tools (apps can also send dynamic `client_tools` per turn within
+  their `allowed_tiers`).
 - `--expires-days` is optional; omit for no automatic expiry.
 
-**Option B — Admin REST API (`POST /v1/client-apps`, supports static `registered_tools`):**
-
-Use the REST API when you want to pre-register fixed `registered_tools` on the app record (the CLI
-does not expose a `--registered-tools` flag, though CLI-registered apps can still send
-`client_tools` per turn within their `allowed_tiers`):
+**Option B — Admin REST API (`POST /v1/client-apps`):**
 
 ```powershell
 curl.exe -X POST http://127.0.0.1:8400/v1/client-apps `
@@ -121,8 +121,10 @@ curl.exe -X POST http://127.0.0.1:8400/v1/client-apps `
   }'
 ```
 
-**Uniqueness rule:** Only **one non-revoked registration** may exist per `oauth_client_id`. Trying
-to register a duplicate returns `409 Conflict`.
+**Uniqueness rule:** Only **one active registration** may exist per `oauth_client_id`. Registering
+a duplicate while an active, non-expired record exists returns `409 Conflict`. If a previous
+registration for the same `oauth_client_id` has already expired, LAI automatically revokes the
+expired record before creating the replacement.
 
 **Caller scope requirement for privileged client tools:** Registering an app with `write`, `exec`,
 or `network` tiers is necessary but not sufficient — the authenticated caller must also hold
@@ -152,39 +154,50 @@ Each record reports:
 
 ### 3. Updating, Re-scoping, or Renewing a Client App
 
-Client app registrations are **immutable** — there is no in-place `PATCH`/`PUT` update endpoint.
-To change `allowed_tiers`, add or remove `allowed_project_ids` (for example, granting access to a
-newly created project), update `registered_tools`, or extend `expires_at`, use a **revoke-and-recreate**
-workflow:
+Active (non-revoked) client app registrations can be updated **in place** without disrupting
+in-flight client tool approvals bound to the `app_...` ID. The bound `oauth_client_id` stays
+immutable (use [Rotating an OAuth Client ID](#4-rotating-an-oauth-client-id-zero-downtime) to
+change it), and revoked apps cannot be updated.
 
-1. Find the current app ID:
-   ```powershell
-   uv run python -m lai.cli apps list --config config/config.yaml
-   ```
-2. Revoke the existing registration:
-   ```powershell
-   uv run python -m lai.cli apps revoke app_<OLD_ID> --config config/config.yaml
-   ```
-   *(Or `DELETE /v1/client-apps/app_<OLD_ID>` with an admin bearer token.)*
-3. Recreate the registration with the same `--oauth-client-id` and updated parameters:
-   ```powershell
-   uv run python -m lai.cli apps create `
-     --config config/config.yaml `
-     --name "my-desktop-app" `
-     --oauth-client-id "1234567890-newapp.apps.googleusercontent.com" `
-     --tier read `
-     --project-id "prj_old" `
-     --project-id "prj_new"
-   ```
+**Via CLI (`lai apps update`):**
 
-> **Operational notes:**
-> - **Expired apps must be revoked before re-registering:** Even after `expires_at` passes, the
->   database uniqueness rule applies to all non-revoked rows. Always run `apps revoke <app_id>`
->   before creating a replacement for the same `oauth_client_id`.
-> - **In-flight tool approvals:** Revoking creates a new `app_...` ID on re-registration; any
->   pending or active client tool leases bound to the old `app_...` ID cannot be resumed. Perform
->   updates when no client tool calls are mid-flight.
-> - **Audit preservation:** Revoked rows remain in the database for historical auditing.
+```powershell
+# Update allowed tiers, project allowlist, or extend expiry in place
+uv run python -m lai.cli apps update app_<ID> `
+  --config config/config.yaml `
+  --tier read `
+  --tier write `
+  --project-id "prj_old" `
+  --project-id "prj_new" `
+  --expires-days 180
+
+# Clear project allowlist (allow all accessible projects) or remove expiration
+uv run python -m lai.cli apps update app_<ID> --clear-projects --clear-expiry --config config/config.yaml
+
+# Replace or clear static registered_tools
+uv run python -m lai.cli apps update app_<ID> --registered-tools tools.json --config config/config.yaml
+uv run python -m lai.cli apps update app_<ID> --clear-tools --config config/config.yaml
+```
+
+**Via Admin REST API (`PATCH /v1/client-apps/{app_id}`):**
+
+```powershell
+curl.exe -X PATCH http://127.0.0.1:8400/v1/client-apps/app_<ID> `
+  -H "Authorization: Bearer $env:LAI_ADMIN_KEY" `
+  -H "Content-Type: application/json" `
+  -d '{
+    "allowed_project_ids": ["prj_old", "prj_new"],
+    "expires_at": null
+  }'
+```
+
+- Only fields included in the JSON payload are modified; sending `"expires_at": null` clears the
+  expiration limit, whereas omitting `expires_at` leaves it unchanged.
+- If you reduce `allowed_tiers`, any retained `registered_tools` must still fit within the new
+  tiers (otherwise the update fails with `422`).
+- If an app has already expired and you prefer a fresh registration ID, calling
+  `lai apps create` / `POST /v1/client-apps` with the same `oauth_client_id` automatically revokes
+  the expired row and preserves it in audit history.
 
 ### 4. Rotating an OAuth Client ID (Zero Downtime)
 
@@ -263,11 +276,10 @@ curl.exe -X POST http://127.0.0.1:8400/v1/projects `
 - The project is owned by the calling user (`owner_principal_id` is assigned automatically).
 - Non-admin callers are capped at `max_projects_per_principal` (default `10`; returns `403` with
   code `quota_exceeded` when reached).
-- `workspace_root` is optional informational metadata only — LAI never reads files from the server
-  filesystem; all project data must be uploaded over HTTP.
+- All project files must be uploaded over HTTP — LAI never reads files from the server filesystem.
 - If a registered client app uses a restricted `allowed_project_ids` allowlist and needs client-tool
-  access to the new project, revoke and recreate that client app registration with the new
-  `prj_...` ID included.
+  access to the new project, update the app in place via `lai apps update` or
+  `PATCH /v1/client-apps/{app_id}` to include the new `prj_...` ID.
 
 ### 2. Uploading Files & Running Sessions
 
@@ -316,7 +328,7 @@ Deleting a project performs a full cascade cleanup:
 **Post-deletion notes:**
 
 - If any registered client app explicitly referenced the deleted `prj_...` ID in
-  `allowed_project_ids`, remove it the next time you recreate that client app registration.
+  `allowed_project_ids`, remove it via `lai apps update` or `PATCH /v1/client-apps/{app_id}`.
 - Historical scrubbed entries in rotating log files (`data/logs/lai.jsonl`,
   `data/logs/prompts_audit.jsonl`) age out automatically according to `logging.retention_days` and
   `logging.error_retention_days`.

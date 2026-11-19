@@ -140,6 +140,37 @@ Revoke an existing client application by ID.
 | `200` | Successful Response | `application/json`: [`DeleteResponse`](#schema-deleteresponse) |
 | `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
 
+### `PATCH /v1/client-apps/{app_id}`
+
+**Patch Client App**
+
+Update mutable settings on an active (non-revoked) client application.
+
+**Parameters**
+
+| Name | In | Required | Type | Details |
+| --- | --- | --- | --- | --- |
+| `app_id` | path | yes | string | - |
+
+**Request Body** (required)
+
+- `application/json`: [`UpdateClientAppRequest`](#schema-updateclientapprequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `allowed_project_ids` | array[string] \| null | no | - |
+| `allowed_tiers` | array[[`PermissionTier`](#schema-permissiontier)] \| null | no | - |
+| `expires_at` | string (date-time) \| null | no | - |
+| `name` | string \| null | no | - |
+| `registered_tools` | array[[`ToolSpec`](#schema-toolspec)] \| null | no | - |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`ClientAppResponse`](#schema-clientappresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
 
 ### Tag: `files`
 
@@ -371,7 +402,6 @@ Create a new isolated project workspace.
 | `default_model_profile` | string | no | default=`'gemma4-26b-a4b'` |
 | `description` | string | no | default=`''` |
 | `name` | string | yes | minLength=1; maxLength=120 |
-| `workspace_root` | string \| null | no | - |
 
 **Responses**
 
@@ -1199,7 +1229,6 @@ Isolated workspace project containing files, sessions, and indexes.
 | `name` | string | yes | minLength=1; maxLength=120 |
 | `owner_principal_id` | string | no | default=`'system'`; minLength=1 |
 | `updated_at` | string (date-time) | no | - |
-| `workspace_root` | string \| null | no | - |
 
 <a id="schema-projectcreaterequest"></a>
 ### `ProjectCreateRequest`
@@ -1211,7 +1240,6 @@ Payload for creating a new isolated workspace project.
 | `default_model_profile` | string | no | default=`'gemma4-26b-a4b'` |
 | `description` | string | no | default=`''` |
 | `name` | string | yes | minLength=1; maxLength=120 |
-| `workspace_root` | string \| null | no | - |
 
 <a id="schema-projectlistresponse"></a>
 ### `ProjectListResponse`
@@ -1444,6 +1472,19 @@ Final result of a completed orchestrator turn.
 | `pending_client_tool_call` | [`ClientToolCallEvent`](#schema-clienttoolcallevent) \| null | no | - |
 | `session_id` | string | yes | minLength=1 |
 | `usage` | [`TokenUsage`](#schema-tokenusage) | yes | - |
+
+<a id="schema-updateclientapprequest"></a>
+### `UpdateClientAppRequest`
+
+Partial update payload for an active OIDC-bound client application.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `allowed_project_ids` | array[string] \| null | no | - |
+| `allowed_tiers` | array[[`PermissionTier`](#schema-permissiontier)] \| null | no | - |
+| `expires_at` | string (date-time) \| null | no | - |
+| `name` | string \| null | no | - |
+| `registered_tools` | array[[`ToolSpec`](#schema-toolspec)] \| null | no | - |
 
 <a id="schema-validationerror"></a>
 ### `ValidationError`

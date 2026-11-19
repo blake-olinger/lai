@@ -95,6 +95,12 @@ def test_openapi_json_and_markdown_match_app_and_export_check(
         "/v1/client-apps/{app_id}",
     ):
         assert expected_path in paths
+    app_ops = cast("dict[str, object]", paths["/v1/client-apps/{app_id}"])
+    assert {"patch", "delete"}.issubset(app_ops)
+    schemas = cast("dict[str, dict[str, object]]", live_schema["components"]["schemas"])
+    for schema_name in ("Project", "ProjectCreateRequest"):
+        props = cast("dict[str, object]", schemas[schema_name]["properties"])
+        assert "workspace_root" not in props
 
 
 def test_github_workflows_and_dependabot_parse_with_expected_triggers_and_jobs() -> None:
@@ -122,6 +128,8 @@ def test_github_workflows_and_dependabot_parse_with_expected_triggers_and_jobs()
     rel_jobs = cast("dict[str, dict[str, object]]", release["jobs"])
     assert "release" in rel_jobs
     assert rel_jobs["release"].get("environment") == "release"
+    rel_steps = cast("list[dict[str, object]]", rel_jobs["release"].get("steps", []))
+    assert any("bump_version.py --check-tag" in str(step.get("run", "")) for step in rel_steps)
     _assert_all_uses_sha_pinned(release, "release.yml")
 
     docs = _load_yaml_mapping(workflows_dir / "docs.yml")

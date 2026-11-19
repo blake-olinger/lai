@@ -89,6 +89,23 @@ To build and inspect the static Scalar OpenAPI documentation site locally:
 uv run python scripts/build_pages_docs.py --output-dir site
 ```
 
+## Versioning & Releases
+
+`pyproject.toml` is the single source of truth for LAI's 3-part SemVer version (surfaced via
+`lai.__version__`, `lai --version`, `/v1/health`, and the OpenAPI schema). Use the release bump
+helper to update `pyproject.toml`, `CHANGELOG.md`, `uv.lock`, `openapi.json`, and
+`docs/api-reference.md` in lockstep:
+
+```powershell
+uv run python scripts/bump_version.py 0.2.0
+# Or via mise:
+mise run bump 0.2.0
+```
+
+Tagging a release (`git tag v0.2.0 && git push origin v0.2.0`) triggers `.github/workflows/release.yml`,
+which verifies that the git tag matches `pyproject.toml` before running full verification and
+publishing release artifacts.
+
 ## Pull Request Checklist
 
 Before opening a pull request, run the full verification suite:

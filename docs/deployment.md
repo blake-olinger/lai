@@ -9,16 +9,18 @@ and a **Cloudflare Named Tunnel**.
 
 - **Python 3.13** (`>=3.13,<3.14`) and **[`uv`](https://docs.astral.sh/uv/)**
 - **GPU inference runtime**:
-  - **Windows + NVIDIA GPU (`llamacpp`)**: `uv run python -m lai.cli models setup` downloads CUDA
-    `llama-server.exe` binaries and GGUF models automatically.
-  - **Linux or Ollama (`ollama`)**: Install Ollama and run
+  - **Windows & Linux x64 + NVIDIA GPU (`llamacpp`)**: `uv run python -m lai.cli models setup`
+    downloads official CUDA `llama.cpp` binaries (`.zip` on Windows, `.tar.gz` on Linux) and GGUF
+    models automatically.
+  - **Ollama or other platforms (`ollama`)**: Install Ollama and run
     `uv run python -m lai.cli models setup --backend ollama`, or install `llama-server` on `PATH`
     and run `uv run python -m lai.cli models setup --skip-binaries`.
 - **Single-process server**: Always run LAI as a **single worker process** (`lai serve` runs a
   single Uvicorn worker). The GPU inference spooler, per-session serialization gate, and rate
   limiters operate in-process.
-- **NTP time synchronization**: Ensure the host clock is synchronized via NTP. Google OIDC JWT
-  validation enforces `exp` strictly without clock-skew leeway.
+- **NTP time synchronization**: Ensure the host clock is synchronized via NTP. LAI applies a
+  configurable `oidc_leeway_seconds` clock-skew tolerance (default `30.0` seconds) when validating
+  Google ID token `exp` / `nbf` claims.
 
 ---
 
@@ -90,6 +92,7 @@ oidc_allowed_emails:
   - "alice@gmail.com"
 oidc_allowed_domains:
   - "yourcompany.com"
+oidc_leeway_seconds: 30.0
 
 # Emails promoted to full admin scope
 oidc_admin_emails:
@@ -134,17 +137,16 @@ exists for `ai.example.com` targeting `<TUNNEL_UUID>.cfargotunnel.com`.
 ### 3. Render `deploy/cloudflared/config.yml`
 
 ```powershell
-# Windows: pass an explicit absolute --credentials-file path (cloudflared on Windows may not expand ~)
 uv run python -m lai.cli tunnel render-config `
   --tunnel "<TUNNEL_UUID>" `
   --hostname "ai.example.com" `
-  --credentials-file "$env:USERPROFILE\.cloudflared\<TUNNEL_UUID>.json" `
   --output deploy/cloudflared/config.yml
 ```
 
-On Linux/macOS, `--credentials-file "$HOME/.cloudflared/<TUNNEL_UUID>.json"` works the same way.
-`deploy/cloudflared/config.yml` is gitignored so your tunnel UUID and local paths are never
-committed.
+On Windows, `lai tunnel render-config` resolves your home directory (`%USERPROFILE%\.cloudflared\<TUNNEL_UUID>.json`)
+automatically so `cloudflared` does not need to expand `~`; pass `--credentials-file` to override
+the path explicitly. `deploy/cloudflared/config.yml` is gitignored so your tunnel UUID and local
+paths are never committed.
 
 ### 4. Choose Cloudflare Access Mode (`cf_access_enabled`)
 
@@ -167,6 +169,8 @@ port: 8400
 # Exact browser origins allowed to call the API (no "*", no trailing "/")
 cors_allowed_origins:
   - "https://app.example.com"
+# Optional additional custom request headers beyond core/LAI/OpenAI JS SDK defaults
+cors_extra_allow_headers: []
 
 # Trust CF-Connecting-IP for per-IP rate limiting (only honored from loopback 127.0.0.1 / ::1)
 trust_cloudflare_headers: true
@@ -174,6 +178,12 @@ trust_cloudflare_headers: true
 # Keep false for browser SPA / desktop Google OIDC deployments
 cf_access_enabled: false
 ```
+
+> **Browser SDK & CORS diagnostics:** LAI allows standard OpenAI JS/TS SDK (`X-Stainless-*`)
+> browser headers by default. If a browser client sends an unlisted custom header, add it to
+> `cors_extra_allow_headers` (exact ASCII header names, no `*`). Rejected CORS preflights are
+> logged in `data/logs/lai.jsonl` as `cors_preflight_rejected` with the offending origin, method,
+> and requested headers.
 
 > **Loopback requirement:** LAI only honors `CF-Connecting-IP` when `trust_cloudflare_headers: true`
 > **and** the TCP connection arrives from `127.0.0.1` or `::1`. Run `cloudflared` on the same host
