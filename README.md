@@ -1,44 +1,70 @@
 # Local AI Platform (LAI)
 
-Local, security-hardened AI platform for multi-project chat, large log and source-code root-cause debugging, pre-flight ShieldGemma prompt guardrails, guarded tool execution, and OpenAI-compatible remote access via Cloudflare Named Tunnel.
+[![CI](https://github.com/blake-olinger/lai/actions/workflows/ci.yml/badge.svg)](https://github.com/blake-olinger/lai/actions/workflows/ci.yml)
+[![Security](https://github.com/blake-olinger/lai/actions/workflows/security.yml/badge.svg)](https://github.com/blake-olinger/lai/actions/workflows/security.yml)
+[![Docs](https://github.com/blake-olinger/lai/actions/workflows/docs.yml/badge.svg)](https://blake-olinger.github.io/lai/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+Local, multi-tenant, security-hardened AI platform for isolated project workspaces, large log and
+source-code root-cause debugging, pre-flight CPU ShieldGemma prompt guardrails, guarded tool
+execution, and OpenAI-compatible remote access over Cloudflare Named Tunnels.
 
 ## Architecture Overview
 
-LAI follows a strict 6-layer architecture enforced by `import-linter`:
+LAI enforces a strict 6-layer architecture via `import-linter` (horizontal imports across Layer-3
+subsystems are prohibited):
 
-1. **Surface (`lai.api`, `lai.cli`)** — FastAPI HTTP/SSE server (`:8400`) and Typer CLI (`init`, `keys`, `models`, `serve`, `tunnel`).
-2. **Orchestration (`lai.orchestrator`)** — Pre-flight guardrail gate at `t=0ms`, session serialization, adaptive context routing (`DIRECT`, `RETRIEVAL`, `MAP_REDUCE`), and bounded tool-call loops.
+1. **Surface (`lai.cli`, `lai.api`)** — FastAPI HTTP/SSE server (`:8400`) and Typer CLI (`init`,
+   `keys`, `apps`, `models`, `serve`, `tunnel`).
+2. **Orchestration (`lai.orchestrator`)** — Pre-flight guardrail gate at `t=0ms`, session
+   serialization, adaptive context routing (`DIRECT`, `RETRIEVAL`, `MAP_REDUCE`), and bounded
+   server/client tool loops.
 3. **Subsystems (independent Layer-3 modules)**:
-   - `lai.security`: `lai_sk_` SHA-256 API keys, RS256/ES256 OIDC JWT validation, Cloudflare Access edge checks, scope hierarchy, token-bucket rate limiter.
-   - `lai.db`: WAL-mode SQLite (`BEGIN IMMEDIATE` writes, foreign keys, FTS5 porter index).
-   - `lai.ingestion`: HTTP-stream-only `LocalBlobStore`, log/code/prose chunkers, CPU-only `FastEmbedCpuAdapter` (`BAAI/bge-small-en-v1.5`), project-isolated `LanceDbVectorStore`, and Reciprocal Rank Fusion.
-   - `lai.inference`: Supervised CUDA `llama-server` (`:8081`, Gemma 4 26B-A4B MoE with `--jinja`, `--flash-attn on`, `-ctk q8_0`, `-ctv q8_0`, `--n-cpu-moe`) and streaming `<thought>` parser.
-   - `lai.guardrails`: CPU-only `ShieldGemma-2B` supervisor (`:8082`, `--ngl 0`) and `CompositeGuardrailPipeline` with scrubbed 24h prompt auditing.
-   - `lai.tools`: Policy engine (`READ`, `WRITE`, `EXEC`, `NETWORK`), approval workflow (`PENDING -> APPROVED -> EXECUTED`), and Phase 1 read-only tools (`search_files`, `read_file_lines`, `get_file_overview`).
-   - `lai.scheduler`: Per-session mutual exclusion (`SessionGate`), single-slot priority `InferenceSpooler`, and Cloudflare 524 keepalive wrappers.
-   - `lai.config`: YAML + `LAI_*` env settings and built-in model profiles.
-4. **Observability (`lai.observability`)** — `structlog` JSONL 24h daily rotation, PII/secret scrubbing, and webhook alerting (`AlertManager`).
+   - `lai.security`: `lai_sk_` SHA-256 API keys, multi-audience RS256/ES256 Google OIDC JWT
+     validation (`azp`/`aud` client binding), Cloudflare Access edge checks, scope hierarchy, and
+     token-bucket rate limiting.
+   - `lai.db`: WAL-mode SQLite (`BEGIN IMMEDIATE` writes, foreign keys, FTS5 porter index, and
+     owner-scoped repositories).
+   - `lai.ingestion`: HTTP-stream-only `LocalBlobStore`, log/code/prose chunkers, CPU-only
+     `FastEmbedCpuAdapter` (`BAAI/bge-small-en-v1.5`), project-isolated `LanceDbVectorStore`, and
+     Reciprocal Rank Fusion.
+   - `lai.inference`: Supervised CUDA `llama-server` (`:8081`, Gemma 4 26B-A4B MoE with `--jinja`,
+     `--flash-attn on`, `-ctk q8_0`, `-ctv q8_0`, `--n-cpu-moe`) or signed Ollama backend, plus
+     streaming `<thought>` parsing.
+   - `lai.guardrails`: CPU-only `ShieldGemma-2B` supervisor (`:8082`, `--ngl 0`) and
+     `CompositeGuardrailPipeline` with scrubbed 24h prompt auditing.
+   - `lai.tools`: Policy engine (`READ`, `WRITE`, `EXEC`, `NETWORK`), human approval workflow
+     (`PENDING -> APPROVED -> EXECUTED`), read-only workspace tools, and OIDC-bound client tool
+     dispatch.
+   - `lai.scheduler`: Per-session mutual exclusion (`SessionGate`), two-level fair
+     `principal_id -> session_id` `InferenceSpooler` with per-principal queue caps, and Cloudflare
+     524 keepalive wrappers.
+   - `lai.config`: YAML + `LAI_*` env settings, fail-closed startup validators, and model profiles.
+4. **Observability (`lai.observability`)** — `structlog` JSONL 24h daily rotation, PII/secret
+   scrubbing, and webhook alerting (`AlertManager`).
 5. **Ports (`lai.ports`)** — PEP 544 `Protocol` contracts.
-6. **Domain (`lai.domain`)** — Pure immutable Pydantic v2 models, prefixed IDs, and `LaiError` hierarchy.
+6. **Domain (`lai.domain`)** — Pure immutable Pydantic v2 models, prefixed IDs, and `LaiError`
+   hierarchy.
 
-## Installation
+## Prerequisites & Installation
 
-Prerequisites: Python **3.13**, [`uv`](https://docs.astral.sh/uv/), and NVIDIA CUDA drivers for local GPU inference.
+Prerequisites: **Python 3.13** (`>=3.13,<3.14`), [`uv`](https://docs.astral.sh/uv/), and NVIDIA
+CUDA drivers for local GPU inference.
 
 ```powershell
 uv python install 3.13
 uv sync --locked
 ```
 
-Copy the example configuration if you want custom settings:
+Copy the example configuration to customize settings:
 
 ```powershell
 Copy-Item config/config.example.yaml config/config.yaml
 ```
 
-## Quickstart (`init`, `keys`, `models setup`, `serve`)
+## Quickstart (`init`, `keys`, `apps`, `models setup`, `serve`)
 
-Initialize local directories (`data/`, `models/`, `bin/`) and SQLite database:
+Initialize local directories (`data/`, `models/`, `bin/`) and SQLite schema:
 
 ```powershell
 uv run python -m lai.cli init
@@ -49,6 +75,16 @@ Mint an admin API key (copy the one-time `lai_sk_...` secret):
 ```powershell
 uv run python -m lai.cli keys create --name "local-admin" --admin
 uv run python -m lai.cli keys list
+```
+
+Register an OIDC-bound public SPA or desktop client application (no static client secret):
+
+```powershell
+uv run python -m lai.cli apps create `
+  --name "lai-web-spa" `
+  --oauth-client-id "1234567890-webapp.apps.googleusercontent.com" `
+  --tier read
+uv run python -m lai.cli apps list
 ```
 
 Download CUDA `llama-server` binaries, Gemma 4 26B-A4B GGUF, and ShieldGemma-2B GGUF:
@@ -69,79 +105,25 @@ Or on Windows via the PowerShell launcher:
 .\scripts\start-lai.ps1 -ConfigPath config\config.yaml
 ```
 
-## API Examples
+## Multi-Tenant Isolation & Per-Principal Quotas
 
-All protected endpoints accept `Authorization: Bearer lai_sk_...` (or an OIDC JWT when configured).
+LAI isolates workspaces and compute across authenticated principals:
 
-### Health & System Status
+- **Owner Scoping & `404` Anti-Enumeration**: Projects, uploaded files, chat sessions, messages,
+  and tool approvals are bound to `owner_principal_id`. Cross-tenant lookups or mutations by
+  non-admin principals fail with `404 Not Found` (`not_found`) so resource IDs cannot be probed.
+- **Per-Principal Quotas** (configured in `config/config.yaml`, defaults shown):
+  - `max_projects_per_principal: 10`
+  - `max_storage_bytes_per_principal: 1073741824` (1 GiB across uploaded files per principal)
+  - `max_queued_jobs_per_principal: 4` (enforced by `InferenceSpooler`)
+- **Two-Level Fair Scheduling**: `InferenceSpooler` schedules round-robin across `principal_id`
+  first and `session_id` lanes second, preventing one caller with many sessions from starving
+  other tenants.
 
-```powershell
-# Unauthenticated liveness
-curl.exe http://127.0.0.1:8400/v1/health
+## Google OIDC Multi-Audience & Public SPA/Desktop Client Binding
 
-# GPU VRAM, primary Gemma 4, ShieldGemma, spooler & alerts summary
-curl.exe -H "Authorization: Bearer $env:LAI_API_KEY" http://127.0.0.1:8400/v1/system/status
-```
-
-### Create Project & Upload Files (HTTP-Only Ingestion)
-
-```powershell
-# 1. Create a project
-curl.exe -X POST http://127.0.0.1:8400/v1/projects `
-  -H "Authorization: Bearer $env:LAI_API_KEY" `
-  -H "Content-Type: application/json" `
-  -d '{"name":"backend-logs","description":"Production crash diagnostics"}'
-
-# 2. Multipart upload (synchronous; pass ?wait=false for HTTP 202 background CPU indexing)
-curl.exe -X POST "http://127.0.0.1:8400/v1/files?wait=true" `
-  -H "Authorization: Bearer $env:LAI_API_KEY" `
-  -F "project_id=prj_..." `
-  -F "file=@app.log"
-
-# 3. Raw streaming upload (for large files without multipart framing overhead)
-curl.exe -X POST "http://127.0.0.1:8400/v1/files/stream?project_id=prj_..." `
-  -H "Authorization: Bearer $env:LAI_API_KEY" `
-  -H "X-LAI-Filename: huge.log" `
-  --data-binary "@huge.log"
-```
-
-### Chat Sessions & SSE Streaming
-
-```powershell
-# Create session
-curl.exe -X POST http://127.0.0.1:8400/v1/sessions `
-  -H "Authorization: Bearer $env:LAI_API_KEY" `
-  -H "Content-Type: application/json" `
-  -d '{"project_id":"prj_...","title":"Root Cause Investigation"}'
-
-# Send SSE streaming turn (emits keepalives every 10s to prevent proxy 524 timeouts)
-curl.exe -N -X POST http://127.0.0.1:8400/v1/sessions/ses_.../messages `
-  -H "Authorization: Bearer $env:LAI_API_KEY" `
-  -H "Content-Type: application/json" `
-  -d '{"content":"Summarize all errors in the uploaded log","stream":true}'
-```
-
-### OpenAI-Compatible Endpoint
-
-Point any OpenAI SDK or IDE plugin at `http://127.0.0.1:8400/v1`:
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8400/v1/chat/completions `
-  -H "Authorization: Bearer $env:LAI_API_KEY" `
-  -H "Content-Type: application/json" `
-  -H "X-LAI-Project-Id: prj_..." `
-  -H "X-LAI-Context-Mode: auto" `
-  -d '{"model":"gemma4-26b-a4b","messages":[{"role":"user","content":"Explain the top exception"}],"stream":false}'
-```
-
-When ShieldGemma blocks a prompt in `refusal_message` mode, the response carries `X-LAI-Guardrail-Blocked: true` and `X-LAI-Guardrail-Policy: <policy>`.
-
-## Google OIDC JWT Authentication
-
-To accept Google OIDC ID tokens alongside `lai_sk_` API keys:
-
-1. Create an OAuth 2.0 Client ID in Google Cloud Console.
-2. Update `config/config.yaml`:
+LAI supports multiple Google OAuth 2.0 client IDs (for example, a Web SPA client ID and an
+Electron/Desktop native client ID) simultaneously via `oidc_audiences`:
 
 ```yaml
 auth_providers:
@@ -150,51 +132,110 @@ auth_providers:
 oidc_enabled: true
 oidc_issuer_url: "https://accounts.google.com"
 oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
-oidc_audience: "your-client-id.apps.googleusercontent.com"
+oidc_audiences:
+  - "1234567890-webapp.apps.googleusercontent.com"
+  - "1234567890-desktop.apps.googleusercontent.com"
 oidc_allowed_domains:
-  - "example.com"
+  - "yourcompany.com"
 oidc_admin_emails:
-  - "owner@example.com"
+  - "owner@yourcompany.com"
 ```
 
-Tokens are validated via RS256/ES256 against TTL-cached JWKS (`exp`, `iss`, `aud`, `email_verified`) with automatic `kid` rotation refresh.
+Fail-closed startup rules:
 
-## Cloudflare Named Tunnel Setup
+- Enabling OIDC requires non-empty `oidc_audiences` (or legacy `oidc_audience`) **and** non-empty
+  `oidc_allowed_emails` or `oidc_allowed_domains`.
+- Public consumer domains (`gmail.com`, `googlemail.com`, `yahoo.com`, `outlook.com`, `hotmail.com`,
+  `live.com`, `icloud.com`, `aol.com`, `proton.me`, `protonmail.com`) are rejected in
+  `oidc_allowed_domains` — use `oidc_allowed_emails` for individual personal accounts.
 
-Expose `127.0.0.1:8400` securely without opening inbound router ports:
+### Why Public Clients Use `azp` / `aud` Binding Without Secrets
 
-1. Authenticate and create a Named Tunnel:
+Public SPAs and desktop applications cannot keep static client secrets confidential inside browser
+bundles or user-installed binaries. Instead of issuing or accepting static client secrets, LAI
+verifies the Google-signed RS256/ES256 ID token's `azp` claim (when present, required to be in
+`oidc_audiences`) or matched `aud` claim and binds `AuthPrincipal.oauth_client_id`
+cryptographically to that OAuth client ID. Register each client with
+`lai apps create --oauth-client-id <CLIENT_ID>` so client tool execution scopes (`allowed_tiers`,
+`allowed_project_ids`) are enforced purely from verified OIDC identity with zero secrets on the
+client.
+
+## CORS & Cloudflare Named Tunnel
+
+Expose `127.0.0.1:8400` securely over HTTPS without opening inbound firewall ports:
 
 ```powershell
 cloudflared tunnel login
 cloudflared tunnel create lai-local
 cloudflared tunnel route dns lai-local ai.example.com
-```
 
-2. Render `cloudflared` configuration (or customize `deploy/cloudflared/config.template.yml`):
-
-```powershell
 uv run python -m lai.cli tunnel render-config `
   --tunnel "<TUNNEL_UUID>" `
   --hostname "ai.example.com" `
   --output deploy/cloudflared/config.yml
-```
 
-3. Enable Cloudflare Access edge verification in `config/config.yaml` (recommended):
-
-```yaml
-cf_access_enabled: true
-cf_access_team_domain: "your-team.cloudflareaccess.com"
-cf_access_aud: "<ACCESS_APPLICATION_AUD_TAG>"
-```
-
-Service tokens (`CF-Access-Client-Id` / `CF-Access-Client-Secret`) are also supported for automated clients.
-
-4. Run the tunnel:
-
-```powershell
 cloudflared tunnel --config deploy/cloudflared/config.yml run
 ```
+
+Production reverse-proxy & browser configuration in `config/config.yaml`:
+
+```yaml
+cors_allowed_origins:
+  - "https://app.example.com"
+trust_cloudflare_headers: true
+cf_access_enabled: false
+```
+
+- **CORS allowlist**: Specify exact `http://` or `https://` origins in `cors_allowed_origins`;
+  wildcard `"*"` is rejected at startup.
+- **`trust_cloudflare_headers: true`**: Enable **only** when the API server is unreachable outside
+  the Cloudflare Named Tunnel (or trusted proxy) so `CF-Connecting-IP` cannot be spoofed.
+- **`cf_access_enabled: false` for public SPA/Desktop APIs**: When serving browser SPAs or
+  desktop clients authenticated directly via Google OIDC ID tokens (`Authorization: Bearer ...`)
+  and CORS, keep `cf_access_enabled: false` so Cloudflare Access interactive redirects do not
+  intercept CORS preflight `OPTIONS` or bearer API calls. Enable `cf_access_enabled: true` (with
+  `cf_access_team_domain` + `cf_access_aud`, or service token credentials) only for private
+  Cloudflare Access-protected deployments.
+- **100 MB Tunnel Request Body Limit**: Cloudflare Free and Pro plans cap individual HTTP request
+  bodies at **100 MB** (`HTTP 413`). Keep remote tunnel uploads under 100 MB per request (while
+  direct LAN access supports up to `max_upload_bytes`).
+
+## API Reference & Examples
+
+- **Interactive Scalar API Reference**:
+  [https://blake-olinger.github.io/lai/](https://blake-olinger.github.io/lai/)
+- **Checked-in Markdown Reference**: [docs/api-reference.md](docs/api-reference.md)
+- **OpenAPI 3.1 JSON Schema**: [openapi.json](openapi.json)
+
+All protected endpoints accept `Authorization: Bearer <google_id_token>` or
+`Authorization: Bearer lai_sk_...`.
+
+```powershell
+# Unauthenticated liveness
+curl.exe http://127.0.0.1:8400/v1/health
+
+# Create a project & stream-upload a log file
+curl.exe -X POST http://127.0.0.1:8400/v1/projects `
+  -H "Authorization: Bearer $env:LAI_API_KEY" `
+  -H "Content-Type: application/json" `
+  -d '{"name":"backend-logs","description":"Production crash diagnostics"}'
+
+curl.exe -X POST "http://127.0.0.1:8400/v1/files/stream?project_id=prj_..." `
+  -H "Authorization: Bearer $env:LAI_API_KEY" `
+  -H "X-LAI-Filename: app.log" `
+  --data-binary "@app.log"
+
+# OpenAI-compatible chat completions
+curl.exe -X POST http://127.0.0.1:8400/v1/chat/completions `
+  -H "Authorization: Bearer $env:LAI_API_KEY" `
+  -H "Content-Type: application/json" `
+  -H "X-LAI-Project-Id: prj_..." `
+  -H "X-LAI-Context-Mode: auto" `
+  -d '{"model":"gemma4-26b-a4b","messages":[{"role":"user","content":"Explain top errors"}],"stream":false}'
+```
+
+When ShieldGemma blocks a prompt in `refusal_message` mode, the response sets
+`X-LAI-Guardrail-Blocked: true` and `X-LAI-Guardrail-Policy: <policy>`.
 
 ## 24-Hour Rotating Logs & Operational Alerts
 
@@ -202,54 +243,30 @@ LAI rotates structured logs daily at UTC midnight (`data/logs/`):
 
 - `lai.jsonl` — All structured application events (14-day gzip-compressed retention).
 - `errors.jsonl` — `ERROR` and `CRITICAL` events with tracebacks (30-day retention).
-- `prompts_audit.jsonl` — SHA-256 prompt fingerprints, scrubbed text, and ShieldGemma verdicts (30-day retention).
-- `alerts.jsonl` — Emitted `AlertEvent` records (`fatal_exception`, `timeout`, `subprocess_crash`, `storage_failure`, `security_alert`).
+- `prompts_audit.jsonl` — SHA-256 prompt fingerprints, scrubbed text, and ShieldGemma verdicts
+  (30-day retention).
+- `alerts.jsonl` — Emitted `AlertEvent` records (`fatal_exception`, `timeout`, `subprocess_crash`,
+  `storage_failure`, `security_alert`).
 - `llama-server.log` / `shieldgemma-server.log` — Supervised subprocess outputs.
 
-Set `logging.alert_webhook_url` in `config/config.yaml` to receive real-time Slack/Discord/Teams webhook alerts (with 60s cooldown deduplication), or inspect recent alerts via `GET /v1/system/alerts` (requires `admin` scope).
-
-## Phase 2 PowerShell Tool Plugin Guide
-
-`lai.tools` isolates every tool behind `ToolPluginPort`, `DefaultToolPolicy`, and `GuardedToolExecutor`. Phase 1 registers read-only workspace tools (`PermissionTier.READ`). To add a Phase 2 guarded PowerShell execution plugin:
-
-1. Implement `ToolPluginPort` with `PermissionTier.EXEC` and `requires_approval_by_default=True`:
-
-```python
-from typing import Any
-from lai.domain.tools import PermissionTier, ToolExecutionContext, ToolResult, ToolSpec
-from lai.ports.tools import ToolPluginPort
-
-class RunPowerShellPlugin(ToolPluginPort):
-    @property
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name="run_powershell",
-            description="Execute a read-only diagnostic PowerShell command.",
-            permission_tier=PermissionTier.EXEC,
-            requires_approval_by_default=True,
-            timeout_seconds=15.0,
-            parameters_schema={
-                "type": "object",
-                "properties": {"script": {"type": "string"}},
-                "required": ["script"],
-            },
-        )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolResult:
-        # Enforce workspace_root confinement, allowlists, and non-interactive -NoProfile execution.
-        ...
-```
-
-2. Register the plugin in `ToolRegistryPort` (requiring callers to hold `tools:exec` or `admin`).
-3. Because `requires_approval_by_default=True`, invoking the tool persists a `PENDING` `ToolApprovalRecord` and raises `ToolApprovalRequiredError` (`HTTP 409`) or emits `ApprovalRequiredEvent` during streaming.
-4. An operator holding `tools:approve` resolves the request via `POST /v1/tool-approvals/{approval_id}/resolve` (`{"approved": true, "note": "reviewed"}`), transitioning `PENDING -> APPROVED -> EXECUTED` with full audit logging and replay protection.
+Set `logging.alert_webhook_url` in `config/config.yaml` for real-time webhook notifications (60s
+cooldown deduplication), or inspect alerts via `GET /v1/system/alerts` (`admin` scope).
 
 ## Verification
 
+Run the full verification suite (lint, 350-line budget, `basedpyright` + `mypy`, `import-linter`
+boundaries, `>= 90%` branch coverage, OpenAPI/docs sync, and critical-tier `pytest-gremlins`
+mutation testing):
+
 ```powershell
-uv run python scripts/verify.py all --skip-mutate --cov-fail-under 85
+uv run python scripts/verify.py all --tier critical --cov-fail-under 90
 ```
+
+## Security, Contributing & License
+
+- **Security Policy**: [SECURITY.md](SECURITY.md) — private vulnerability disclosure via
+  [GitHub Security Advisories](https://github.com/blake-olinger/lai/security/advisories/new) or
+  `hello@blakeolinger.dev`.
+- **Contributing Guide**: [CONTRIBUTING.md](CONTRIBUTING.md) — development workflow, quality gates,
+  and OpenAPI/docs synchronization.
+- **License**: [Apache License, Version 2.0](LICENSE) (`Copyright 2026 Blake Olinger`).

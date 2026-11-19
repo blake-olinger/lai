@@ -6,7 +6,35 @@ build-backend = "hatchling.build"
 name = "lai"
 version = "0.1.0"
 description = "Local AI platform for multi-project chat, log and code analysis, and guarded tool execution"
+readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.13,<3.14"
+authors = [{ name = "Blake Olinger", email = "hello@blakeolinger.dev" }]
+keywords = [
+    "ai",
+    "llm",
+    "local-ai",
+    "fastapi",
+    "llama-cpp",
+    "ollama",
+    "guardrails",
+    "rag",
+    "oidc",
+    "sse",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -25,6 +53,13 @@ dependencies = [
     "tiktoken>=0.8",
     "PyJWT[crypto]>=2.10",
 ]
+
+[project.urls]
+Homepage = "https://github.com/blake-olinger/lai"
+Documentation = "https://blake-olinger.github.io/lai/"
+Repository = "https://github.com/blake-olinger/lai"
+Issues = "https://github.com/blake-olinger/lai/issues"
+Security = "https://github.com/blake-olinger/lai/security/policy"
 
 [project.scripts]
 lai = "lai.cli.app:main"
@@ -54,6 +89,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["src"]
 filterwarnings = ["error"]
+tmp_path_retention_policy = "none"
 markers = [
     "hardware: Opt-in tests exercising live ONNX models and local inference binaries",
 ]
