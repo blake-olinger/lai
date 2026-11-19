@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from lai.db._schema_analytics import ANALYTICS_AND_RUNTIME_STATEMENTS
+
 if TYPE_CHECKING:
     import aiosqlite
 
@@ -208,6 +210,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_tool_audits_project
         ON tool_audits(project_id, created_at DESC);
     """,
+    *ANALYTICS_AND_RUNTIME_STATEMENTS,
 )
 
 

@@ -16,6 +16,7 @@ from pydantic_settings import (
 
 from lai.config._validators import validate_lai_settings
 from lai.config.profiles import DEFAULT_MODEL_PROFILE_NAME
+from lai.domain.analytics import AnalyticsConfig
 from lai.domain.errors import ValidationFailedError
 from lai.domain.guardrails import GuardrailConfig
 from lai.domain.inference import ModelProfile
@@ -110,6 +111,7 @@ class LaiSettings(BaseSettings):
     default_model_profile: str = DEFAULT_MODEL_PROFILE_NAME
     custom_profiles: dict[str, ModelProfile] = Field(default_factory=dict)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
     guardrails: GuardrailConfig = Field(default_factory=GuardrailConfig)
     log_level: str = "INFO"
     log_json: bool = False

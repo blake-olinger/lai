@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+from lai.domain.analytics import (
+    AnalyticsConfig,
+    AnalyticsReport,
+    EndpointUsageSummary,
+    HourlyUsageBucket,
+    PrincipalUsageSummary,
+    TokenUsageRecord,
+    UsageEvent,
+)
 from lai.domain.auth import (
     ApiKeyRecord,
     ApiScope,
@@ -26,13 +35,19 @@ from lai.domain.observability import (
     AlertCategory,
     AlertEvent,
     AlertSeverity,
+    AlertSinkDeliveryResult,
     LoggingConfig,
+    SmtpAlertConfig,
+    SmtpTlsMode,
 )
 
 __all__ = [
     "AlertCategory",
     "AlertEvent",
     "AlertSeverity",
+    "AlertSinkDeliveryResult",
+    "AnalyticsConfig",
+    "AnalyticsReport",
     "ApiKeyRecord",
     "ApiScope",
     "AuthMethod",
@@ -42,15 +57,22 @@ __all__ = [
     "ClientToolDispatchError",
     "ConflictError",
     "CreatedApiKey",
+    "EndpointUsageSummary",
     "GuardrailBlockMode",
     "GuardrailBlockedError",
     "GuardrailConfig",
     "GuardrailDecision",
     "GuardrailVerdict",
+    "HourlyUsageBucket",
     "InferenceToolCall",
     "LoggingConfig",
+    "PrincipalUsageSummary",
     "PromptAuditEntry",
     "RequestCredentials",
     "SafetyPrinciple",
+    "SmtpAlertConfig",
+    "SmtpTlsMode",
+    "TokenUsageRecord",
+    "UsageEvent",
     "expand_scopes",
 ]

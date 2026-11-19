@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from lai.ports.analytics import RuntimeConfigRepositoryPort, UsageAnalyticsPort
 from lai.ports.auth import AuthenticatorPort, AuthProviderPort, EdgeVerifierPort
 from lai.ports.guardrails import (
     GuardrailPipelinePort,
@@ -19,4 +20,6 @@ __all__ = [
     "GuardrailPipelinePort",
     "GuardrailProviderPort",
     "GuardrailSupervisorPort",
+    "RuntimeConfigRepositoryPort",
+    "UsageAnalyticsPort",
 ]
