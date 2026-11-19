@@ -16,7 +16,6 @@ class Project(StrictModel):
     id: str = Field(default_factory=new_project_id)
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
-    workspace_root: str | None = None
     default_model_profile: str = "gemma4-26b-a4b"
     owner_principal_id: str = Field(default="system", min_length=1)
     created_at: datetime = Field(default_factory=utc_now)
@@ -28,5 +27,4 @@ class CreateProjectInput(StrictModel):
 
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
-    workspace_root: str | None = None
     default_model_profile: str = "gemma4-26b-a4b"

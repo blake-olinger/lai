@@ -140,7 +140,6 @@ def _ctx(
         principal_id="usr_1",
         principal_scopes=scopes,
         allowed_file_ids=("fil_1",),
-        workspace_root="/repo",
         approved_approval_id=approval_id,
         request_id="req_1",
         client_app_id=app_id,

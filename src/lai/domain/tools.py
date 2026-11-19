@@ -67,7 +67,6 @@ class ToolExecutionContext(StrictModel):
     principal_id: str = Field(min_length=1)
     principal_scopes: tuple[ApiScope, ...] = ()
     allowed_file_ids: tuple[str, ...] = ()
-    workspace_root: str | None = None
     approved_approval_id: str | None = None
     request_id: str | None = None
     client_app_id: str | None = None

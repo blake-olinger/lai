@@ -13,7 +13,6 @@ class ProjectCreateRequest(StrictModel):
 
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
-    workspace_root: str | None = None
     default_model_profile: str = "gemma4-26b-a4b"
 
 

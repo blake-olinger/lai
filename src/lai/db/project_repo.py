@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from lai.db._codecs import clamp_limit, clamp_offset, format_dt, parse_dt
 from lai.domain.projects import Project
@@ -14,8 +14,7 @@ if TYPE_CHECKING:
     from lai.db.connection import SqliteDatabase
 
 _SELECT_COLUMNS = (
-    "id, name, description, workspace_root, default_model_profile, "
-    "owner_principal_id, created_at, updated_at"
+    "id, name, description, default_model_profile, owner_principal_id, created_at, updated_at"
 )
 
 
@@ -25,7 +24,6 @@ def _row_to_project(row: aiosqlite.Row) -> Project:
         id=str(row["id"]),
         name=str(row["name"]),
         description=str(row["description"]),
-        workspace_root=cast("str | None", row["workspace_root"]),
         default_model_profile=str(row["default_model_profile"]),
         owner_principal_id=str(row["owner_principal_id"]),
         created_at=parse_dt(str(row["created_at"])),
@@ -44,15 +42,14 @@ class SqliteProjectRepository(ProjectRepositoryPort):
         await self._db.execute_write(
             """
             INSERT INTO projects (
-                id, name, description, workspace_root,
+                id, name, description,
                 default_model_profile, owner_principal_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 project.id,
                 project.name,
                 project.description,
-                project.workspace_root,
                 project.default_model_profile,
                 project.owner_principal_id,
                 format_dt(project.created_at),

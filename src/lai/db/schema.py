@@ -59,7 +59,6 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
-        workspace_root TEXT,
         default_model_profile TEXT NOT NULL,
         owner_principal_id TEXT NOT NULL DEFAULT 'system',
         created_at TEXT NOT NULL,

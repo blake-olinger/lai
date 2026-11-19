@@ -34,7 +34,6 @@ async def create_project(
     project = Project(
         name=body.name,
         description=body.description,
-        workspace_root=body.workspace_root,
         default_model_profile=body.default_model_profile,
         owner_principal_id=principal.principal_id,
     )
