@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from lai.api._client_auth import require_authenticated_client_app
@@ -13,6 +13,7 @@ from lai.api._streaming import (
     guard_orchestrator_sse_frames,
     prime_sse_stream,
 )
+from lai.api._tenancy import is_admin_principal, require_accessible_approval
 from lai.api.deps import (
     AppServices,
     get_services,
@@ -26,7 +27,7 @@ from lai.api.schemas.tools import (
 )
 from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.chat import TurnOutput
-from lai.domain.errors import AuthorizationError, NotFoundError
+from lai.domain.errors import AuthorizationError
 from lai.domain.tools import ToolApprovalRecord, ToolResult
 from lai.scheduler import await_or_keepalive_json
 
@@ -46,18 +47,14 @@ async def list_tools(
 @router.get("/v1/tool-approvals/{approval_id}", response_model=ToolApprovalRecord)
 async def get_tool_approval(
     approval_id: str,
-    _principal: Annotated[
+    principal: Annotated[
         AuthPrincipal,
         Depends(require_any_scope_dep(ApiScope.TOOLS_APPROVE, ApiScope.TOOLS_SAFE)),
     ],
     services: Annotated[AppServices, Depends(get_services)],
 ) -> ToolApprovalRecord:
-    """Fetch status and details for a tool approval request."""
-    record = await services.tool_audit_repo.get_approval(approval_id)
-    if record is None:
-        msg = f"Tool approval {approval_id!r} not found."
-        raise NotFoundError(msg, details={"approval_id": approval_id})
-    return record
+    """Fetch status and details for an accessible tool approval request."""
+    return await require_accessible_approval(services, approval_id, principal)
 
 
 @router.post("/v1/tool-approvals/{approval_id}/resolve", response_model=ToolApprovalRecord)
@@ -68,6 +65,7 @@ async def resolve_tool_approval(
     services: Annotated[AppServices, Depends(get_services)],
 ) -> ToolApprovalRecord:
     """Approve or deny a pending tool execution request (requires TOOLS_APPROVE)."""
+    await require_accessible_approval(services, approval_id, principal)
     return await services.tool_executor.approve_and_execute(
         approval_id=approval_id,
         decided_by=principal.principal_id,
@@ -77,23 +75,16 @@ async def resolve_tool_approval(
 
 
 @router.post("/v1/tool-approvals/{approval_id}/result", response_model=TurnOutput)
-async def submit_tool_result(  # noqa: PLR0913, PLR0917
+async def submit_tool_result(
     approval_id: str,
     body: SubmitToolResultRequest,
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_WRITE))],
     services: Annotated[AppServices, Depends(get_services)],
-    x_lai_client_id: Annotated[str | None, Header(alias="X-LAI-Client-Id")] = None,
-    x_lai_client_secret: Annotated[str | None, Header(alias="X-LAI-Client-Secret")] = None,
 ) -> Response:
     """Submit a client-executed tool result and resume the paused session turn."""
-    client_app = await require_authenticated_client_app(
-        services, x_lai_client_id, x_lai_client_secret
-    )
-    existing = await services.tool_audit_repo.get_approval(approval_id)
-    if existing is None:
-        msg = f"Tool approval {approval_id!r} not found."
-        raise NotFoundError(msg, details={"approval_id": approval_id})
+    client_app = await require_authenticated_client_app(services, principal)
+    existing = await require_accessible_approval(services, approval_id, principal)
     if client_app.allowed_project_ids and existing.project_id not in client_app.allowed_project_ids:
         msg = f"Client app {client_app.id!r} is not authorized for project {existing.project_id!r}."
         raise AuthorizationError(
@@ -113,6 +104,7 @@ async def submit_tool_result(  # noqa: PLR0913, PLR0917
         client_app.id,
         raw_result,
         principal_id=principal.principal_id,
+        is_admin=is_admin_principal(principal),
     )
     updated_approval = (await services.tool_audit_repo.get_approval(approval_id)) or existing
 

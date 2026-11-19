@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import jwt
 from pydantic import Field
@@ -31,10 +31,12 @@ class OidcProviderConfig(StrictModel):
     issuer_url: str = "https://accounts.google.com"
     jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
     audience: str | None = None
+    audiences: tuple[str, ...] = ()
     allowed_emails: tuple[str, ...] = ()
     allowed_domains: tuple[str, ...] = ()
     default_scopes: tuple[ApiScope, ...] = (
         ApiScope.PROJECTS_READ,
+        ApiScope.PROJECTS_WRITE,
         ApiScope.FILES_READ,
         ApiScope.FILES_WRITE,
         ApiScope.CHAT_READ,
@@ -48,6 +50,15 @@ class OidcProviderConfig(StrictModel):
     min_jwks_refresh_interval_seconds: float = Field(default=30.0, ge=0.0)
     require_email_verified: bool = True
     leeway_seconds: float = Field(default=0.0, ge=0.0)
+
+    def resolved_audiences(self) -> tuple[str, ...]:
+        """Return deduplicated, non-empty audiences from audiences and legacy audience."""
+        items = [item.strip() for item in self.audiences if item.strip()]
+        if self.audience is not None:
+            legacy = self.audience.strip()
+            if legacy:
+                items.append(legacy)
+        return tuple(dict.fromkeys(items))
 
 
 def _extract_jwt_bearer(credentials: RequestCredentials) -> str | None:
@@ -109,6 +120,34 @@ def _resolve_scopes(config: OidcProviderConfig, email: str | None) -> tuple[ApiS
     return config.default_scopes
 
 
+def _resolve_oauth_client_id(
+    claims: Mapping[str, Any],
+    resolved_audiences: tuple[str, ...],
+) -> str:
+    """Extract and verify the bound OAuth client ID from OIDC azp or aud claims."""
+    if "azp" in claims and claims["azp"] is not None:
+        azp = claims["azp"]
+        if not isinstance(azp, str) or azp.strip() not in resolved_audiences:
+            get_component_logger("security").warning("oidc_auth_failed", reason="invalid_azp_claim")
+            msg = "OIDC token azp claim is not an authorized client audience."
+            raise AuthenticationError(msg)
+        return azp.strip()
+
+    aud = claims.get("aud")
+    if isinstance(aud, str):
+        cleaned = aud.strip()
+        if cleaned in resolved_audiences:
+            return cleaned
+    elif isinstance(aud, list):
+        for item in cast("list[object]", aud):
+            if isinstance(item, str) and item.strip() in resolved_audiences:
+                return item.strip()
+
+    get_component_logger("security").warning("oidc_auth_failed", reason="unmatched_aud_claim")
+    msg = "OIDC token aud claim did not match any configured audience."
+    raise AuthenticationError(msg)
+
+
 class OidcJwtAuthProvider(AuthProviderPort):
     """Validate OIDC RS256/ES256 ID/access JWTs using TTL-cached JWKS keys."""
 
@@ -151,6 +190,14 @@ class OidcJwtAuthProvider(AuthProviderPort):
             msg = "OIDC authentication is disabled."
             raise AuthenticationError(msg)
 
+        audiences = self._config.resolved_audiences()
+        if not audiences:
+            get_component_logger("security").warning(
+                "oidc_auth_failed", reason="missing_audiences_config"
+            )
+            msg = "OIDC authentication requires at least one configured audience."
+            raise AuthenticationError(msg)
+
         token = _extract_jwt_bearer(credentials)
         if token is None:
             get_component_logger("security").warning(
@@ -161,7 +208,7 @@ class OidcJwtAuthProvider(AuthProviderPort):
 
         alg, kid = self._read_unverified_header(token)
         signing_key = await self._resolve_signing_key(kid)
-        claims = self._decode_and_verify(token, signing_key, alg)
+        claims = self._decode_and_verify(token, signing_key, alg, audiences)
 
         subject = claims.get("sub")
         if not isinstance(subject, str) or not subject.strip():
@@ -169,6 +216,7 @@ class OidcJwtAuthProvider(AuthProviderPort):
             msg = "OIDC token missing subject claim."
             raise AuthenticationError(msg)
 
+        resolved_client_id = _resolve_oauth_client_id(claims, audiences)
         issuer = claims.get("iss")
         issuer_str = issuer if isinstance(issuer, str) else self._config.issuer_url
         email = _validate_email_policy(self._config, claims)
@@ -181,6 +229,7 @@ class OidcJwtAuthProvider(AuthProviderPort):
             email=email,
             issuer=issuer_str,
             subject=subject,
+            oauth_client_id=resolved_client_id,
         )
 
     def _read_unverified_header(self, token: str) -> tuple[str, str | None]:
@@ -232,22 +281,26 @@ class OidcJwtAuthProvider(AuthProviderPort):
         token: str,
         signing_key: jwt.PyJWK,
         algorithm: str,
+        audiences: tuple[str, ...],
     ) -> dict[str, Any]:
-        """Verify signature, exp, iss, and optional aud using PyJWT."""
+        """Verify signature, exp, iss, sub, and aud using PyJWT."""
+        if not audiences:
+            msg = "OIDC authentication requires at least one configured audience."
+            raise AuthenticationError(msg)
         try:
             return jwt.decode(
                 token,
                 signing_key.key,
                 algorithms=[algorithm],
                 issuer=self._config.issuer_url,
-                audience=self._config.audience,
+                audience=list(audiences),
                 leeway=self._config.leeway_seconds,
                 options={
                     "verify_signature": True,
                     "verify_exp": True,
                     "verify_iss": True,
-                    "verify_aud": self._config.audience is not None,
-                    "require": ["exp", "iss", "sub"],
+                    "verify_aud": True,
+                    "require": ["exp", "iss", "sub", "aud"],
                 },
             )
         except jwt.PyJWTError as exc:

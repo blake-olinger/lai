@@ -37,22 +37,13 @@ from lai.domain.errors import ValidationFailedError
 from lai.domain.ids import CLIENT_APP_ID_PREFIX
 from lai.domain.observability import LoggingConfig
 from lai.domain.tools import PermissionTier, ToolExecutionTarget, ToolSpec
-from lai.security import (
-    CLIENT_APP_SECRET_PREFIX,
-    generate_api_key,
-    generate_client_app,
-    hash_client_app_secret,
-    verify_client_app_secret,
-)
+from lai.security import build_client_app, generate_api_key
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Generator
     from pathlib import Path
 
     from lai.ports.repositories import ClientAppRepositoryPort
-
-_EXPECTED_HASH_LEN = 64
-_EXPECTED_PREFIX_LEN = 15
 
 
 @pytest.fixture(autouse=True)
@@ -83,8 +74,7 @@ class _ServicesWithoutApps:
 
 
 def test_client_app_security_generation_hashing_and_is_active() -> None:
-    """generate_client_app validates tiers, coerces CLIENT target, and verifies secrets."""
-    assert CLIENT_APP_SECRET_PREFIX == "lai_app_"  # noqa: S105
+    """build_client_app validates name/oauth_client_id/tiers and coerces CLIENT target."""
     now = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
     tool_in = ToolSpec(
         name="run_local",
@@ -92,46 +82,41 @@ def test_client_app_security_generation_hashing_and_is_active() -> None:
         permission_tier=PermissionTier.EXEC,
         execution_target=ToolExecutionTarget.SERVER_ATTACHMENT,
     )
-    created = generate_client_app(
+    rec = build_client_app(
         "  Desktop Helper  ",
+        oauth_client_id="  google-desktop-cid  ",
         allowed_tiers=(PermissionTier.READ, PermissionTier.EXEC, PermissionTier.READ),
         registered_tools=(tool_in,),
         allowed_project_ids=(" prj_1 ", "", "prj_1", "prj_2"),
         expires_at=now + timedelta(days=7),
         created_at=now,
     )
-    rec = created.record
     assert rec.id.startswith(CLIENT_APP_ID_PREFIX)
     assert rec.name == "Desktop Helper"
-    assert rec.secret_prefix.startswith(CLIENT_APP_SECRET_PREFIX)
-    assert len(rec.secret_prefix) == _EXPECTED_PREFIX_LEN
-    assert len(rec.secret_hash) == _EXPECTED_HASH_LEN
+    assert rec.oauth_client_id == "google-desktop-cid"
+    assert not hasattr(rec, "secret_prefix")
+    assert not hasattr(rec, "secret_hash")
     assert rec.allowed_tiers == (PermissionTier.READ, PermissionTier.EXEC)
     assert rec.allowed_project_ids == ("prj_1", "prj_2")
     assert rec.registered_tools[0].execution_target is ToolExecutionTarget.CLIENT
-    assert created.plaintext_secret.startswith(CLIENT_APP_SECRET_PREFIX)
-    assert hash_client_app_secret(created.plaintext_secret) == rec.secret_hash
-    assert verify_client_app_secret(created.plaintext_secret, rec.secret_hash) is True
-    assert verify_client_app_secret("wrong_secret", rec.secret_hash) is False
-    assert verify_client_app_secret(created.plaintext_secret, "0" * 64) is False
-    assert verify_client_app_secret("", rec.secret_hash) is False
-    assert verify_client_app_secret(created.plaintext_secret, "") is False
-    assert verify_client_app_secret("", hash_client_app_secret("")) is False
 
     assert rec.is_active(now=now) is True
     assert rec.is_active(now=now + timedelta(days=7)) is False
     assert rec.model_copy(update={"revoked_at": now}).is_active(now=now) is False
 
     with pytest.raises(ValidationFailedError, match="must not be empty"):
-        generate_client_app("   ")
+        build_client_app("   ", oauth_client_id="cid-1")
+
+    with pytest.raises(ValidationFailedError, match="OAuth client ID must not be empty"):
+        build_client_app("valid-name", oauth_client_id="   ")
 
     with pytest.raises(ValidationFailedError, match="allowed_tiers"):
-        generate_client_app("bad-tier", (PermissionTier.READ,), (tool_in,))
+        build_client_app("bad-tier", "cid-1", (PermissionTier.READ,), (tool_in,))
 
     dup_a = ToolSpec(name="dup", description="a", permission_tier=PermissionTier.READ)
     dup_b = ToolSpec(name="dup", description="b", permission_tier=PermissionTier.READ)
     with pytest.raises(ValidationFailedError, match="Duplicate"):
-        generate_client_app("dup-tools", (PermissionTier.READ,), (dup_a, dup_b))
+        build_client_app("dup-tools", "cid-1", (PermissionTier.READ,), (dup_a, dup_b))
 
 
 def test_cli_apps_create_list_revoke_and_errors(tmp_path: Path) -> None:
@@ -143,7 +128,19 @@ def test_cli_apps_create_list_revoke_and_errors(tmp_path: Path) -> None:
     assert res_empty.exit_code == 0
     assert "No client apps found." in res_empty.output
 
-    res_bad = runner.invoke(cli_app, ["apps", "create", "--db-path", str(db_path), "--name", "   "])
+    res_bad = runner.invoke(
+        cli_app,
+        [
+            "apps",
+            "create",
+            "--db-path",
+            str(db_path),
+            "--name",
+            "   ",
+            "--oauth-client-id",
+            "cid-bad",
+        ],
+    )
     assert res_bad.exit_code == 1
     assert "validation_failed" in res_bad.output
 
@@ -156,6 +153,8 @@ def test_cli_apps_create_list_revoke_and_errors(tmp_path: Path) -> None:
             str(db_path),
             "--name",
             "vscode-ext",
+            "--oauth-client-id",
+            "cid-vscode",
             "--tier",
             "read",
             "--tier",
@@ -169,19 +168,20 @@ def test_cli_apps_create_list_revoke_and_errors(tmp_path: Path) -> None:
         ],
     )
     assert res_create.exit_code == 0, res_create.output
+    assert "oauth_client_id=cid-vscode" in res_create.output
     assert "Allowed tiers: read,exec | Projects: prj_1,prj_2" in res_create.output
-    assert "lai_app_" in res_create.output
 
     res_list = runner.invoke(cli_app, ["apps", "list", "--db-path", str(db_path)])
     assert res_list.exit_code == 0
     line = res_list.output.strip().splitlines()[0]
     app_id = line.split("\t")[0]
-    assert "\tactive\t[read,exec]\t[prj_1,prj_2]\ttools=0" in line
+    assert "\tcid-vscode\tactive\t[read,exec]\t[prj_1,prj_2]\ttools=0" in line
 
-    expired_app = generate_client_app(
+    expired_app = build_client_app(
         "old-app",
+        oauth_client_id="cid-old",
         expires_at=datetime.now(UTC) - timedelta(hours=1),
-    ).record
+    )
 
     async def _seed_expired() -> None:
         async with SqliteDatabase(db_path) as db:
@@ -203,7 +203,7 @@ def test_cli_apps_create_list_revoke_and_errors(tmp_path: Path) -> None:
 
 
 async def test_admin_client_apps_router_and_schemas(tmp_path: Path) -> None:
-    """Admin `/v1/client-apps` router enforces ADMIN scope, hides secret_hash, and revokes."""
+    """Admin `/v1/client-apps` router enforces ADMIN scope, binds oauth_client_id, and revokes."""
     data_dir = tmp_path / "data"
     settings = LaiSettings(
         data_dir=data_dir,
@@ -239,6 +239,7 @@ async def test_admin_client_apps_router_and_schemas(tmp_path: Path) -> None:
             app.dependency_overrides[get_services] = lambda: wrapped
             payload = {
                 "name": "agent-cli",
+                "oauth_client_id": "cid-agent-cli",
                 "allowed_tiers": ["read", "exec"],
                 "registered_tools": [
                     {
@@ -261,6 +262,7 @@ async def test_admin_client_apps_router_and_schemas(tmp_path: Path) -> None:
                 headers=admin_hdrs,
                 json={
                     "name": "bad-tier",
+                    "oauth_client_id": "cid-bad-tier",
                     "allowed_tiers": ["read"],
                     "registered_tools": payload["registered_tools"],
                 },
@@ -269,10 +271,10 @@ async def test_admin_client_apps_router_and_schemas(tmp_path: Path) -> None:
 
             r_create = await client.post("/v1/client-apps", headers=admin_hdrs, json=payload)
             assert r_create.status_code == S.CREATED
-            created_json = r_create.json()
+            app_obj = r_create.json()
             assert "secret_hash" not in r_create.text
-            assert created_json["client_secret"].startswith(CLIENT_APP_SECRET_PREFIX)
-            app_obj = created_json["app"]
+            assert "client_secret" not in r_create.text
+            assert app_obj["oauth_client_id"] == "cid-agent-cli"
             assert (app_obj["active"], app_obj["registered_tools"][0]["execution_target"]) == (
                 True,
                 "client",

@@ -7,6 +7,37 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import aiosqlite
 
+_CLIENT_APPS_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS client_apps (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        oauth_client_id TEXT NOT NULL,
+        allowed_tiers_json TEXT NOT NULL,
+        registered_tools_json TEXT NOT NULL DEFAULT '[]',
+        allowed_project_ids_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        last_used_at TEXT,
+        expires_at TEXT,
+        revoked_at TEXT
+    );
+    """
+
+_CLIENT_APPS_INDEX_SQL = """
+    CREATE INDEX IF NOT EXISTS idx_client_apps_active
+        ON client_apps(revoked_at, created_at DESC);
+    """
+
+_CLIENT_APPS_OAUTH_UNIQUE_INDEX_SQL = """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_client_apps_oauth_client_id_active
+        ON client_apps(oauth_client_id)
+        WHERE revoked_at IS NULL;
+    """
+
+_PROJECTS_OWNER_INDEX_SQL = """
+    CREATE INDEX IF NOT EXISTS idx_projects_owner
+        ON projects(owner_principal_id, updated_at DESC, created_at DESC);
+    """
+
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS api_keys (
@@ -21,25 +52,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         revoked_at TEXT
     );
     """,
-    """
-    CREATE TABLE IF NOT EXISTS client_apps (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        secret_prefix TEXT NOT NULL,
-        secret_hash TEXT NOT NULL UNIQUE,
-        allowed_tiers_json TEXT NOT NULL,
-        registered_tools_json TEXT NOT NULL DEFAULT '[]',
-        allowed_project_ids_json TEXT NOT NULL DEFAULT '[]',
-        created_at TEXT NOT NULL,
-        last_used_at TEXT,
-        expires_at TEXT,
-        revoked_at TEXT
-    );
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_client_apps_active
-        ON client_apps(revoked_at, created_at DESC);
-    """,
+    _CLIENT_APPS_TABLE_SQL,
+    _CLIENT_APPS_INDEX_SQL,
     """
     CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
@@ -47,6 +61,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         description TEXT NOT NULL DEFAULT '',
         workspace_root TEXT,
         default_model_profile TEXT NOT NULL,
+        owner_principal_id TEXT NOT NULL DEFAULT 'system',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
@@ -197,6 +212,13 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
+_PROJECTS_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    (
+        "owner_principal_id",
+        "ALTER TABLE projects ADD COLUMN owner_principal_id TEXT NOT NULL DEFAULT 'system';",
+    ),
+)
+
 _MESSAGES_MIGRATIONS: tuple[tuple[str, str], ...] = (
     (
         "tool_calls_json",
@@ -251,12 +273,56 @@ async def _migrate_table_columns(
             await conn.execute(alter_sql)
 
 
+async def _has_client_apps_table_unique_constraint(conn: aiosqlite.Connection) -> bool:
+    """Return True if client_apps has an inline UNIQUE constraint (sqlite_autoindex)."""
+    cursor = await conn.execute("PRAGMA index_list(client_apps);")
+    rows = await cursor.fetchall()
+    return any(str(row[3]) == "u" for row in rows)
+
+
+async def _migrate_client_apps_table(conn: aiosqlite.Connection) -> None:
+    """Migrate legacy secret-based or table-wide UNIQUE client_apps tables."""
+    cursor = await conn.execute("PRAGMA table_info(client_apps);")
+    rows = await cursor.fetchall()
+    existing = {str(row[1]) for row in rows}
+    if existing and "oauth_client_id" not in existing:
+        await conn.execute("DROP TABLE IF EXISTS client_apps;")
+        await conn.execute(_CLIENT_APPS_TABLE_SQL)
+        await conn.execute(_CLIENT_APPS_INDEX_SQL)
+    elif existing and await _has_client_apps_table_unique_constraint(conn):
+        new_table_sql = _CLIENT_APPS_TABLE_SQL.replace(
+            "IF NOT EXISTS client_apps", "client_apps__new", 1
+        )
+        await conn.execute(new_table_sql)
+        await conn.execute(
+            """
+            INSERT INTO client_apps__new (
+                id, name, oauth_client_id, allowed_tiers_json,
+                registered_tools_json, allowed_project_ids_json,
+                created_at, last_used_at, expires_at, revoked_at
+            )
+            SELECT
+                id, name, oauth_client_id, allowed_tiers_json,
+                registered_tools_json, allowed_project_ids_json,
+                created_at, last_used_at, expires_at, revoked_at
+            FROM client_apps;
+            """
+        )
+        await conn.execute("DROP TABLE client_apps;")
+        await conn.execute("ALTER TABLE client_apps__new RENAME TO client_apps;")
+        await conn.execute(_CLIENT_APPS_INDEX_SQL)
+    await conn.execute(_CLIENT_APPS_OAUTH_UNIQUE_INDEX_SQL)
+
+
 async def _migrate_existing_tables(conn: aiosqlite.Connection) -> None:
     """Apply backward-compatible column migrations to pre-existing SQLite databases."""
+    await _migrate_table_columns(conn, "PRAGMA table_info(projects);", _PROJECTS_MIGRATIONS)
+    await conn.execute(_PROJECTS_OWNER_INDEX_SQL)
     await _migrate_table_columns(conn, "PRAGMA table_info(messages);", _MESSAGES_MIGRATIONS)
     await _migrate_table_columns(
         conn, "PRAGMA table_info(tool_approvals);", _TOOL_APPROVALS_MIGRATIONS
     )
+    await _migrate_client_apps_table(conn)
 
 
 async def apply_schema(conn: aiosqlite.Connection) -> None:

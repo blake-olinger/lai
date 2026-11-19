@@ -182,18 +182,33 @@ async def open_routes_env(
         await close_app_services(svc)
 
 
+async def _mk_proj(env: RoutesEnv, hdrs: dict[str, str], name: str) -> str:
+    r = await env.client.post("/v1/projects", headers=hdrs, json={"name": name})
+    return str(r.json()["id"])
+
+
+async def _mk_ses(env: RoutesEnv, hdrs: dict[str, str]) -> str:
+    pid = await _mk_proj(env, hdrs, "c")
+    r = await env.client.post("/v1/sessions", headers=hdrs, json={"project_id": pid})
+    return str(r.json()["id"])
+
+
 async def test_health_status_and_alerts_authorization(tmp_path: Path) -> None:
-    """Verify /v1/health request ID, /v1/system/status telemetry, and /v1/system/alerts scope."""
+    """Verify /v1/health request ID and ADMIN scope on /v1/system/status and /v1/system/alerts."""
     async with open_routes_env(tmp_path) as env:
         r_hp = await env.client.get("/v1/health", headers={"X-Request-Id": "req_1"})
         assert (r_hp.status_code, r_hp.headers["X-Request-Id"]) == (S.OK, "req_1")
         assert (await env.client.get("/v1/system/status")).status_code == S.UNAUTHORIZED
+        r_forbid = await env.client.get(
+            "/v1/system/status", headers=bearer_headers(env.toks["reader"])
+        )
+        assert r_forbid.status_code == S.FORBIDDEN
 
         with respx.mock(assert_all_called=True) as mock:
             mock.get("http://127.0.0.1:8081/health").respond(S.OK, json={"status": "ok"})
             mock.get("http://127.0.0.1:8082/health").respond(S.OK, json={"status": "ok"})
             r_st = await env.client.get(
-                "/v1/system/status", headers=bearer_headers(env.toks["reader"])
+                "/v1/system/status", headers=bearer_headers(env.toks["admin"])
             )
         assert r_st.status_code == S.OK
         assert r_st.json()["gpu"]["gpu_name"] == "RTX 3090"
@@ -208,26 +223,19 @@ async def test_projects_crud_and_not_found_envelopes(tmp_path: Path) -> None:
     """Verify project creation, listing, retrieval, and 404 envelopes."""
     async with open_routes_env(tmp_path) as env:
         hdrs = bearer_headers(env.toks["writer"])
-        pid = (await env.client.post("/v1/projects", headers=hdrs, json={"name": "logs"})).json()[
-            "id"
-        ]
+        pid = await _mk_proj(env, hdrs, "logs")
         assert (await env.client.get("/v1/projects", headers=hdrs)).json()["count"] == 1
         assert (await env.client.get(f"/v1/projects/{pid}", headers=hdrs)).json()["id"] == pid
-        assert (await env.client.get("/v1/projects/prj_nope", headers=hdrs)).status_code == (
-            S.NOT_FOUND
-        )
-        assert (await env.client.delete("/v1/projects/prj_nope", headers=hdrs)).status_code == (
-            S.NOT_FOUND
-        )
+        r_get_404 = await env.client.get("/v1/projects/prj_nope", headers=hdrs)
+        r_del_404 = await env.client.delete("/v1/projects/prj_nope", headers=hdrs)
+        assert (r_get_404.status_code, r_del_404.status_code) == (S.NOT_FOUND, S.NOT_FOUND)
 
 
 async def test_files_multipart_stream_async_poll_and_cascade_delete(tmp_path: Path) -> None:
     """Verify multipart/stream file upload, ?wait=false polling, and blob cascade delete."""
     async with open_routes_env(tmp_path) as env:
         hdrs = bearer_headers(env.toks["writer"])
-        pid = (await env.client.post("/v1/projects", headers=hdrs, json={"name": "logs"})).json()[
-            "id"
-        ]
+        pid = await _mk_proj(env, hdrs, "logs")
 
         r_up = await env.client.post(
             "/v1/files?wait=true",
@@ -274,10 +282,7 @@ async def test_session_message_returns_reply(tmp_path: Path) -> None:
     """Verify non-streaming session turn returns orchestrator reply."""
     async with open_routes_env(tmp_path) as env:
         hdrs = bearer_headers(env.toks["writer"])
-        pid = (await env.client.post("/v1/projects", headers=hdrs, json={"name": "c"})).json()["id"]
-        sid = (
-            await env.client.post("/v1/sessions", headers=hdrs, json={"project_id": pid})
-        ).json()["id"]
+        sid = await _mk_ses(env, hdrs)
         r_msg = await env.client.post(
             f"/v1/sessions/{sid}/messages", headers=hdrs, json={"content": "hi"}
         )
@@ -289,14 +294,9 @@ async def test_session_message_guardrail_blocked_sse_sets_headers(tmp_path: Path
     orch = FakeOrch(blocked=True, policy="no_prompt_injection")
     async with open_routes_env(tmp_path, orch=orch) as env:
         hdrs = bearer_headers(env.toks["writer"])
-        pid = (await env.client.post("/v1/projects", headers=hdrs, json={"name": "c"})).json()["id"]
-        sid = (
-            await env.client.post("/v1/sessions", headers=hdrs, json={"project_id": pid})
-        ).json()["id"]
+        sid = await _mk_ses(env, hdrs)
         r_sse = await env.client.post(
-            f"/v1/sessions/{sid}/messages",
-            headers=hdrs,
-            json={"content": "x", "stream": True},
+            f"/v1/sessions/{sid}/messages", headers=hdrs, json={"content": "x", "stream": True}
         )
         assert r_sse.headers["X-LAI-Guardrail-Blocked"] == "true"
         assert r_sse.headers["X-LAI-Guardrail-Policy"] == "no_prompt_injection"
@@ -311,15 +311,28 @@ async def test_openai_models_and_routing_headers(tmp_path: Path) -> None:
         models = (await env.client.get("/v1/models", headers=hdrs)).json()["data"]
         assert "gemma4-26b-a4b" in [m["id"] for m in models]
 
+        pid = await _mk_proj(env, hdrs, "oai")
+        fids = [
+            (
+                await env.client.post(
+                    "/v1/files?wait=true",
+                    headers=hdrs,
+                    data={"project_id": pid},
+                    files={"file": (fn, b"INFO ok\n", "text/plain")},
+                )
+            ).json()["id"]
+            for fn in ("a.log", "b.log")
+        ]
+
         oai_hdrs = {
             **hdrs,
-            "X-LAI-Project-Id": "prj_1",
-            "X-LAI-File-Ids": "fil_a, fil_b",
+            "X-LAI-Project-Id": pid,
+            "X-LAI-File-Ids": f"{fids[0]}, {fids[1]}",
             "X-LAI-Context-Mode": "retrieval",
         }
         r_c = await env.client.post("/v1/chat/completions", headers=oai_hdrs, json=_CHAT_JSON)
         assert r_c.status_code == S.OK
-        assert env.orch.calls[-1].attached_file_ids == ("fil_a", "fil_b")
+        assert env.orch.calls[-1].attached_file_ids == tuple(fids)
         assert env.orch.calls[-1].context_mode is dc.ContextMode.RETRIEVAL
 
 
@@ -329,9 +342,7 @@ async def test_openai_stream_guardrail_blocked_sse_sets_headers(tmp_path: Path) 
     async with open_routes_env(tmp_path, orch=orch) as env:
         hdrs = bearer_headers(env.toks["writer"])
         r_oai = await env.client.post(
-            "/v1/chat/completions",
-            headers=hdrs,
-            json={**_CHAT_JSON, "stream": True},
+            "/v1/chat/completions", headers=hdrs, json={**_CHAT_JSON, "stream": True}
         )
         assert r_oai.headers["X-LAI-Guardrail-Blocked"] == "true"
         assert "chat.completion.chunk" in r_oai.text

@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from lai.domain.auth import ApiScope
 from lai.domain.chat import (
     ContextMode,
     InferenceToolCall,
@@ -236,6 +237,7 @@ async def run_client_tool_resume_stream(
                 project_id=session.project_id,
                 principal_id=principal.principal_id,
                 priority=JobPriority.APPROVAL_RESUME,
+                bypass_principal_quota=principal.has_scope(ApiScope.ADMIN),
             )
 
             log.info(

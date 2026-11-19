@@ -97,6 +97,7 @@ class ToolExecutorPort(Protocol):
         result: ToolResult,
         *,
         principal_id: str,
+        is_admin: bool = False,
     ) -> ToolResult:
         """Validate, sanitize, guardrail-scan, and consume an approved client tool lease."""
         ...

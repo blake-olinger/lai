@@ -378,7 +378,7 @@
       },
       "ClientAppResponse": {
         "additionalProperties": false,
-        "description": "Public metadata for a registered client application without secret_hash.",
+        "description": "Public metadata for a registered OIDC-bound client application.",
         "properties": {
           "active": {
             "title": "Active",
@@ -438,6 +438,12 @@
             "title": "Name",
             "type": "string"
           },
+          "oauth_client_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Oauth Client Id",
+            "type": "string"
+          },
           "registered_tools": {
             "items": {
               "$ref": "#/components/schemas/ToolSpec"
@@ -456,18 +462,12 @@
               }
             ],
             "title": "Revoked At"
-          },
-          "secret_prefix": {
-            "maxLength": 32,
-            "minLength": 4,
-            "title": "Secret Prefix",
-            "type": "string"
           }
         },
         "required": [
           "id",
           "name",
-          "secret_prefix",
+          "oauth_client_id",
           "allowed_tiers",
           "registered_tools",
           "allowed_project_ids",
@@ -584,7 +584,7 @@
       },
       "CreateClientAppRequest": {
         "additionalProperties": false,
-        "description": "Payload for registering a new client application.",
+        "description": "Payload for registering a new OIDC-bound client application.",
         "properties": {
           "allowed_project_ids": {
             "default": [],
@@ -622,6 +622,12 @@
             "title": "Name",
             "type": "string"
           },
+          "oauth_client_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Oauth Client Id",
+            "type": "string"
+          },
           "registered_tools": {
             "default": [],
             "items": {
@@ -632,29 +638,10 @@
           }
         },
         "required": [
-          "name"
+          "name",
+          "oauth_client_id"
         ],
         "title": "CreateClientAppRequest",
-        "type": "object"
-      },
-      "CreatedClientAppResponse": {
-        "additionalProperties": false,
-        "description": "One-time response returning a newly registered client app and its plaintext secret.",
-        "properties": {
-          "app": {
-            "$ref": "#/components/schemas/ClientAppResponse"
-          },
-          "client_secret": {
-            "minLength": 16,
-            "title": "Client Secret",
-            "type": "string"
-          }
-        },
-        "required": [
-          "app",
-          "client_secret"
-        ],
-        "title": "CreatedClientAppResponse",
         "type": "object"
       },
       "DeleteResponse": {
@@ -1783,6 +1770,12 @@
             "title": "Name",
             "type": "string"
           },
+          "owner_principal_id": {
+            "default": "system",
+            "minLength": 1,
+            "title": "Owner Principal Id",
+            "type": "string"
+          },
           "updated_at": {
             "format": "date-time",
             "title": "Updated At",
@@ -2799,38 +2792,6 @@
               ],
               "title": "X-Lai-Context-Mode"
             }
-          },
-          {
-            "in": "header",
-            "name": "X-LAI-Client-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Lai-Client-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-LAI-Client-Secret",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Lai-Client-Secret"
-            }
           }
         ],
         "requestBody": {
@@ -2873,7 +2834,7 @@
     },
     "/v1/client-apps": {
       "get": {
-        "description": "List all registered client applications without exposing secret hashes.",
+        "description": "List all registered client applications and their bound OAuth client IDs.",
         "operationId": "list_client_apps_v1_client_apps_get",
         "responses": {
           "200": {
@@ -2893,7 +2854,7 @@
         ]
       },
       "post": {
-        "description": "Register a new client application and return its one-time plaintext secret.",
+        "description": "Register a new client application bound to an OAuth client ID.",
         "operationId": "create_client_app_v1_client_apps_post",
         "requestBody": {
           "content": {
@@ -2910,7 +2871,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreatedClientAppResponse"
+                  "$ref": "#/components/schemas/ClientAppResponse"
                 }
               }
             },
@@ -2978,7 +2939,7 @@
     },
     "/v1/files": {
       "get": {
-        "description": "List uploaded files scoped to a project.",
+        "description": "List uploaded files scoped to an accessible project.",
         "operationId": "list_files_v1_files_get",
         "parameters": [
           {
@@ -3245,7 +3206,7 @@
         ]
       },
       "get": {
-        "description": "Fetch metadata and deterministic summaries for an uploaded file.",
+        "description": "Fetch metadata and deterministic summaries for an accessible uploaded file.",
         "operationId": "get_file_v1_files__file_id__get",
         "parameters": [
           {
@@ -3409,7 +3370,7 @@
     },
     "/v1/projects": {
       "get": {
-        "description": "List workspace projects.",
+        "description": "List workspace projects scoped to the caller (or all projects for admins).",
         "operationId": "list_projects_v1_projects_get",
         "parameters": [
           {
@@ -3590,7 +3551,7 @@
     },
     "/v1/sessions": {
       "get": {
-        "description": "List chat sessions belonging to a project.",
+        "description": "List chat sessions belonging to an accessible project.",
         "operationId": "list_sessions_v1_sessions_get",
         "parameters": [
           {
@@ -3655,7 +3616,7 @@
         ]
       },
       "post": {
-        "description": "Create a new chat session scoped to an existing project.",
+        "description": "Create a new chat session scoped to an accessible project.",
         "operationId": "create_session_v1_sessions_post",
         "requestBody": {
           "content": {
@@ -3697,7 +3658,7 @@
     },
     "/v1/sessions/{session_id}": {
       "delete": {
-        "description": "Delete a chat session and its messages.",
+        "description": "Delete a chat session and its messages after verifying ownership.",
         "operationId": "delete_session_v1_sessions__session_id__delete",
         "parameters": [
           {
@@ -3791,38 +3752,6 @@
             "schema": {
               "title": "Session Id",
               "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-LAI-Client-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Lai-Client-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-LAI-Client-Secret",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Lai-Client-Secret"
             }
           }
         ],
@@ -3934,7 +3863,7 @@
     },
     "/v1/tool-approvals/{approval_id}": {
       "get": {
-        "description": "Fetch status and details for a tool approval request.",
+        "description": "Fetch status and details for an accessible tool approval request.",
         "operationId": "get_tool_approval_v1_tool_approvals__approval_id__get",
         "parameters": [
           {
@@ -4040,38 +3969,6 @@
             "schema": {
               "title": "Approval Id",
               "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-LAI-Client-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Lai-Client-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-LAI-Client-Secret",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Lai-Client-Secret"
             }
           }
         ],

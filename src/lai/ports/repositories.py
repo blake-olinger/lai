@@ -57,6 +57,10 @@ class ClientAppRepositoryPort(Protocol):
         """Fetch a client application record by ID."""
         ...
 
+    async def get_by_oauth_client_id(self, oauth_client_id: str) -> ClientAppRecord | None:
+        """Fetch a client application record by its bound OAuth client ID."""
+        ...
+
     async def list_all(self) -> list[ClientAppRecord]:
         """List all persisted client application records."""
         ...
@@ -84,6 +88,19 @@ class ProjectRepositoryPort(Protocol):
 
     async def list_all(self, limit: int = 100, offset: int = 0) -> list[Project]:
         """List projects ordered by creation or update time."""
+        ...
+
+    async def list_for_owner(
+        self,
+        owner_principal_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Project]:
+        """List projects owned by a specific principal."""
+        ...
+
+    async def count_for_owner(self, owner_principal_id: str) -> int:
+        """Count projects owned by a specific principal."""
         ...
 
     async def delete(self, project_id: str) -> bool:
@@ -176,6 +193,10 @@ class FileRepositoryPort(Protocol):
 
     async def delete_file(self, file_id: str) -> bool:
         """Delete a file record and its chunks, returning True if found."""
+        ...
+
+    async def sum_bytes_for_owner(self, owner_principal_id: str) -> int:
+        """Return total file bytes stored across projects owned by a principal."""
         ...
 
 

@@ -32,6 +32,7 @@ from lai.ports.inference import InferenceProviderPort
 from tests.integration._helpers import (
     IntegrationHarness,
     IntegrationSpec,
+    configure_test_oidc,
     create_project,
     create_session,
     mint_auth_headers,
@@ -81,7 +82,11 @@ class _ClientToolEnv:
 
 
 @asynccontextmanager
-async def _open_client_tool_env(tmp_path: Path) -> AsyncGenerator[_ClientToolEnv]:
+async def _open_client_tool_env(
+    tmp_path: Path,
+    *,
+    allow_exec: bool = True,
+) -> AsyncGenerator[_ClientToolEnv]:
     data_dir = tmp_path / "data"
     settings = LaiSettings(
         data_dir=data_dir,
@@ -95,19 +100,31 @@ async def _open_client_tool_env(tmp_path: Path) -> AsyncGenerator[_ClientToolEnv
         use_hash_embedder=True,
     )
     async with open_services_harness(settings, spec) as harness:
-        h_chat_base = await mint_auth_headers(
+        scopes: tuple[ApiScope, ...] = (
+            (
+                ApiScope.PROJECTS_READ,
+                ApiScope.PROJECTS_WRITE,
+                ApiScope.CHAT_READ,
+                ApiScope.CHAT_WRITE,
+                ApiScope.TOOLS_EXEC,
+            )
+            if allow_exec
+            else (
+                ApiScope.PROJECTS_READ,
+                ApiScope.PROJECTS_WRITE,
+                ApiScope.CHAT_READ,
+                ApiScope.CHAT_WRITE,
+                ApiScope.TOOLS_SAFE,
+            )
+        )
+        oidc = configure_test_oidc(
             harness.svc,
-            "chat_only",
-            (ApiScope.PROJECTS_WRITE, ApiScope.CHAT_WRITE, ApiScope.TOOLS_SAFE),
+            audiences=("ps-helper-client",),
+            default_scopes=scopes,
         )
-        h_exec_base = await mint_auth_headers(
-            harness.svc,
-            "exec_user",
-            (ApiScope.PROJECTS_READ, ApiScope.CHAT_WRITE, ApiScope.TOOLS_EXEC),
-        )
-        h_approve = await mint_auth_headers(
-            harness.svc, "approver", (ApiScope.TOOLS_SAFE, ApiScope.TOOLS_APPROVE)
-        )
+        h_chat = oidc.mint_headers(sub="chat-only", email="chat@acme.test", aud="ps-helper-client")
+        h_exec = oidc.mint_headers(sub="exec-user", email="exec@acme.test", aud="ps-helper-client")
+        h_approve = await mint_auth_headers(harness.svc, "approver-admin", (ApiScope.ADMIN,))
         ps_spec = ToolSpec(
             name="powershell_preview",
             description="Preview a local PowerShell command.",
@@ -116,28 +133,29 @@ async def _open_client_tool_env(tmp_path: Path) -> AsyncGenerator[_ClientToolEnv
             requires_approval_by_default=True,
             execution_target=ToolExecutionTarget.CLIENT,
         )
-        app_id, app_secret = await register_client_app(
+        await register_client_app(
             harness.svc,
             "ps-helper",
+            oauth_client_id="ps-helper-client",
             allowed_tiers=(PermissionTier.READ, PermissionTier.EXEC),
             registered_tools=(ps_spec,),
         )
-        cli_hdrs = {"X-LAI-Client-Id": app_id, "X-LAI-Client-Secret": app_secret}
-        pid = await create_project(harness.client, h_chat_base, "tp")
-        sid = await create_session(harness.client, h_chat_base, pid)
+        owner_hdrs = h_exec if allow_exec else h_chat
+        pid = await create_project(harness.client, owner_hdrs, "tp")
+        sid = await create_session(harness.client, owner_hdrs, pid)
         yield _ClientToolEnv(
             harness=harness,
             project_id=pid,
             session_id=sid,
-            h_chat={**h_chat_base, **cli_hdrs},
-            h_exec={**h_exec_base, **cli_hdrs},
+            h_chat=h_chat,
+            h_exec=h_exec,
             h_approve=h_approve,
         )
 
 
 async def test_client_exec_tool_denied_without_tools_exec_scope(tmp_path: Path) -> None:
     """Caller without TOOLS_EXEC hits PolicyDecision.DENY and writes policy_denied audit."""
-    async with _open_client_tool_env(tmp_path) as env:
+    async with _open_client_tool_env(tmp_path, allow_exec=False) as env:
         r_deny = await env.client.post(
             f"/v1/sessions/{env.session_id}/messages",
             headers=env.h_chat,

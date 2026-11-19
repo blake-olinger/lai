@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from lai.api.errors import register_exception_handlers
 from lai.api.middleware import RequestContextMiddleware
@@ -60,10 +61,36 @@ def create_app(
         title=APP_TITLE,
         version=APP_VERSION,
         lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
     if services is not None:
         app.state.services = services
 
+    if resolved_settings.cors_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(resolved_settings.cors_allowed_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "X-Request-Id",
+                "X-LAI-Project-Id",
+                "X-LAI-Session-Id",
+                "X-LAI-File-Ids",
+                "X-LAI-Filename",
+                "X-LAI-Context-Mode",
+            ],
+            expose_headers=[
+                "X-Request-Id",
+                "Retry-After",
+                "X-LAI-Guardrail-Blocked",
+                "X-LAI-Guardrail-Policy",
+            ],
+        )
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
     app.include_router(api_router)

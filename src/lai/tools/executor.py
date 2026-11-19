@@ -149,10 +149,8 @@ class GuardedToolExecutor(ToolExecutorPort):
         if meta.decision is PolicyDecision.DENY:
             await record_tool_audit(self._audit_repo, meta, success=False, error="policy_denied")
             msg = f"Principal {context.principal_id!r} is denied access to tool {tool_name!r}."
-            raise AuthorizationError(
-                msg,
-                details={"tool_name": tool_name, "permission_tier": spec.permission_tier.value},
-            )
+            details = {"tool_name": tool_name, "permission_tier": spec.permission_tier.value}
+            raise AuthorizationError(msg, details=details)
 
         if meta.decision is PolicyDecision.REQUIRE_APPROVAL:
             await self._raise_approval_required(meta)
@@ -188,10 +186,8 @@ class GuardedToolExecutor(ToolExecutorPort):
             raise NotFoundError(msg, details={"approval_id": approval_id})
         if record.status is not ApprovalStatus.PENDING:
             msg = f"Tool approval {approval_id!r} is already {record.status.value!r}."
-            raise ValidationFailedError(
-                msg,
-                details={"approval_id": approval_id, "status": record.status.value},
-            )
+            details = {"approval_id": approval_id, "status": record.status.value}
+            raise ValidationFailedError(msg, details=details)
 
         decided_at = utc_now()
         if not approved:
@@ -240,6 +236,7 @@ class GuardedToolExecutor(ToolExecutorPort):
         result: ToolResult,
         *,
         principal_id: str,
+        is_admin: bool = False,
     ) -> ToolResult:
         """Validate, sanitize, guardrail-scan, and consume an approved client tool lease."""
         return await submit_client_tool_result(
@@ -249,6 +246,7 @@ class GuardedToolExecutor(ToolExecutorPort):
             client_app_id=client_app_id,
             result=result,
             principal_id=principal_id,
+            is_admin=is_admin,
             max_output_chars=self._max_output_chars,
             max_payload_bytes=self._max_payload_bytes,
         )
@@ -307,11 +305,9 @@ class GuardedToolExecutor(ToolExecutorPort):
             self._audit_repo, pending_meta, success=False, error="approval_required"
         )
         msg = f"Tool {spec.name!r} requires explicit approval."
+        details = {"permission_tier": spec.permission_tier.value}
         raise ToolApprovalRequiredError(
-            msg,
-            approval_id=saved.id,
-            tool_name=spec.name,
-            details={"permission_tier": spec.permission_tier.value},
+            msg, approval_id=saved.id, tool_name=spec.name, details=details
         )
 
     async def _consume_approved_request(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from lai.domain.auth import ApiScope
 from lai.domain.chat import OrchestratorEvent, ProgressEvent
 from lai.domain.scheduler import JobPriority, LeaseRequest
 from lai.domain.tools import ToolExecutionContext
@@ -90,6 +91,7 @@ async def run_retrieval_stream(  # noqa: PLR0913
         project_id=turn_input.project_id,
         principal_id=principal.principal_id,
         priority=JobPriority.INTERACTIVE,
+        bypass_principal_quota=principal.has_scope(ApiScope.ADMIN),
     )
     async for item in run_tool_loop(
         ToolLoopParams(

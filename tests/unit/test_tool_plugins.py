@@ -90,6 +90,9 @@ class _RecordingFileRepo(FileRepositoryPort):
         self.chunks_by_file.pop(file_id, None)
         return self.files.pop(file_id, None) is not None
 
+    async def sum_bytes_for_owner(self, owner_principal_id: str) -> int:
+        return sum(f.size_bytes for f in self.files.values() if owner_principal_id)
+
 
 class _RecordingBlobStore(BlobStorePort):
     def __init__(self) -> None:
@@ -342,7 +345,5 @@ async def test_get_file_overview_and_default_registry() -> None:
 
     specs = build_default_tool_registry(repo, blob).list_specs()
     assert {s.name for s in specs} == {"search_files", "read_file_lines", "get_file_overview"}
-    assert all(
-        s.permission_tier is PermissionTier.READ and not s.requires_approval_by_default
-        for s in specs
-    )
+    assert all(s.permission_tier is PermissionTier.READ for s in specs)
+    assert all(not s.requires_approval_by_default for s in specs)

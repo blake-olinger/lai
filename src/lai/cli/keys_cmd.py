@@ -18,6 +18,7 @@ keys_app = typer.Typer(name="keys", no_args_is_help=True, help="Manage LAI API k
 
 _DEFAULT_USER_SCOPES: tuple[ApiScope, ...] = (
     ApiScope.PROJECTS_READ,
+    ApiScope.PROJECTS_WRITE,
     ApiScope.FILES_READ,
     ApiScope.FILES_WRITE,
     ApiScope.CHAT_READ,

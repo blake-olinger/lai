@@ -1,4 +1,4 @@
-"""Admin REST routes for managing registered client applications."""
+"""Admin REST routes for managing OIDC-bound registered client applications."""
 
 from __future__ import annotations
 
@@ -11,14 +11,13 @@ from lai.api.schemas.client_apps import (
     ClientAppListResponse,
     ClientAppResponse,
     CreateClientAppRequest,
-    CreatedClientAppResponse,
 )
 from lai.api.schemas.common import DeleteResponse
 from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.base import utc_now
 from lai.domain.errors import LaiError, NotFoundError
 from lai.ports.repositories import ClientAppRepositoryPort
-from lai.security import generate_client_app
+from lai.security import build_client_app
 
 router = APIRouter(prefix="/v1/client-apps", tags=["client-apps"])
 
@@ -32,26 +31,24 @@ def _get_client_app_repo(services: AppServices) -> ClientAppRepositoryPort:
     return repo
 
 
-@router.post("", response_model=CreatedClientAppResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ClientAppResponse, status_code=status.HTTP_201_CREATED)
 async def create_client_app(
     body: CreateClientAppRequest,
     _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.ADMIN))],
     services: Annotated[AppServices, Depends(get_services)],
-) -> CreatedClientAppResponse:
-    """Register a new client application and return its one-time plaintext secret."""
+) -> ClientAppResponse:
+    """Register a new client application bound to an OAuth client ID."""
     repo = _get_client_app_repo(services)
-    created = generate_client_app(
+    record = build_client_app(
         name=body.name,
+        oauth_client_id=body.oauth_client_id,
         allowed_tiers=body.allowed_tiers,
         registered_tools=body.registered_tools,
         allowed_project_ids=body.allowed_project_ids,
         expires_at=body.expires_at,
     )
-    saved = await repo.create(created.record)
-    return CreatedClientAppResponse(
-        app=ClientAppResponse.from_record(saved),
-        client_secret=created.plaintext_secret,
-    )
+    saved = await repo.create(record)
+    return ClientAppResponse.from_record(saved)
 
 
 @router.get("", response_model=ClientAppListResponse)
@@ -59,7 +56,7 @@ async def list_client_apps(
     _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.ADMIN))],
     services: Annotated[AppServices, Depends(get_services)],
 ) -> ClientAppListResponse:
-    """List all registered client applications without exposing secret hashes."""
+    """List all registered client applications and their bound OAuth client IDs."""
     repo = _get_client_app_repo(services)
     records = await repo.list_all()
     now = utc_now()

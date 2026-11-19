@@ -12,8 +12,8 @@ from lai.domain.auth import (
     expand_scopes,
 )
 from lai.domain.chat import ClientToolCallEvent, InferenceToolCall
-from lai.domain.client_apps import ClientAppRecord, CreatedClientApp
-from lai.domain.errors import ClientToolDispatchError, GuardrailBlockedError
+from lai.domain.client_apps import ClientAppRecord
+from lai.domain.errors import ClientToolDispatchError, ConflictError, GuardrailBlockedError
 from lai.domain.guardrails import (
     GuardrailBlockMode,
     GuardrailConfig,
@@ -40,8 +40,8 @@ __all__ = [
     "ClientAppRecord",
     "ClientToolCallEvent",
     "ClientToolDispatchError",
+    "ConflictError",
     "CreatedApiKey",
-    "CreatedClientApp",
     "GuardrailBlockMode",
     "GuardrailBlockedError",
     "GuardrailConfig",

@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts._verify_targets import (  # noqa: E402
     CRITICAL_MUTATION_TARGETS,
     MutationTier,
+    isolated_temp_env,
     resolve_mutation_targets,
 )
 
@@ -106,7 +107,8 @@ def cmd_test(cov_fail_under: int = DEFAULT_COV_FAIL_UNDER) -> int:
         "--cov-branch",
         f"--cov-fail-under={cov_fail_under}",
     ]
-    return _run_python_module("pytest", *args)
+    with isolated_temp_env():
+        return _run_python_module("pytest", *args)
 
 
 def cmd_schema() -> int:
@@ -204,17 +206,18 @@ def cmd_mutate(
     resolved_targets = resolve_mutation_targets(tier=tier, targets=targets)
     existed_before = (REPO_ROOT / "coverage").exists()
     report_path = REPO_ROOT / GREMLINS_JSON_REL
-    rc = _run_python_module(
-        "pytest",
-        "--gremlins",
-        "--gremlin-parallel",
-        f"--gremlin-workers={workers}",
-        f"--gremlin-mutant-timeout={mutant_timeout}",
-        f"--gremlin-targets={resolved_targets}",
-        "--gremlin-report=console,json",
-        "tests/unit",
-        "tests/integration",
-    )
+    with isolated_temp_env():
+        rc = _run_python_module(
+            "pytest",
+            "--gremlins",
+            "--gremlin-parallel",
+            f"--gremlin-workers={workers}",
+            f"--gremlin-mutant-timeout={mutant_timeout}",
+            f"--gremlin-targets={resolved_targets}",
+            "--gremlin-report=console,json",
+            "tests/unit",
+            "tests/integration",
+        )
     if rc == 0:
         rc = evaluate_gremlins_report(report_path, min_score)
     if rc != 0:

@@ -297,13 +297,16 @@ async def test_oidc_header_sub_email_domain_normalization_and_leeway() -> None:
     vip = await provider.authenticate(_bearer(_sign_token(rsa_priv, email="vip@other.org")))
     assert vip.scopes == cfg.default_scopes
 
-    strict_cfg = _oidc_cfg(audience=None, require_email_verified=False)
+    strict_cfg = _oidc_cfg(require_email_verified=False)
     strict_p = OidcJwtAuthProvider(strict_cfg, jwks_fetcher=fetcher)
-    await _expect_oidc_err(strict_p, _bearer(admin_tok))
-    anon = _sign_token(rsa_priv, email_verified=False, drop=("email", "aud"))
-    assert (await strict_p.authenticate(_bearer(anon))).email is None
-    free = _sign_token(rsa_priv, kid="", email="free@any.org", drop=("aud",))
+    await _expect_oidc_err(strict_p, _bearer(_sign_token(rsa_priv, drop=("aud",))))
+    anon = _sign_token(rsa_priv, email_verified=False, drop=("email",))
+    anon_p = await strict_p.authenticate(_bearer(anon))
+    assert (anon_p.email, anon_p.oauth_client_id) == (None, _AUDIENCE)
+    free = _sign_token(rsa_priv, kid="", email="free@any.org")
     assert (await strict_p.authenticate(_bearer(free))).email == "free@any.org"
+    no_aud_p = OidcJwtAuthProvider(_oidc_cfg(audience=None), jwks_fetcher=fetcher)
+    await _expect_oidc_err(no_aud_p, _bearer(admin_tok))
 
 
 async def test_oidc_cooldown_stampede_multikey_malformed_jwk_and_http_client() -> None:

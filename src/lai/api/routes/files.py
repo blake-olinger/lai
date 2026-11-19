@@ -19,11 +19,16 @@ from fastapi import (
     status,
 )
 
+from lai.api._tenancy import (
+    enforce_and_wrap_storage_quota,
+    require_accessible_file,
+    require_accessible_project,
+)
 from lai.api.deps import AppServices, get_services, require_scope_dep
 from lai.api.schemas.common import DeleteResponse
 from lai.api.schemas.files import FileChunkListResponse, FileListResponse
 from lai.domain.auth import ApiScope, AuthPrincipal
-from lai.domain.errors import NotFoundError, ValidationFailedError
+from lai.domain.errors import ValidationFailedError
 from lai.domain.files import FileRecord, FileStatus
 from lai.domain.ids import new_file_id
 from lai.ingestion.detector import detect_file_kind
@@ -56,21 +61,16 @@ async def _iter_upload_file(upload: UploadFile) -> AsyncIterator[bytes]:
         yield chunk
 
 
-async def _ensure_project_exists(services: AppServices, project_id: str) -> None:
-    """Verify project_id exists or raise NotFoundError."""
-    project = await services.project_repo.get(project_id)
-    if project is None:
-        msg = f"Project {project_id!r} not found."
-        raise NotFoundError(msg, details={"project_id": project_id})
-
-
 async def _ingest_or_schedule(
     services: AppServices,
     response: Response,
     payload: _UploadPayload,
+    *,
+    principal: AuthPrincipal,
 ) -> FileRecord:
-    """Either ingest synchronously (201) or stream blob + schedule CPU task (202)."""
-    await _ensure_project_exists(services, payload.project_id)
+    """Verify project access + storage quota and ingest synchronously (201) or async (202)."""
+    await require_accessible_project(services, payload.project_id, principal)
+    quota_stream = await enforce_and_wrap_storage_quota(services, principal, payload.stream)
 
     if payload.wait:
         response.status_code = status.HTTP_201_CREATED
@@ -78,7 +78,7 @@ async def _ingest_or_schedule(
             payload.project_id,
             payload.filename,
             payload.content_type,
-            payload.stream,
+            quota_stream,
         )
 
     file_id = new_file_id()
@@ -86,7 +86,7 @@ async def _ingest_or_schedule(
         payload.project_id,
         file_id,
         payload.filename,
-        payload.stream,
+        quota_stream,
     )
     pending = FileRecord(
         id=file_id,
@@ -123,7 +123,7 @@ async def upload_file_multipart(  # noqa: PLR0913, PLR0917
     response: Response,
     file: Annotated[UploadFile, File(...)],
     project_id: Annotated[str, Form(min_length=1)],
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_WRITE))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_WRITE))],
     services: Annotated[AppServices, Depends(get_services)],
     wait: Annotated[bool, Query()] = True,
     wait_form: Annotated[bool | None, Form(alias="wait")] = None,
@@ -145,6 +145,7 @@ async def upload_file_multipart(  # noqa: PLR0913, PLR0917
             stream=_iter_upload_file(file),
             wait=effective_wait,
         ),
+        principal=principal,
     )
 
 
@@ -163,7 +164,7 @@ async def upload_file_stream(  # noqa: PLR0913, PLR0917
     request: Request,
     response: Response,
     x_lai_filename: Annotated[str, Header(alias="X-LAI-Filename", min_length=1)],
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_WRITE))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_WRITE))],
     services: Annotated[AppServices, Depends(get_services)],
     project_id: Annotated[str | None, Query(min_length=1)] = None,
     x_lai_project_id: Annotated[str | None, Header(alias="X-LAI-Project-Id")] = None,
@@ -190,19 +191,20 @@ async def upload_file_stream(  # noqa: PLR0913, PLR0917
             stream=request.stream(),
             wait=wait,
         ),
+        principal=principal,
     )
 
 
 @router.get("", response_model=FileListResponse)
 async def list_files(
     project_id: Annotated[str, Query(min_length=1)],
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_READ))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_READ))],
     services: Annotated[AppServices, Depends(get_services)],
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> FileListResponse:
-    """List uploaded files scoped to a project."""
-    await _ensure_project_exists(services, project_id)
+    """List uploaded files scoped to an accessible project."""
+    await require_accessible_project(services, project_id, principal)
     items = await services.file_repo.list_files(project_id, limit=limit, offset=offset)
     return FileListResponse(items=items, count=len(items))
 
@@ -210,21 +212,17 @@ async def list_files(
 @router.get("/{file_id}", response_model=FileRecord)
 async def get_file(
     file_id: str,
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_READ))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_READ))],
     services: Annotated[AppServices, Depends(get_services)],
 ) -> FileRecord:
-    """Fetch metadata and deterministic summaries for an uploaded file."""
-    record = await services.file_repo.get_file(file_id)
-    if record is None:
-        msg = f"File {file_id!r} not found."
-        raise NotFoundError(msg, details={"file_id": file_id})
-    return record
+    """Fetch metadata and deterministic summaries for an accessible uploaded file."""
+    return await require_accessible_file(services, file_id, principal)
 
 
 @router.get("/{file_id}/chunks", response_model=FileChunkListResponse)
 async def list_file_chunks(
     file_id: str,
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_READ))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_READ))],
     services: Annotated[AppServices, Depends(get_services)],
     start_line: Annotated[int | None, Query(ge=1)] = None,
     end_line: Annotated[int | None, Query(ge=1)] = None,
@@ -233,10 +231,7 @@ async def list_file_chunks(
     if start_line is not None and end_line is not None and end_line < start_line:
         msg = f"end_line ({end_line}) must be >= start_line ({start_line})."
         raise ValidationFailedError(msg, details={"field": "end_line"})
-    record = await services.file_repo.get_file(file_id)
-    if record is None:
-        msg = f"File {file_id!r} not found."
-        raise NotFoundError(msg, details={"file_id": file_id})
+    await require_accessible_file(services, file_id, principal)
     chunks = await services.file_repo.list_chunks(
         file_id,
         start_line=start_line,
@@ -248,15 +243,11 @@ async def list_file_chunks(
 @router.delete("/{file_id}", response_model=DeleteResponse)
 async def delete_file(
     file_id: str,
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_WRITE))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_WRITE))],
     services: Annotated[AppServices, Depends(get_services)],
 ) -> DeleteResponse:
     """Delete a file's blob, SQLite metadata/chunks/FTS5 rows, and LanceDB vectors."""
-    record = await services.file_repo.get_file(file_id)
-    if record is None:
-        msg = f"File {file_id!r} not found."
-        raise NotFoundError(msg, details={"file_id": file_id})
-
+    record = await require_accessible_file(services, file_id, principal)
     if services.vector_store is not None:
         await services.vector_store.delete_file_vectors(record.project_id, record.id)
     deleted = await services.file_repo.delete_file(record.id)

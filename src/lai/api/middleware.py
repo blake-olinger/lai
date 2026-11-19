@@ -13,6 +13,14 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _HEADER_REQUEST_ID = b"x-request-id"
+_HEADER_CACHE_CONTROL = b"cache-control"
+_CACHE_CONTROL_NO_STORE = b"no-store"
+_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"permissions-policy", b"geolocation=(), microphone=(), camera=()"),
+)
 _MAX_REQUEST_ID_LEN = 128
 _REQUEST_ID_PATTERN = re.compile(rf"[A-Za-z0-9._:-]{{1,{_MAX_REQUEST_ID_LEN}}}")
 _MS_PER_SECOND = 1000.0
@@ -41,12 +49,20 @@ def _extract_incoming_request_id(scope: Scope) -> str:
     return _sanitize_request_id(None)
 
 
-def _inject_response_request_id(message: Message, request_id: str) -> None:
-    """Attach X-Request-Id header to http.response.start if not already present."""
+def _inject_response_headers(message: Message, request_id: str) -> None:
+    """Attach X-Request-Id and HTTP security headers without clobbering route headers."""
     headers = list(cast("list[tuple[bytes, bytes]]", message.get("headers", [])))
-    if not any(key.lower() == _HEADER_REQUEST_ID for key, _ in headers):
+    existing_names = {key.lower() for key, _ in headers}
+    if _HEADER_REQUEST_ID not in existing_names:
         headers.append((_HEADER_REQUEST_ID, request_id.encode("ascii", errors="replace")))
-        message["headers"] = headers
+        existing_names.add(_HEADER_REQUEST_ID)
+    for header_name, header_value in _SECURITY_HEADERS:
+        if header_name not in existing_names:
+            headers.append((header_name, header_value))
+            existing_names.add(header_name)
+    if _HEADER_CACHE_CONTROL not in existing_names:
+        headers.append((_HEADER_CACHE_CONTROL, _CACHE_CONTROL_NO_STORE))
+    message["headers"] = headers
 
 
 class RequestContextMiddleware:
@@ -75,7 +91,7 @@ class RequestContextMiddleware:
                 raw_status = message.get("status")
                 if isinstance(raw_status, int):
                     status_code = raw_status
-                _inject_response_request_id(message, request_id)
+                _inject_response_headers(message, request_id)
             await send(message)
 
         method = str(scope.get("method", "GET"))

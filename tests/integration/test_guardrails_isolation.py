@@ -256,7 +256,8 @@ async def test_openai_blocked_and_allowed_with_session_header_only(tmp_path: Pat
         r_unknown = await _oai_post(
             env, unsafe, stream=False, headers={"X-LAI-Session-Id": "ses_unknown"}
         )
-        _assert_blocked_headers(r_unknown, HTTPStatus.OK)
+        assert r_unknown.status_code == HTTPStatus.NOT_FOUND
+        assert r_unknown.json()["error"]["code"] == "not_found"
 
         assert len(env.inf.requests) == 1
         msgs = await env.svc.session_repo.list_messages("ses_1")

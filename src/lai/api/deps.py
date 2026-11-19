@@ -135,15 +135,18 @@ def extract_request_credentials(request: Request) -> RequestCredentials:
     )
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+
+
 def _resolve_client_ip(credentials: RequestCredentials, *, trust_cf_header: bool) -> str:
-    """Resolve client IP for pre-auth rate limiting, trusting CF header only when CF enabled."""
-    if trust_cf_header:
+    """Resolve client IP for rate limiting, trusting CF-Connecting-IP only from loopback."""
+    host = (credentials.client_host or "").strip()
+    if trust_cf_header and host in _LOOPBACK_HOSTS:
         for header_name, header_value in credentials.headers.items():
             if header_name.lower() == "cf-connecting-ip":
                 stripped = header_value.strip()
                 if stripped:
                     return stripped
-    host = (credentials.client_host or "").strip()
     return host or "unknown"
 
 
@@ -153,9 +156,12 @@ async def get_current_principal(
 ) -> AuthPrincipal:
     """Enforce pre-auth IP limits, authenticate caller, and enforce per-principal limits."""
     credentials = extract_request_credentials(request)
+    trust_cf_header = (
+        services.settings.trust_cloudflare_headers or services.settings.cf_access_enabled
+    )
     client_ip = _resolve_client_ip(
         credentials,
-        trust_cf_header=services.settings.cf_access_enabled,
+        trust_cf_header=trust_cf_header,
     )
     await services.ip_rate_limiter.acquire(f"ip:{client_ip}")
     principal = await services.authenticator.authenticate(credentials)

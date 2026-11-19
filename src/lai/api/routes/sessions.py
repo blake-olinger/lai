@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from lai.api._client_auth import resolve_turn_client_context
@@ -13,6 +13,11 @@ from lai.api._streaming import (
     format_orchestrator_sse,
     guard_orchestrator_sse_frames,
     prime_sse_stream,
+)
+from lai.api._tenancy import (
+    require_accessible_project,
+    require_accessible_session,
+    require_project_files,
 )
 from lai.api.deps import AppServices, get_services, require_scope_dep
 from lai.api.schemas.common import DeleteResponse
@@ -24,7 +29,6 @@ from lai.api.schemas.sessions import (
 )
 from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.chat import Session, TurnInput, TurnOutput
-from lai.domain.errors import NotFoundError
 from lai.scheduler import await_or_keepalive_json
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
@@ -33,15 +37,11 @@ router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 @router.post("", response_model=Session, status_code=status.HTTP_201_CREATED)
 async def create_session(
     body: SessionCreateRequest,
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_WRITE))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_WRITE))],
     services: Annotated[AppServices, Depends(get_services)],
 ) -> Session:
-    """Create a new chat session scoped to an existing project."""
-    project = await services.project_repo.get(body.project_id)
-    if project is None:
-        msg = f"Project {body.project_id!r} not found."
-        raise NotFoundError(msg, details={"project_id": body.project_id})
-
+    """Create a new chat session scoped to an accessible project."""
+    project = await require_accessible_project(services, body.project_id, principal)
     session = Session(
         project_id=body.project_id,
         title=body.title,
@@ -54,17 +54,13 @@ async def create_session(
 @router.get("", response_model=SessionListResponse)
 async def list_sessions(
     project_id: Annotated[str, Query(min_length=1)],
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_READ))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_READ))],
     services: Annotated[AppServices, Depends(get_services)],
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> SessionListResponse:
-    """List chat sessions belonging to a project."""
-    project = await services.project_repo.get(project_id)
-    if project is None:
-        msg = f"Project {project_id!r} not found."
-        raise NotFoundError(msg, details={"project_id": project_id})
-
+    """List chat sessions belonging to an accessible project."""
+    await require_accessible_project(services, project_id, principal)
     items = await services.session_repo.list_sessions(project_id, limit=limit, offset=offset)
     return SessionListResponse(items=items, count=len(items))
 
@@ -72,14 +68,11 @@ async def list_sessions(
 @router.get("/{session_id}", response_model=SessionDetailResponse)
 async def get_session(
     session_id: str,
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_READ))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_READ))],
     services: Annotated[AppServices, Depends(get_services)],
 ) -> SessionDetailResponse:
     """Fetch session metadata along with its chronological message history."""
-    session = await services.session_repo.get_session(session_id)
-    if session is None:
-        msg = f"Session {session_id!r} not found."
-        raise NotFoundError(msg, details={"session_id": session_id})
+    session = await require_accessible_session(services, session_id, principal)
     messages = await services.session_repo.list_messages(session_id)
     return SessionDetailResponse(session=session, messages=messages)
 
@@ -87,39 +80,32 @@ async def get_session(
 @router.delete("/{session_id}", response_model=DeleteResponse)
 async def delete_session(
     session_id: str,
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_WRITE))],
+    principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_WRITE))],
     services: Annotated[AppServices, Depends(get_services)],
 ) -> DeleteResponse:
-    """Delete a chat session and its messages."""
+    """Delete a chat session and its messages after verifying ownership."""
+    await require_accessible_session(services, session_id, principal)
     deleted = await services.session_repo.delete_session(session_id)
-    if not deleted:
-        msg = f"Session {session_id!r} not found."
-        raise NotFoundError(msg, details={"session_id": session_id})
-    return DeleteResponse(id=session_id, deleted=True)
+    return DeleteResponse(id=session_id, deleted=deleted)
 
 
 @router.post("/{session_id}/messages", response_model=TurnOutput)
-async def post_session_message(  # noqa: PLR0913, PLR0917
+async def post_session_message(
     session_id: str,
     body: SessionMessageRequest,
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_WRITE))],
     services: Annotated[AppServices, Depends(get_services)],
-    x_lai_client_id: Annotated[str | None, Header(alias="X-LAI-Client-Id")] = None,
-    x_lai_client_secret: Annotated[str | None, Header(alias="X-LAI-Client-Secret")] = None,
 ) -> Response:
     """Run a user turn in session_id as JSON (with keepalive) or SSE stream."""
-    session = await services.session_repo.get_session(session_id)
-    if session is None:
-        msg = f"Session {session_id!r} not found."
-        raise NotFoundError(msg, details={"session_id": session_id})
-
+    session = await require_accessible_session(services, session_id, principal)
+    if body.attached_file_ids:
+        await require_project_files(services, session.project_id, body.attached_file_ids, principal)
     client_ctx = await resolve_turn_client_context(
         services,
+        principal=principal,
         project_id=session.project_id,
         requested_tools=body.client_tools,
-        client_id=x_lai_client_id,
-        client_secret=x_lai_client_secret,
     )
     turn_input = TurnInput(
         session_id=session.id,

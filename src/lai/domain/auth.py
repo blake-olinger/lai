@@ -102,6 +102,7 @@ class AuthPrincipal(StrictModel):
     email: str | None = None
     issuer: str | None = None
     subject: str | None = None
+    oauth_client_id: str | None = None
 
     def has_scope(self, scope: ApiScope) -> bool:
         """Return True if the principal holds the requested scope directly or via hierarchy."""

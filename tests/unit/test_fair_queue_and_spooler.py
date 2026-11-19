@@ -53,6 +53,7 @@ def _req(
     principal_id: str = "usr_1",
     session_id: str = "ses_1",
     priority: JobPriority = JobPriority.INTERACTIVE,
+    bypass_principal_quota: bool = False,
 ) -> LeaseRequest:
     return LeaseRequest(
         job_id=job_id,
@@ -60,6 +61,7 @@ def _req(
         project_id="prj_1",
         principal_id=principal_id,
         priority=priority,
+        bypass_principal_quota=bypass_principal_quota,
     )
 
 
@@ -136,6 +138,23 @@ def test_fair_priority_queue_round_robin_priority_capacity_and_evict() -> None:
 
     popped = [item.job_id for item in iter(queue.dequeue, None)]
     assert popped == ["j_a1_1", "j_b2_1", "j_a3_1", "j_a1_3", "j_apr", "j_mr"]
+
+
+def test_fair_queue_two_level_principal_round_robin_and_quota() -> None:
+    """One principal with N sessions gets one turn per principal round, bounded by quota."""
+    queue = FairPriorityQueue(max_queued_jobs=10, max_queued_jobs_per_principal=MAX_QUEUE_TWO)
+    queue.enqueue(_req("a_s1", principal_id="p_a", session_id="s1"))
+    queue.enqueue(_req("a_s2", principal_id="p_a", session_id="s2"))
+    with pytest.raises(QueueFullError) as exc_info:
+        queue.enqueue(_req("a_s3", principal_id="p_a", session_id="s3"))
+    assert exc_info.value.details == {"principal_id": "p_a", "max_queued_jobs_per_principal": "2"}
+
+    queue.enqueue(_req("b_s1", principal_id="p_b", session_id="s_b"))
+    queue.enqueue(
+        _req("a_bypass", principal_id="p_a", session_id="s3", bypass_principal_quota=True)
+    )
+    expected_order = ["a_s1", "b_s1", "a_s2", "a_bypass"]
+    assert [item.job_id for item in iter(queue.dequeue, None)] == expected_order
 
 
 async def test_spooler_preemption_eviction_queue_full_and_log_binding(tmp_path: Path) -> None:

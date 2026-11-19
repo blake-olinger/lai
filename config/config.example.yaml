@@ -15,6 +15,7 @@ models_dir: "models"
 bin_dir: "bin"
 
 # Upload, context windowing, spooler, and proxy keepalive tuning
+# Note: Cloudflare Tunnel free/pro proxies enforce a 100 MB per-request body limit.
 max_upload_bytes: 262144000
 direct_file_budget_tokens: 12000
 map_window_tokens: 9000
@@ -24,19 +25,30 @@ keepalive_interval_seconds: 10.0
 json_keepalive_threshold_seconds: 20.0
 rate_limit_rpm: 120
 
+# Multi-tenant per-principal quotas (enforced for all non-admin principals)
+max_projects_per_principal: 10
+max_storage_bytes_per_principal: 1073741824 # 1 GiB
+max_queued_jobs_per_principal: 4
+
+# Browser CORS allowlist (exact http:// or https:// origins; wildcard "*" is rejected)
+cors_allowed_origins: []
+
 # Authentication providers: ["api_key"] or ["api_key", "oidc"]
 auth_providers:
   - "api_key"
 
-# Optional Google / OIDC JWT authentication
+# Optional Google / OIDC JWT authentication (fail-closed: requires audiences + allowed emails/domains)
+# Note: Consumer domains (gmail.com, yahoo.com, outlook.com, etc.) are rejected in oidc_allowed_domains.
 oidc_enabled: false
 oidc_issuer_url: "https://accounts.google.com"
 oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
 oidc_audience: null
+oidc_audiences: [] # Preferred multi-audience list (e.g. Web SPA + Desktop OAuth client IDs)
 oidc_allowed_emails: []
 oidc_allowed_domains: []
 oidc_default_scopes:
   - "projects:read"
+  - "projects:write"
   - "files:read"
   - "files:write"
   - "chat:read"
@@ -44,7 +56,10 @@ oidc_default_scopes:
   - "tools:safe"
 oidc_admin_emails: []
 
-# Optional Cloudflare Access edge verification (for Named Tunnel remote access)
+# Proxy & Cloudflare Named Tunnel edge trust (enable only when traffic cannot bypass the proxy)
+trust_cloudflare_headers: false
+
+# Optional Cloudflare Access edge verification (leave false for public SPA/Desktop OIDC APIs)
 cf_access_enabled: false
 cf_access_client_id: null
 cf_access_client_secret: null

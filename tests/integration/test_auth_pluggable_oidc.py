@@ -98,7 +98,12 @@ def _sign_jwt(
     return jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": kid})
 
 
-def _build_oidc_settings(tmp_path: Path, cf_secret: str) -> LaiSettings:
+def _build_oidc_settings(
+    tmp_path: Path,
+    cf_secret: str,
+    *,
+    cf_access_enabled: bool = True,
+) -> LaiSettings:
     data_dir = tmp_path / "data"
     return LaiSettings(
         data_dir=data_dir,
@@ -113,9 +118,9 @@ def _build_oidc_settings(tmp_path: Path, cf_secret: str) -> LaiSettings:
         oidc_allowed_emails=("solo@partner.org",),
         oidc_allowed_domains=("acme.test",),
         oidc_admin_emails=("boss@acme.test",),
-        cf_access_enabled=True,
-        cf_access_client_id=_CF_ID,
-        cf_access_client_secret=cf_secret,
+        cf_access_enabled=cf_access_enabled,
+        cf_access_client_id=_CF_ID if cf_access_enabled else None,
+        cf_access_client_secret=cf_secret if cf_access_enabled else None,
     )
 
 
@@ -165,11 +170,13 @@ async def test_composite_auth_api_key_google_oidc_and_cloudflare_edge(tmp_path: 
             for hdrs, path, code in (
                 (dom_h, "/v1/projects", S.OK),
                 (dom_h, "/v1/system/alerts", S.FORBIDDEN),
+                (dom_h, "/v1/system/status", S.FORBIDDEN),
+                (dom_h, "/v1/client-apps", S.FORBIDDEN),
                 (_oidc("sub-s", "solo@partner.org"), "/v1/projects", S.OK),
                 (adm_h, "/v1/system/alerts", S.OK),
             ):
                 assert await _get_code(client, hdrs, path) == code
-            assert await _post_code(client, dom_h, "no") == S.FORBIDDEN
+            assert await _post_code(client, dom_h, "dev-proj") == S.CREATED
             assert await _post_code(client, adm_h, "adm") == S.CREATED
 
             past_exp = int((datetime.now(UTC) - timedelta(minutes=2)).timestamp())
@@ -273,8 +280,8 @@ async def test_pre_auth_ip_rate_limit_blocks_before_oidc_and_ignores_spoofed_cf_
     """Enforce pre-auth per-IP 429 before OIDC JWKS fetch and ignore CF-Connecting-IP when off."""
     rsa_priv, _ = _make_rsa_jwk("ip-k1")
     oidc_jwt = _sign_jwt(rsa_priv, kid="ip-k1")
-    no_cf = _build_oidc_settings(tmp_path, "").model_copy(
-        update={"cf_access_enabled": False, "ip_rate_limit_rpm": 1}
+    no_cf = _build_oidc_settings(tmp_path, "", cf_access_enabled=False).model_copy(
+        update={"ip_rate_limit_rpm": 1}
     )
     with respx.mock(assert_all_called=False) as mock:
         jwks_route = mock.get(_JWKS_URL).respond(S.OK, json={"keys": []})

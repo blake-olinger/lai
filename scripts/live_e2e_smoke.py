@@ -17,7 +17,7 @@ OLLAMA_URL = os.environ.get("LAI_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("
 ADMIN_KEY = os.environ["LAI_E2E_ADMIN_KEY"]
 CLIENT_KEY = os.environ["LAI_E2E_CLIENT_KEY"]
 LOG_DIR = Path(os.environ.get("LAI_E2E_LOG_DIR", "data/logs"))
-_HTTP_OK, _HTTP_CREATED = 200, 201
+_HTTP_OK, _HTTP_CREATED, _HTTP_NOT_FOUND = 200, 201, 404
 _MIN_OVERSIZED_TOKENS, _MIN_MAP_WINDOWS, _CONCURRENT_JOBS = 12_000, 2, 4
 
 
@@ -60,8 +60,10 @@ async def _turn(
     return await _post(c, f"/v1/sessions/{sid}/messages", key, body)
 
 
-async def _upload(c: httpx.AsyncClient, pid: str, fname: str, content: bytes) -> dict[str, Any]:
-    hdrs = {**_auth(ADMIN_KEY), "X-LAI-Project-Id": pid, "X-LAI-Filename": fname}
+async def _upload(
+    c: httpx.AsyncClient, pid: str, fname: str, content: bytes, key: str = ADMIN_KEY
+) -> dict[str, Any]:
+    hdrs = {**_auth(key), "X-LAI-Project-Id": pid, "X-LAI-Filename": fname}
     r = await c.post(
         f"{BASE_URL}/v1/files/stream",
         headers={**hdrs, "Content-Type": "text/plain"},
@@ -214,8 +216,7 @@ async def _step3_guardrails(c: httpx.AsyncClient, sid: str) -> None:
     blocks = [row for row in rows if row["verdict"] == "block"]
     _require(bool(blocks) and "allow" in {r["verdict"] for r in rows}, repr(rows))
     ps_text = _ps_summary((await c.get(f"{OLLAMA_URL}/api/ps")).json())
-    refusal = b_data["message"]["content"][:55]
-    _out(f"[3] ShieldGemma-2B OK: policy={policy!r}, refusal={refusal!r}")
+    _out(f"[3] ShieldGemma-2B OK: policy={policy!r}, refusal={b_data['message']['content'][:55]!r}")
     _out(f"    Scrubbed audit={blocks[-1]['scrubbed_prompt']!r} | ps: {ps_text}")
 
 
@@ -234,7 +235,7 @@ def _oai_payload(msg: str, *, stream: bool = False, max_tokens: int = 120) -> di
     }
 
 
-async def _step4_and_5_rag_and_mapreduce(c: httpx.AsyncClient, pid: str, sid: str) -> str:
+async def _step4_and_5_rag_and_mapreduce(c: httpx.AsyncClient, pid: str, sid: str) -> None:
     code_bytes, log_bytes = _rag_fixtures()
     r_code = await c.post(
         f"{BASE_URL}/v1/files",
@@ -278,50 +279,42 @@ async def _step4_and_5_rag_and_mapreduce(c: httpx.AsyncClient, pid: str, sid: st
         "REDIS_CLUSTER_SPLIT_BRAIN" in mr_text and "NVME_NAMESPACE_READ_ONLY" in mr_text, mr_text
     )
     _out(f"[5] Map-Reduce OK: tokens={big['token_count']}, map_windows={len(map_ev)}")
-    return str(code_rec["id"])
 
 
-async def _step6_7_8_openai_concurrency_logs(
-    c: httpx.AsyncClient, pid: str, sid: str, code_id: str
-) -> None:
+async def _step6_7_8_openai_concurrency_logs(c: httpx.AsyncClient, pid: str, sid: str) -> None:
+    r_deny = await c.get(f"{BASE_URL}/v1/projects/{pid}", headers=_auth(CLIENT_KEY), timeout=30.0)
+    _require(r_deny.status_code == _HTTP_NOT_FOUND, f"Cross-tenant GET -> {r_deny.status_code}")
+    c_proj = await _post(c, "/v1/projects", CLIENT_KEY, {"name": "e2e-client"}, _HTTP_CREATED)
+    c_pid = str(c_proj.json()["id"])
+    c_code = await _upload(c, c_pid, "worker_pool.py", _rag_fixtures()[0], CLIENT_KEY)
+
     models = await _get(c, "/v1/models", CLIENT_KEY)
     _require(any(m["id"] == "gemma4-26b-a4b" for m in models["data"]), repr(models))
-    hdrs = {**_auth(CLIENT_KEY), "X-LAI-Project-Id": pid, "X-LAI-File-Ids": code_id}
+    hdrs = {**_auth(CLIENT_KEY), "X-LAI-Project-Id": c_pid, "X-LAI-File-Ids": str(c_code["id"])}
+    oai_url = f"{BASE_URL}/v1/chat/completions"
     oai_q = "Which parameter in worker_pool.py causes division by zero?"
-    oai_r = await c.post(
-        f"{BASE_URL}/v1/chat/completions", headers=hdrs, json=_oai_payload(oai_q), timeout=180.0
-    )
-    _require(
-        oai_r.status_code == _HTTP_OK
-        and "active_workers" in oai_r.json()["choices"][0]["message"]["content"],
-        oai_r.text,
-    )
+    oai_r = await c.post(oai_url, headers=hdrs, json=_oai_payload(oai_q), timeout=180.0)
+    _require(oai_r.status_code == _HTTP_OK, oai_r.text)
+    _require("active_workers" in oai_r.json()["choices"][0]["message"]["content"], oai_r.text)
     saw_done = False
     s_json = _oai_payload("Reply with OK.", stream=True, max_tokens=32)
-    async with c.stream(
-        "POST", f"{BASE_URL}/v1/chat/completions", headers=_auth(CLIENT_KEY), json=s_json
-    ) as sr:
+    async with c.stream("POST", oai_url, headers=_auth(CLIENT_KEY), json=s_json) as sr:
         if sr.status_code != _HTTP_OK:
             _require(False, f"OpenAI SSE {sr.status_code}: {await sr.aread()!r}")
         async for line in sr.aiter_lines():
             if line.strip() == "data: [DONE]":
                 saw_done = True
     _require(saw_done, "Missing data: [DONE] in OpenAI SSE stream")
-    _out("[6] OpenAI-Compatible /v1/models & /v1/chat/completions OK")
-    ses2, ses3 = await _mk_ses(c, CLIENT_KEY, pid), await _mk_ses(c, ADMIN_KEY, pid)
+    _out("[6] Multi-Tenant Isolation & OpenAI /v1/models / /v1/chat/completions OK")
+    ses2, ses3 = await _mk_ses(c, CLIENT_KEY, c_pid), await _mk_ses(c, ADMIN_KEY, pid)
     pre = int((await _get(c, "/v1/system/status"))["spooler"]["total_completed"])
 
     async def _c_turn(key: str, target_sid: str, idx: int) -> str:
         r = await _turn(c, key, target_sid, f"Reply in 3 words confirming #{idx}.", max_tokens=40)
         return str(r.json()["message"]["content"])
 
-    targets = (
-        (ADMIN_KEY, sid, 1),
-        (ADMIN_KEY, sid, 2),
-        (CLIENT_KEY, ses2, 3),
-        (ADMIN_KEY, ses3, 4),
-    )
-    replies = await asyncio.gather(*(_c_turn(*t) for t in targets))
+    pairs = ((ADMIN_KEY, sid), (ADMIN_KEY, sid), (CLIENT_KEY, ses2), (ADMIN_KEY, ses3))
+    replies = await asyncio.gather(*(_c_turn(k, s, i + 1) for i, (k, s) in enumerate(pairs)))
     _require(all(r.strip() for r in replies), repr(replies))
     spool = (await _get(c, "/v1/system/status"))["spooler"]
     ok_spool = spool["total_completed"] == pre + _CONCURRENT_JOBS and spool["active_job_id"] is None
@@ -340,8 +333,8 @@ async def main() -> int:
         await _wait_for_server(c)
         pid, sid = await _step1_and_2_health_direct(c)
         await _step3_guardrails(c, sid)
-        code_id = await _step4_and_5_rag_and_mapreduce(c, pid, sid)
-        await _step6_7_8_openai_concurrency_logs(c, pid, sid, code_id)
+        await _step4_and_5_rag_and_mapreduce(c, pid, sid)
+        await _step6_7_8_openai_concurrency_logs(c, pid, sid)
     _out("ALL 8 LIVE HARDWARE E2E SCENARIOS PASSED.")
     return 0
 

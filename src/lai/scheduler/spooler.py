@@ -25,13 +25,17 @@ class InferenceSpooler(InferenceSpoolerPort):
         self,
         max_queued_jobs: int = 64,
         *,
+        max_queued_jobs_per_principal: int | None = None,
         acquire_timeout_seconds: float | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if acquire_timeout_seconds is not None and acquire_timeout_seconds <= 0:
             msg = "acquire_timeout_seconds must be positive when set."
             raise ValidationFailedError(msg)
-        self._queue = FairPriorityQueue(max_queued_jobs=max_queued_jobs)
+        self._queue = FairPriorityQueue(
+            max_queued_jobs=max_queued_jobs,
+            max_queued_jobs_per_principal=max_queued_jobs_per_principal,
+        )
         self._acquire_timeout_seconds = acquire_timeout_seconds
         self._clock = clock
         self._logger = get_component_logger("scheduler")

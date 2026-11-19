@@ -36,8 +36,9 @@ from lai.guardrails import CompositeGuardrailPipeline
 from lai.orchestrator import TurnOrchestrator
 from lai.ports.guardrails import GuardrailProviderPort
 from lai.ports.inference import InferenceProviderPort
-from lai.security import generate_api_key, generate_client_app
+from lai.security import build_client_app, generate_api_key
 from lai.tools import GuardedToolExecutor
+from tests.integration._helpers import OidcTestAuthority, configure_test_oidc
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Generator
@@ -118,10 +119,12 @@ class _SecEnv:
     svc: AppServices
     client: httpx.AsyncClient
     inf: _ReadLeaseInference
-    user_hdrs: dict[str, str]
+    oidc: OidcTestAuthority
+    api_key_hdrs: dict[str, str]
     read_only_hdrs: dict[str, str]
     app_hdrs: dict[str, str]
     other_app_hdrs: dict[str, str]
+    app_a_id: str
     project_id: str
     session_id: str
 
@@ -167,8 +170,15 @@ async def sec_env(tmp_path: Path) -> AsyncIterator[_SecEnv]:
         ro = generate_api_key("ro", (ApiScope.CHAT_READ,))
         await svc.api_key_repo.create(usr.record)
         await svc.api_key_repo.create(ro.record)
-        user_hdrs = {"Authorization": f"Bearer {usr.plaintext_key}"}
+        api_key_hdrs = {"Authorization": f"Bearer {usr.plaintext_key}"}
         ro_hdrs = {"Authorization": f"Bearer {ro.plaintext_key}"}
+        oidc = configure_test_oidc(
+            svc,
+            audiences=("cid-a", "cid-b", "cid-scoped"),
+            default_scopes=(ApiScope.PROJECTS_WRITE, ApiScope.CHAT_WRITE, ApiScope.TOOLS_SAFE),
+        )
+        app_hdrs = oidc.mint_headers(sub="sec-user", aud="cid-a")
+        other_app_hdrs = oidc.mint_headers(sub="sec-user", aud="cid-b")
 
         read_tool = ToolSpec(
             name="read_local",
@@ -176,14 +186,20 @@ async def sec_env(tmp_path: Path) -> AsyncIterator[_SecEnv]:
             permission_tier=PermissionTier.READ,
             execution_target=ToolExecutionTarget.CLIENT,
         )
-        app_a = generate_client_app(
-            "a", allowed_tiers=(PermissionTier.READ,), registered_tools=(read_tool,)
+        app_a = build_client_app(
+            "a",
+            oauth_client_id="cid-a",
+            allowed_tiers=(PermissionTier.READ,),
+            registered_tools=(read_tool,),
         )
-        app_b = generate_client_app(
-            "b", allowed_tiers=(PermissionTier.READ,), registered_tools=(read_tool,)
+        app_b = build_client_app(
+            "b",
+            oauth_client_id="cid-b",
+            allowed_tiers=(PermissionTier.READ,),
+            registered_tools=(read_tool,),
         )
-        await svc.client_app_repo.create(app_a.record)
-        await svc.client_app_repo.create(app_b.record)
+        await svc.client_app_repo.create(app_a)
+        await svc.client_app_repo.create(app_b)
 
         app = create_app(settings, services=svc)
         try:
@@ -191,25 +207,21 @@ async def sec_env(tmp_path: Path) -> AsyncIterator[_SecEnv]:
                 transport=httpx.ASGITransport(app=app), base_url="http://testserver"
             ) as client:
                 pid = (
-                    await client.post("/v1/projects", headers=user_hdrs, json={"name": "p"})
+                    await client.post("/v1/projects", headers=app_hdrs, json={"name": "p"})
                 ).json()["id"]
                 sid = (
-                    await client.post("/v1/sessions", headers=user_hdrs, json={"project_id": pid})
+                    await client.post("/v1/sessions", headers=app_hdrs, json={"project_id": pid})
                 ).json()["id"]
                 yield _SecEnv(
                     svc=svc,
                     client=client,
                     inf=inf,
-                    user_hdrs=user_hdrs,
+                    oidc=oidc,
+                    api_key_hdrs=api_key_hdrs,
                     read_only_hdrs=ro_hdrs,
-                    app_hdrs={
-                        "X-LAI-Client-Id": app_a.record.id,
-                        "X-LAI-Client-Secret": app_a.plaintext_secret,
-                    },
-                    other_app_hdrs={
-                        "X-LAI-Client-Id": app_b.record.id,
-                        "X-LAI-Client-Secret": app_b.plaintext_secret,
-                    },
+                    app_hdrs=app_hdrs,
+                    other_app_hdrs=other_app_hdrs,
+                    app_a_id=app_a.id,
                     project_id=pid,
                     session_id=sid,
                 )
@@ -221,36 +233,21 @@ async def test_read_lease_sse_spoofing_guardrail_413_and_openai_tool_chunks(
     sec_env: _SecEnv,
 ) -> None:
     """Verify READ lease SSE /result, 401/403, 413, 422 injection, and OpenAI tool_calls."""
-    c, sid = sec_env.client, sec_env.session_id
-    hdrs = {**sec_env.user_hdrs, **sec_env.app_hdrs}
+    c, sid, hdrs = sec_env.client, sec_env.session_id, sec_env.app_hdrs
 
     r_t1 = await c.post(f"/v1/sessions/{sid}/messages", headers=hdrs, json={"content": "read 1"})
     assert r_t1.status_code == S.OK
     aid1 = r_t1.json()["pending_approval_id"]
     assert r_t1.json()["pending_client_tool_call"]["requires_approval"] is False
 
-    assert (
-        await c.post(
-            f"/v1/tool-approvals/{aid1}/result", headers=sec_env.user_hdrs, json={"output": "ok"}
-        )
-    ).status_code == S.UNAUTHORIZED
-    assert (
-        await c.post(
-            f"/v1/tool-approvals/{aid1}/result",
-            headers={**sec_env.read_only_hdrs, **sec_env.app_hdrs},
-            json={"output": "ok"},
-        )
-    ).status_code == S.FORBIDDEN
-    assert (
-        await c.post(
-            f"/v1/tool-approvals/{aid1}/result",
-            headers={**sec_env.user_hdrs, **sec_env.other_app_hdrs},
-            json={"output": "ok"},
-        )
-    ).status_code == S.FORBIDDEN
-    assert (
-        await c.post(f"/v1/tool-approvals/{aid1}/result", headers=hdrs, json={"output": "z" * 129})
-    ).status_code == S.REQUEST_ENTITY_TOO_LARGE
+    res_url = f"/v1/tool-approvals/{aid1}/result"
+    for bad_h, body, code in (
+        (sec_env.api_key_hdrs, {"output": "ok"}, S.UNAUTHORIZED),
+        (sec_env.read_only_hdrs, {"output": "ok"}, S.FORBIDDEN),
+        (sec_env.other_app_hdrs, {"output": "ok"}, S.FORBIDDEN),
+        (hdrs, {"output": "z" * 129}, S.REQUEST_ENTITY_TOO_LARGE),
+    ):
+        assert (await c.post(res_url, headers=bad_h, json=body)).status_code == code
 
     r_sse = await c.post(
         f"/v1/tool-approvals/{aid1}/result",
@@ -303,14 +300,13 @@ async def test_read_lease_sse_spoofing_guardrail_413_and_openai_tool_chunks(
     assert any(f["choices"][0]["finish_reason"] == "tool_calls" for f in frames)
 
 
-async def test_expired_lease_returns_422_and_revoked_app_returns_401(sec_env: _SecEnv) -> None:
-    """Verify expired TTL -> 422 EXPIRED, project mismatch -> 403, and revoked app -> 401."""
-    c, sid, svc = sec_env.client, sec_env.session_id, sec_env.svc
+async def test_expired_lease_returns_422_and_revoked_app_returns_403(sec_env: _SecEnv) -> None:
+    """Verify expired TTL -> 422 EXPIRED, project mismatch -> 403, and revoked app -> 403."""
+    c, sid, svc, hdrs = sec_env.client, sec_env.session_id, sec_env.svc, sec_env.app_hdrs
     svc.tool_executor = GuardedToolExecutor(
         svc.tool_registry, svc.tool_audit_repo, lease_ttl_seconds=0.0
     )
     svc.orchestrator = _rebuild_orch(svc)
-    hdrs = {**sec_env.user_hdrs, **sec_env.app_hdrs}
     aid = (
         await c.post(f"/v1/sessions/{sid}/messages", headers=hdrs, json={"content": "read 3"})
     ).json()["pending_approval_id"]
@@ -324,21 +320,19 @@ async def test_expired_lease_returns_422_and_revoked_app_returns_401(sec_env: _S
         await c.post("/v1/tool-approvals/apr_none/result", headers=hdrs, json={"output": "x"})
     ).status_code == S.NOT_FOUND
 
-    scoped = generate_client_app(
-        "scoped", allowed_tiers=(PermissionTier.READ,), allowed_project_ids=("prj_other",)
+    scoped = build_client_app(
+        "scoped",
+        oauth_client_id="cid-scoped",
+        allowed_tiers=(PermissionTier.READ,),
+        allowed_project_ids=("prj_other",),
     )
-    await svc.client_app_repo.create(scoped.record)
-    scoped_hdrs = {
-        **sec_env.user_hdrs,
-        "X-LAI-Client-Id": scoped.record.id,
-        "X-LAI-Client-Secret": scoped.plaintext_secret,
-    }
+    await svc.client_app_repo.create(scoped)
+    scoped_hdrs = sec_env.oidc.mint_headers(sub="sec-user", aud="cid-scoped")
     assert (
         await c.post(f"/v1/tool-approvals/{aid}/result", headers=scoped_hdrs, json={"output": "x"})
     ).status_code == S.FORBIDDEN
 
-    app_id = sec_env.app_hdrs["X-LAI-Client-Id"]
-    await svc.client_app_repo.revoke(app_id, rec.created_at)
+    await svc.client_app_repo.revoke(sec_env.app_a_id, rec.created_at)
     assert (
         await c.post(f"/v1/tool-approvals/{aid}/result", headers=hdrs, json={"output": "x"})
-    ).status_code == S.UNAUTHORIZED
+    ).status_code == S.FORBIDDEN

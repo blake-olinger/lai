@@ -12,12 +12,11 @@ from lai.domain.tools import PermissionTier, ToolSpec
 
 
 class ClientAppRecord(StrictModel):
-    """Persisted client application registration and hashed credential."""
+    """Persisted client application registration bound to an OAuth client ID."""
 
     id: str = Field(default_factory=new_client_app_id)
     name: str = Field(min_length=1, max_length=120)
-    secret_prefix: str = Field(min_length=4, max_length=32)
-    secret_hash: str = Field(min_length=32)
+    oauth_client_id: str = Field(min_length=1, max_length=256)
     allowed_tiers: tuple[PermissionTier, ...] = (PermissionTier.READ,)
     registered_tools: tuple[ToolSpec, ...] = ()
     allowed_project_ids: tuple[str, ...] = ()
@@ -32,10 +31,3 @@ class ClientAppRecord(StrictModel):
         if self.revoked_at is not None:
             return False
         return not (self.expires_at is not None and current >= self.expires_at)
-
-
-class CreatedClientApp(StrictModel):
-    """One-time response returned when minting a new client application."""
-
-    record: ClientAppRecord
-    plaintext_secret: str = Field(min_length=16)

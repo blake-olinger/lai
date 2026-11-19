@@ -15,6 +15,7 @@ from lai.api._streaming import (
     guard_openai_sse_frames,
     prime_sse_stream,
 )
+from lai.api._tenancy import require_project_files
 from lai.api.deps import AppServices, get_services, require_scope_dep
 from lai.api.routes._openai_helpers import (
     StreamMeta,
@@ -35,9 +36,27 @@ from lai.api.schemas.openai import (
 from lai.config.profiles import BUILTIN_PROFILES
 from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.chat import TurnInput, TurnOutput
+from lai.domain.errors import ValidationFailedError
 from lai.scheduler import await_or_keepalive_json
 
 router = APIRouter(tags=["openai"])
+
+
+async def _validate_openai_file_ids(
+    services: AppServices,
+    *,
+    principal: AuthPrincipal,
+    project_id: str,
+    has_owned_project: bool,
+    file_ids: tuple[str, ...],
+) -> None:
+    """Ensure attached file_ids require a real accessible project and belong to it."""
+    if not file_ids:
+        return
+    if not has_owned_project:
+        msg = "Attaching file_ids requires an explicit project_id or session_id."
+        raise ValidationFailedError(msg, details={"field": "file_ids"})
+    await require_project_files(services, project_id, file_ids, principal)
 
 
 @router.get("/v1/models", response_model=OpenAIModelListResponse)
@@ -63,30 +82,35 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
     x_lai_file_ids: Annotated[str | None, Header(alias="X-LAI-File-Ids")] = None,
     x_lai_session_id: Annotated[str | None, Header(alias="X-LAI-Session-Id")] = None,
     x_lai_context_mode: Annotated[str | None, Header(alias="X-LAI-Context-Mode")] = None,
-    x_lai_client_id: Annotated[str | None, Header(alias="X-LAI-Client-Id")] = None,
-    x_lai_client_secret: Annotated[str | None, Header(alias="X-LAI-Client-Secret")] = None,
 ) -> Response:
     """OpenAI-compatible chat completions supporting project/file context and keepalives."""
     explicit_project_id = (body.project_id or x_lai_project_id or "").strip()
     explicit_session_id = (body.session_id or x_lai_session_id or "").strip()
-    session_id, project_id, existing_session = await resolve_session_and_project(
+    session_id, project_id, existing_session, has_owned_project = await resolve_session_and_project(
         services,
+        principal=principal,
         explicit_session_id=explicit_session_id,
         explicit_project_id=explicit_project_id,
     )
+    file_ids = parse_file_ids(body.file_ids, x_lai_file_ids)
+    await _validate_openai_file_ids(
+        services,
+        principal=principal,
+        project_id=project_id,
+        has_owned_project=has_owned_project,
+        file_ids=file_ids,
+    )
     client_ctx = await resolve_turn_client_context(
         services,
+        principal=principal,
         project_id=project_id,
         requested_tools=body.client_tools,
-        client_id=x_lai_client_id,
-        client_secret=x_lai_client_secret,
     )
     resolved_model_name, turn_model_profile = resolve_openai_model(
         services.settings,
         body.model,
         existing_session,
     )
-    file_ids = parse_file_ids(body.file_ids, x_lai_file_ids)
     context_mode = parse_context_mode(body.context_mode, x_lai_context_mode)
     parsed = parse_openai_messages(body.messages, session_id=session_id, project_id=project_id)
     max_tokens = body.max_tokens if body.max_tokens is not None else body.max_completion_tokens

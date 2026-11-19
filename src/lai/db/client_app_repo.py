@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import TYPE_CHECKING, cast
 
 from lai.db._codecs import format_dt, format_opt_dt, parse_dt, parse_opt_dt
 from lai.domain.client_apps import ClientAppRecord
+from lai.domain.errors import ConflictError
 from lai.domain.tools import PermissionTier, ToolSpec
 from lai.ports.repositories import ClientAppRepositoryPort
 
@@ -18,7 +20,7 @@ if TYPE_CHECKING:
     from lai.db.connection import SqliteDatabase
 
 _SELECT_COLUMNS = (
-    "id, name, secret_prefix, secret_hash, allowed_tiers_json, "
+    "id, name, oauth_client_id, allowed_tiers_json, "
     "registered_tools_json, allowed_project_ids_json, "
     "created_at, last_used_at, expires_at, revoked_at"
 )
@@ -32,8 +34,7 @@ def _row_to_client_app(row: aiosqlite.Row) -> ClientAppRecord:
     return ClientAppRecord(
         id=str(row["id"]),
         name=str(row["name"]),
-        secret_prefix=str(row["secret_prefix"]),
-        secret_hash=str(row["secret_hash"]),
+        oauth_client_id=str(row["oauth_client_id"]),
         allowed_tiers=tuple(PermissionTier(item) for item in raw_tiers),
         registered_tools=tuple(ToolSpec.model_validate(item) for item in raw_tools),
         allowed_project_ids=tuple(str(item) for item in raw_projects),
@@ -55,28 +56,38 @@ class SqliteClientAppRepository(ClientAppRepositoryPort):
         tiers_json = json.dumps([tier.value for tier in record.allowed_tiers])
         tools_json = json.dumps([spec.model_dump(mode="json") for spec in record.registered_tools])
         projects_json = json.dumps(list(record.allowed_project_ids))
-        await self._db.execute_write(
-            """
-            INSERT INTO client_apps (
-                id, name, secret_prefix, secret_hash, allowed_tiers_json,
-                registered_tools_json, allowed_project_ids_json,
-                created_at, last_used_at, expires_at, revoked_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """,
-            (
-                record.id,
-                record.name,
-                record.secret_prefix,
-                record.secret_hash,
-                tiers_json,
-                tools_json,
-                projects_json,
-                format_dt(record.created_at),
-                format_opt_dt(record.last_used_at),
-                format_opt_dt(record.expires_at),
-                format_opt_dt(record.revoked_at),
-            ),
-        )
+        async with self._db.write_transaction() as conn:
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO client_apps (
+                        id, name, oauth_client_id, allowed_tiers_json,
+                        registered_tools_json, allowed_project_ids_json,
+                        created_at, last_used_at, expires_at, revoked_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        record.id,
+                        record.name,
+                        record.oauth_client_id,
+                        tiers_json,
+                        tools_json,
+                        projects_json,
+                        format_dt(record.created_at),
+                        format_opt_dt(record.last_used_at),
+                        format_opt_dt(record.expires_at),
+                        format_opt_dt(record.revoked_at),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                msg = (
+                    "An active client app is already registered for "
+                    f"oauth_client_id {record.oauth_client_id!r}."
+                )
+                raise ConflictError(
+                    msg,
+                    details={"oauth_client_id": record.oauth_client_id},
+                ) from exc
         return record
 
     async def get_by_id(self, app_id: str) -> ClientAppRecord | None:
@@ -84,6 +95,15 @@ class SqliteClientAppRepository(ClientAppRepositoryPort):
         row = await self._db.fetch_one(
             f"SELECT {_SELECT_COLUMNS} FROM client_apps WHERE id = ?;",  # noqa: S608
             (app_id,),
+        )
+        return _row_to_client_app(row) if row is not None else None
+
+    async def get_by_oauth_client_id(self, oauth_client_id: str) -> ClientAppRecord | None:
+        """Fetch the active (or latest revoked) client app bound to an OAuth client ID."""
+        row = await self._db.fetch_one(
+            f"SELECT {_SELECT_COLUMNS} FROM client_apps WHERE oauth_client_id = ? "  # noqa: S608
+            "ORDER BY (revoked_at IS NOT NULL) ASC, created_at DESC, rowid DESC LIMIT 1;",
+            (oauth_client_id,),
         )
         return _row_to_client_app(row) if row is not None else None
 

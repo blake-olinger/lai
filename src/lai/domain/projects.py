@@ -18,6 +18,7 @@ class Project(StrictModel):
     description: str = ""
     workspace_root: str | None = None
     default_model_profile: str = "gemma4-26b-a4b"
+    owner_principal_id: str = Field(default="system", min_length=1)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

@@ -2,25 +2,22 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import UTC
 from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
 
-from lai.config.logging import (
-    bind_request_id,
-    configure_logging,
-    get_logger,
-    get_request_id,
-)
+from lai import domain as dom
+from lai.config.logging import bind_request_id, configure_logging, get_logger, get_request_id
 from lai.config.profiles import (
     DEFAULT_MODEL_PROFILE_NAME,
     GEMMA4_26B_A4B_PROFILE,
     get_model_profile,
 )
 from lai.config.settings import LaiSettings, load_settings
-from lai.domain import ApiScope, AuthMethod, AuthPrincipal, RequestCredentials
+from lai.domain import ApiScope, AuthMethod, AuthPrincipal, ClientAppRecord, RequestCredentials
 from lai.domain import errors as derr
 from lai.domain import ids as did
 from lai.domain.base import MutableStateModel, StrictModel, utc_now
@@ -59,19 +56,26 @@ EXPECTED_SETTINGS_DEFAULTS: dict[str, object] = {
     "map_window_tokens": 9000,
     "map_window_overlap_tokens": 300,
     "max_queued_jobs": 64,
+    "max_projects_per_principal": 10,
+    "max_storage_bytes_per_principal": 1_073_741_824,
+    "max_queued_jobs_per_principal": 4,
     "keepalive_interval_seconds": 10.0,
     "json_keepalive_threshold_seconds": 20.0,
     "rate_limit_rpm": 120,
     "cf_access_enabled": False,
+    "trust_cloudflare_headers": False,
+    "cors_allowed_origins": (),
     "auth_providers": ("api_key",),
     "oidc_enabled": False,
     "oidc_issuer_url": "https://accounts.google.com",
     "oidc_jwks_url": "https://www.googleapis.com/oauth2/v3/certs",
     "oidc_audience": None,
+    "oidc_audiences": (),
     "oidc_allowed_emails": (),
     "oidc_allowed_domains": (),
     "oidc_default_scopes": (
         "projects:read",
+        "projects:write",
         "files:read",
         "files:write",
         "chat:read",
@@ -81,10 +85,7 @@ EXPECTED_SETTINGS_DEFAULTS: dict[str, object] = {
     "oidc_admin_emails": (),
 }
 
-UPDATED_COUNT = 2
-OVERRIDDEN_PORT_ENV = 9123
-OVERRIDDEN_PORT_ARG = 9222
-YAML_RATE_LIMIT = 240
+UPDATED_COUNT, OVERRIDDEN_PORT_ENV, OVERRIDDEN_PORT_ARG, YAML_RATE_LIMIT = 2, 9123, 9222, 240
 
 
 class _MutableSample(MutableStateModel):
@@ -92,63 +93,50 @@ class _MutableSample(MutableStateModel):
     label: str = "init"
 
 
-def test_strict_model_forbids_extra_and_is_immutable() -> None:
-    """StrictModel subclasses reject extra keys and forbid post-init mutation."""
+def test_strict_and_mutable_models_and_utc_now() -> None:
+    """StrictModel forbids extras/mutation; MutableStateModel allows updates; utc_now is UTC."""
     project = Project(name="alpha")
     assert isinstance(project, StrictModel)
     assert project.id.startswith(did.PROJECT_ID_PREFIX)
-
+    assert project.owner_principal_id == "system"
+    assert Project(name="owned", owner_principal_id="oidc:u1").owner_principal_id == "oidc:u1"
     with pytest.raises(ValidationError):
         CreateProjectInput.model_validate({"name": "beta", "unknown_field": 123})
-
     with pytest.raises(ValidationError):
         project.name = "mutated"  # type: ignore[misc]
 
-
-def test_mutable_state_model_allows_mutation_but_forbids_extra() -> None:
-    """MutableStateModel allows field updates while still forbidding extra fields."""
     sample = _MutableSample(count=1)
     sample.count = UPDATED_COUNT
     assert sample.count == UPDATED_COUNT
-
     with pytest.raises(ValidationError):
         _MutableSample.model_validate({"count": 1, "extra_key": True})
-
-
-def test_utc_now_is_timezone_aware_utc() -> None:
-    """utc_now returns timezone-aware UTC datetimes."""
     assert utc_now().tzinfo is UTC
 
 
 def test_prefixed_id_generators_and_validation() -> None:
     """All ID helpers produce expected prefixes and validate non-empty suffixes."""
-    pairs = [
-        (did.new_project_id(), did.PROJECT_ID_PREFIX),
-        (did.new_session_id(), did.SESSION_ID_PREFIX),
-        (did.new_file_id(), did.FILE_ID_PREFIX),
-        (did.new_chunk_id(), did.CHUNK_ID_PREFIX),
-        (did.new_message_id(), did.MESSAGE_ID_PREFIX),
-        (did.new_api_key_id(), did.API_KEY_ID_PREFIX),
-        (did.new_job_id(), did.JOB_ID_PREFIX),
-        (did.new_approval_id(), did.APPROVAL_ID_PREFIX),
-        (did.new_audit_id(), did.AUDIT_ID_PREFIX),
-        (did.new_alert_id(), did.ALERT_ID_PREFIX),
-        (did.new_client_app_id(), did.CLIENT_APP_ID_PREFIX),
-    ]
+    id_fns = (
+        (did.new_project_id, did.PROJECT_ID_PREFIX),
+        (did.new_session_id, did.SESSION_ID_PREFIX),
+        (did.new_file_id, did.FILE_ID_PREFIX),
+        (did.new_chunk_id, did.CHUNK_ID_PREFIX),
+        (did.new_message_id, did.MESSAGE_ID_PREFIX),
+        (did.new_api_key_id, did.API_KEY_ID_PREFIX),
+        (did.new_job_id, did.JOB_ID_PREFIX),
+        (did.new_approval_id, did.APPROVAL_ID_PREFIX),
+        (did.new_audit_id, did.AUDIT_ID_PREFIX),
+        (did.new_alert_id, did.ALERT_ID_PREFIX),
+        (did.new_client_app_id, did.CLIENT_APP_ID_PREFIX),
+    )
     assert did.CLIENT_APP_ID_PREFIX in did.ALL_ID_PREFIXES
-    assert len(pairs) == len(did.ALL_ID_PREFIXES)
-    seen: set[str] = set()
-    for generated, prefix in pairs:
-        assert generated.startswith(prefix)
-        assert len(generated) > len(prefix)
-        assert did.validate_prefixed_id(generated, prefix) == generated
-        seen.add(generated)
-    assert len(seen) == len(pairs)
-
+    assert len(id_fns) == len(did.ALL_ID_PREFIXES)
+    pairs = [(fn(), pfx) for fn, pfx in id_fns]
+    assert len({did.validate_prefixed_id(g, p) for g, p in pairs}) == len(pairs)
+    for g, p in pairs:
+        assert (g.startswith(p), len(g) > len(p)) == (True, True)
     for bad_prefix in ("bad", ""):
         with pytest.raises(ValueError, match="prefix"):
             did.generate_prefixed_id(bad_prefix)
-
     for bad_id in ("prj_", "ses_abc"):
         with pytest.raises(ValueError, match="Expected identifier"):
             did.validate_prefixed_id(bad_id, "prj_")
@@ -156,43 +144,35 @@ def test_prefixed_id_generators_and_validation() -> None:
 
 def test_error_hierarchy_codes_and_statuses() -> None:
     """Domain error classes carry distinct codes, HTTP statuses, and metadata."""
-    approval_err = derr.ToolApprovalRequiredError(
-        "needs approval", approval_id="apr_1", tool_name="exec"
-    )
-    dispatch_err = derr.ClientToolDispatchError(
-        "dispatch",
+    apr = derr.ToolApprovalRequiredError("needs", approval_id="apr_1", tool_name="exec")
+    disp = derr.ClientToolDispatchError(
+        "d",
         approval_id="apr_2",
         tool_call_id="tc_1",
         tool_name="run_local",
         arguments_json="{}",
         requires_approval=True,
     )
-    expected: list[tuple[derr.LaiError, int, str]] = [
-        (derr.AuthenticationError("bad token"), 401, "authentication_failed"),
-        (derr.AuthorizationError("forbidden"), 403, "authorization_denied"),
-        (
-            derr.RateLimitExceededError("slow down", retry_after_seconds=5.0),
-            429,
-            "rate_limit_exceeded",
-        ),
-        (derr.QueueFullError("busy"), 503, "queue_full"),
-        (derr.NotFoundError("missing"), 404, "not_found"),
-        (derr.ValidationFailedError("invalid"), 422, "validation_failed"),
-        (derr.PayloadTooLargeError("too big"), 413, "payload_too_large"),
-        (derr.InferenceBackendError("llama down"), 502, "inference_backend_error"),
-        (approval_err, 409, "tool_approval_required"),
-        (dispatch_err, 409, "client_tool_dispatch"),
-        (derr.ClientDisconnectedError("gone"), 499, "client_disconnected"),
+    cases: list[tuple[derr.LaiError, int, str]] = [
+        (derr.AuthenticationError("a"), 401, "authentication_failed"),
+        (derr.AuthorizationError("b"), 403, "authorization_denied"),
+        (derr.RateLimitExceededError("c", retry_after_seconds=5.0), 429, "rate_limit_exceeded"),
+        (derr.QueueFullError("d"), 503, "queue_full"),
+        (derr.NotFoundError("e"), 404, "not_found"),
+        (derr.ValidationFailedError("f"), 422, "validation_failed"),
+        (derr.PayloadTooLargeError("g"), 413, "payload_too_large"),
+        (derr.InferenceBackendError("h"), 502, "inference_backend_error"),
+        (apr, 409, "tool_approval_required"),
+        (disp, 409, "client_tool_dispatch"),
+        (derr.ClientDisconnectedError("i"), 499, "client_disconnected"),
     ]
-    for err, status_code, code in expected:
+    for err, status_code, code in cases:
         assert isinstance(err, derr.LaiError)
-        assert err.status_code == status_code
-        assert err.code == code
-
-    assert (approval_err.approval_id, approval_err.tool_name) == ("apr_1", "exec")
-    assert (dispatch_err.approval_id, dispatch_err.tool_call_id) == ("apr_2", "tc_1")
-    assert (dispatch_err.tool_name, dispatch_err.arguments_json) == ("run_local", "{}")
-    assert (dispatch_err.requires_approval, dispatch_err.expires_at) == (True, None)
+        assert (err.status_code, err.code) == (status_code, code)
+    assert (apr.approval_id, apr.tool_name) == ("apr_1", "exec")
+    assert (disp.approval_id, disp.tool_call_id) == ("apr_2", "tc_1")
+    assert (disp.tool_name, disp.arguments_json) == ("run_local", "{}")
+    assert (disp.requires_approval, disp.expires_at) == (True, None)
 
 
 def test_gemma4_profile_defaults_and_resolution() -> None:
@@ -202,10 +182,8 @@ def test_gemma4_profile_defaults_and_resolution() -> None:
     dumped = profile.model_dump()
     for key, expected_value in EXPECTED_GEMMA4_FIELDS.items():
         assert dumped[key] == expected_value
-
     custom = ModelProfile(name="custom", hf_repo="example/model", hf_filename="model.gguf")
     assert get_model_profile("custom", custom_profiles={"custom": custom}) == custom
-
     with pytest.raises(derr.NotFoundError):
         get_model_profile("nonexistent-profile")
 
@@ -224,25 +202,78 @@ def test_settings_defaults_yaml_and_env_precedence(
     assert load_settings(empty_cfg).port == EXPECTED_SETTINGS_DEFAULTS["port"]
 
     cfg_file = tmp_path / "lai.yaml"
-    cfg_file.write_text(
-        f"port: 9001\nrate_limit_rpm: {YAML_RATE_LIMIT}\n",
-        encoding="utf-8",
-    )
+    cfg_file.write_text(f"port: 9001\nrate_limit_rpm: {YAML_RATE_LIMIT}\n", encoding="utf-8")
     monkeypatch.setenv("LAI_CONFIG_FILE", str(cfg_file))
     monkeypatch.setenv("LAI_PORT", str(OVERRIDDEN_PORT_ENV))
 
     loaded = load_settings()
-    assert loaded.port == OVERRIDDEN_PORT_ENV
-    assert loaded.rate_limit_rpm == YAML_RATE_LIMIT
+    assert (loaded.port, loaded.rate_limit_rpm) == (OVERRIDDEN_PORT_ENV, YAML_RATE_LIMIT)
     assert load_settings(cfg_file, port=OVERRIDDEN_PORT_ARG).port == OVERRIDDEN_PORT_ARG
 
     with pytest.raises(derr.ValidationFailedError):
         load_settings(tmp_path / "missing.yaml")
-
     bad_root = tmp_path / "bad.yaml"
     bad_root.write_text("- not-a-mapping\n", encoding="utf-8")
     with pytest.raises(derr.ValidationFailedError):
         load_settings(bad_root)
+
+
+def test_settings_fail_closed_security_and_cors_validation(tmp_path: Path) -> None:
+    """Invalid OIDC, Cloudflare Access, and CORS configs fail closed; valid ones pass."""
+    cfg_file = tmp_path / "invalid.yaml"
+    cfg_file.write_text("", encoding="utf-8")
+    bad_origins = (
+        "*",
+        " * ",
+        "ftp://a.co",
+        "https://a.co/",
+        "https://a.co/api",
+        "https://a.co?q=1",
+        "https://a.co#f",
+        "https://u@a.co",
+        "https://a.co:99999",
+    )
+    cors_bads: list[dict[str, object]] = [
+        {"cors_allowed_origins": (origin,)} for origin in bad_origins
+    ]
+    bad_configs: tuple[dict[str, object], ...] = (
+        {"oidc_enabled": True, "oidc_allowed_domains": ("corp.example",)},
+        {"auth_providers": ("oidc",), "oidc_allowed_domains": ("corp.example",)},
+        {"oidc_enabled": True, "oidc_audiences": ("aud-1",)},
+        {"oidc_enabled": True, "oidc_audiences": ("aud-1",), "oidc_allowed_domains": (" ",)},
+        {"oidc_enabled": True, "oidc_audience": "aud-1", "oidc_allowed_domains": ("@Gmail.com ",)},
+        {"oidc_enabled": True, "oidc_audiences": ("aud-1",), "oidc_allowed_domains": ("aol.com",)},
+        {"cf_access_enabled": True},
+        {"cf_access_enabled": True, "cf_access_team_domain": "t.cf.com", "cf_access_aud": "   "},
+        {"cf_access_enabled": True, "cf_access_client_id": "id", "cf_access_client_secret": ""},
+        *cors_bads,
+    )
+    for bad_kwargs in bad_configs:
+        with pytest.raises(ValidationError):
+            LaiSettings.model_validate(bad_kwargs)
+        with pytest.raises(derr.ValidationFailedError):
+            load_settings(cfg_file, **bad_kwargs)
+
+    s1 = LaiSettings(
+        oidc_enabled=True,
+        oidc_audience="legacy-aud",
+        oidc_audiences=("  web-aud  ", "", "legacy-aud", "desktop-aud"),
+        oidc_allowed_emails=("alice@gmail.com",),
+        cf_access_enabled=True,
+        cf_access_team_domain="team.cloudflareaccess.com",
+        cf_access_aud="cf-aud",
+        cors_allowed_origins=("https://app.example.com", "http://localhost:5173"),
+    )
+    assert s1.resolved_oidc_audiences() == ("web-aud", "legacy-aud", "desktop-aud")
+    s2 = LaiSettings(
+        auth_providers=("oidc",),
+        oidc_audiences=("aud-1",),
+        oidc_allowed_domains=("acme.test",),
+        cf_access_enabled=True,
+        cf_access_client_id="svc-id",
+        cf_access_client_secret=secrets.token_hex(8),
+    )
+    assert s2.resolved_oidc_audiences() == ("aud-1",)
 
 
 def test_logging_and_request_id_context() -> None:
@@ -257,9 +288,8 @@ def test_logging_and_request_id_context() -> None:
 
 
 def test_pluggable_auth_scopes_credentials_and_context_fields() -> None:
-    """New AuthMethod, ApiScope, RequestCredentials, tool context, and scheduler fields work."""
-    assert ApiScope.CHAT_READ.value == "chat:read"
-    assert ApiScope.TOOLS_SAFE.value == "tools:safe"
+    """AuthPrincipal, ClientAppRecord, ToolExecutionContext, and LeaseRequest fields validate."""
+    assert (ApiScope.CHAT_READ.value, ApiScope.TOOLS_SAFE.value) == ("chat:read", "tools:safe")
     assert ApiScope.TOOLS_EXEC.value == "tools:exec"
     assert set(AuthMethod) == {
         AuthMethod.API_KEY,
@@ -267,6 +297,7 @@ def test_pluggable_auth_scopes_credentials_and_context_fields() -> None:
         AuthMethod.CLOUDFLARE_ACCESS,
         AuthMethod.LOCAL_CLI,
     }
+    assert not hasattr(dom, "CreatedClientApp")
 
     sample_bearer = did.new_job_id()
     creds = RequestCredentials(
@@ -284,11 +315,14 @@ def test_pluggable_auth_scopes_credentials_and_context_fields() -> None:
         email="user@example.com",
         issuer="https://accounts.google.com",
         subject="sub_1",
+        oauth_client_id="client_123",
     )
-    assert principal.auth_method is AuthMethod.OIDC
-    assert principal.issuer == "https://accounts.google.com"
-    assert principal.subject == "sub_1"
-
+    assert (principal.auth_method, principal.oauth_client_id) == (AuthMethod.OIDC, "client_123")
+    p_empty = AuthPrincipal(principal_id="u", auth_method=AuthMethod.API_KEY, scopes=())
+    assert p_empty.oauth_client_id is None
+    app_rec = ClientAppRecord(name="web-spa", oauth_client_id="client_123")
+    assert app_rec.oauth_client_id == "client_123"
+    assert (hasattr(app_rec, "secret_prefix"), hasattr(app_rec, "secret_hash")) == (False, False)
     ctx = ToolExecutionContext(
         project_id="prj_1",
         session_id="ses_1",
@@ -299,22 +333,15 @@ def test_pluggable_auth_scopes_credentials_and_context_fields() -> None:
         client_allowed_tiers=(PermissionTier.READ,),
         tool_call_id="tc_1",
     )
-    assert ctx.principal_scopes == (ApiScope.CHAT_READ, ApiScope.TOOLS_SAFE)
     assert ctx.allowed_file_ids == ("fil_1", "fil_2")
-    assert (ctx.client_app_id, ctx.client_allowed_tiers, ctx.tool_call_id) == (
-        "app_1",
-        (PermissionTier.READ,),
-        "tc_1",
-    )
-    assert set(JobPriority) == {
-        JobPriority.INTERACTIVE,
-        JobPriority.APPROVAL_RESUME,
-        JobPriority.MAP_REDUCE,
-    }
-
+    assert (ctx.client_app_id, ctx.tool_call_id) == ("app_1", "tc_1")
+    assert ctx.client_allowed_tiers == (PermissionTier.READ,)
+    prios = {JobPriority.INTERACTIVE, JobPriority.APPROVAL_RESUME, JobPriority.MAP_REDUCE}
+    assert set(JobPriority) == prios
     lease = LeaseRequest(session_id="ses_1", project_id="prj_1")
-    assert lease.principal_id == "anonymous"
-    assert lease.priority == JobPriority.INTERACTIVE
-    snapshot = SpoolerSnapshot()
-    assert snapshot.total_evicted == 0
-    assert snapshot.avg_wait_ms == 0.0
+    assert (lease.principal_id, lease.priority) == ("anonymous", JobPriority.INTERACTIVE)
+    assert lease.bypass_principal_quota is False
+    lease_bp = LeaseRequest(session_id="s", project_id="p", bypass_principal_quota=True)
+    assert lease_bp.bypass_principal_quota is True
+    snap = SpoolerSnapshot()
+    assert (snap.total_evicted, snap.avg_wait_ms) == (0, 0.0)

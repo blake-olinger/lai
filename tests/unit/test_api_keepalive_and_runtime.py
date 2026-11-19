@@ -195,6 +195,7 @@ async def test_runtime_with_oidc_and_cloudflare_edge_verification(tmp_path: Path
         auth_providers=("api_key", "oidc"),
         oidc_enabled=True,
         oidc_audience="test-aud",
+        oidc_allowed_domains=("acme.test",),
         cf_access_enabled=True,
         cf_access_client_id="cf-id",
         cf_access_client_secret="cf-secret",  # noqa: S106

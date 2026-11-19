@@ -14,7 +14,8 @@ if TYPE_CHECKING:
     from lai.db.connection import SqliteDatabase
 
 _SELECT_COLUMNS = (
-    "id, name, description, workspace_root, default_model_profile, created_at, updated_at"
+    "id, name, description, workspace_root, default_model_profile, "
+    "owner_principal_id, created_at, updated_at"
 )
 
 
@@ -26,6 +27,7 @@ def _row_to_project(row: aiosqlite.Row) -> Project:
         description=str(row["description"]),
         workspace_root=cast("str | None", row["workspace_root"]),
         default_model_profile=str(row["default_model_profile"]),
+        owner_principal_id=str(row["owner_principal_id"]),
         created_at=parse_dt(str(row["created_at"])),
         updated_at=parse_dt(str(row["updated_at"])),
     )
@@ -43,8 +45,8 @@ class SqliteProjectRepository(ProjectRepositoryPort):
             """
             INSERT INTO projects (
                 id, name, description, workspace_root,
-                default_model_profile, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                default_model_profile, owner_principal_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 project.id,
@@ -52,6 +54,7 @@ class SqliteProjectRepository(ProjectRepositoryPort):
                 project.description,
                 project.workspace_root,
                 project.default_model_profile,
+                project.owner_principal_id,
                 format_dt(project.created_at),
                 format_dt(project.updated_at),
             ),
@@ -74,6 +77,28 @@ class SqliteProjectRepository(ProjectRepositoryPort):
             (clamp_limit(limit), clamp_offset(offset)),
         )
         return [_row_to_project(row) for row in rows]
+
+    async def list_for_owner(
+        self,
+        owner_principal_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Project]:
+        """List projects owned by a principal ordered by update and creation time descending."""
+        rows = await self._db.fetch_all(
+            f"SELECT {_SELECT_COLUMNS} FROM projects WHERE owner_principal_id = ? "  # noqa: S608
+            "ORDER BY updated_at DESC, created_at DESC, rowid DESC LIMIT ? OFFSET ?;",
+            (owner_principal_id, clamp_limit(limit), clamp_offset(offset)),
+        )
+        return [_row_to_project(row) for row in rows]
+
+    async def count_for_owner(self, owner_principal_id: str) -> int:
+        """Count projects owned by a specific principal."""
+        row = await self._db.fetch_one(
+            "SELECT COUNT(*) AS project_count FROM projects WHERE owner_principal_id = ?;",
+            (owner_principal_id,),
+        )
+        return int(row["project_count"]) if row is not None else 0
 
     async def delete(self, project_id: str) -> bool:
         """Delete a project, cleaning up FTS rows and cascading child records."""

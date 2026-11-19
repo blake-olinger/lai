@@ -13,6 +13,7 @@ import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
+from lai import security as sec
 from lai.db import SqliteDatabase, SqliteProjectRepository, SqliteSessionRepository
 from lai.domain import (
     AlertCategory,
@@ -23,8 +24,10 @@ from lai.domain import (
     RequestCredentials,
 )
 from lai.domain.chat import Message, MessageRole, Session
-from lai.domain.errors import AuthenticationError, LaiError
+from lai.domain.errors import AuthenticationError, LaiError, ValidationFailedError
+from lai.domain.ids import CLIENT_APP_ID_PREFIX
 from lai.domain.projects import Project
+from lai.domain.tools import PermissionTier, ToolExecutionTarget, ToolSpec
 from lai.observability import configure_observability
 from lai.security import (
     ApiKeyAuthProvider,
@@ -34,6 +37,7 @@ from lai.security import (
     OidcJwtAuthProvider,
     OidcProviderConfig,
     TokenBucketRateLimiter,
+    build_client_app,
     generate_api_key,
 )
 
@@ -44,6 +48,7 @@ if TYPE_CHECKING:
 _ISSUER = "https://accounts.google.com"
 _JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 _AUDIENCE = "lai-client"
+_EXP_FUTURE = 9999999999
 
 
 def _rsa_key_and_jwk(kid: str = "k1") -> tuple[rsa.RSAPrivateKey, dict[str, Any]]:
@@ -83,6 +88,7 @@ async def test_oidc_http_jwks_success_and_error_paths() -> None:
         principal = await provider.authenticate(RequestCredentials(bearer_token=token))
     assert principal.auth_method is AuthMethod.OIDC
     assert principal.subject == "u_http"
+    assert principal.oauth_client_id == _AUDIENCE
 
     with respx.mock(assert_all_called=True) as mock:
         mock.get(_JWKS_URL).mock(return_value=httpx.Response(200, json=["not-a-dict"]))
@@ -189,3 +195,110 @@ async def test_composite_replacement_ratelimit_validation_and_session_delete(
         with pytest.raises(LaiError):
             async with db.write_transaction() as conn:
                 await conn.execute("INSERT INTO projects (id) VALUES ('bad');")
+
+
+def test_build_client_app_validation_and_secret_removal() -> None:
+    """build_client_app validates inputs, deduplicates, coerces CLIENT target, and drops secrets."""
+    for removed in (
+        "CLIENT_APP_SECRET_PREFIX",
+        "hash_client_app_secret",
+        "verify_client_app_secret",
+        "generate_client_app",
+    ):
+        assert not hasattr(sec, removed)
+
+    tool_in = ToolSpec(
+        name="run_local",
+        description="Run local command",
+        permission_tier=PermissionTier.EXEC,
+        execution_target=ToolExecutionTarget.SERVER_ATTACHMENT,
+    )
+    app = build_client_app(
+        "  Desktop Helper  ",
+        "  12345.apps.googleusercontent.com  ",
+        allowed_tiers=(PermissionTier.READ, PermissionTier.EXEC, PermissionTier.READ),
+        registered_tools=(tool_in,),
+        allowed_project_ids=(" prj_1 ", "", "prj_1", "prj_2"),
+    )
+    assert app.id.startswith(CLIENT_APP_ID_PREFIX)
+    assert (app.name, app.oauth_client_id) == ("Desktop Helper", "12345.apps.googleusercontent.com")
+    assert app.allowed_tiers == (PermissionTier.READ, PermissionTier.EXEC)
+    assert app.allowed_project_ids == ("prj_1", "prj_2")
+    assert app.registered_tools[0].execution_target is ToolExecutionTarget.CLIENT
+    assert app.is_active() is True
+
+    with pytest.raises(ValidationFailedError, match="name"):
+        build_client_app("   ", "client-1")
+    with pytest.raises(ValidationFailedError, match="OAuth client ID"):
+        build_client_app("app", "   ")
+    with pytest.raises(ValidationFailedError, match="allowed_tiers"):
+        build_client_app("bad-tier", "client-1", (PermissionTier.READ,), (tool_in,))
+
+    dup_a = ToolSpec(name="dup", description="a", permission_tier=PermissionTier.READ)
+    dup_b = ToolSpec(name="dup", description="b", permission_tier=PermissionTier.READ)
+    with pytest.raises(ValidationFailedError, match="Duplicate"):
+        build_client_app("dup-tools", "client-1", (PermissionTier.READ,), (dup_a, dup_b))
+
+
+async def test_oidc_multi_audience_and_azp_client_binding() -> None:
+    """OidcJwtAuthProvider enforces non-empty audiences and extracts azp/aud oauth_client_id."""
+    priv, jwk = _rsa_key_and_jwk("k_multi")
+
+    async def fetcher(_url: str) -> dict[str, Any]:
+        return {"keys": [jwk]}
+
+    empty_cfg = OidcProviderConfig(enabled=True, issuer_url=_ISSUER, jwks_url=_JWKS_URL)
+    assert empty_cfg.resolved_audiences() == ()
+    empty_provider = OidcJwtAuthProvider(empty_cfg, jwks_fetcher=fetcher)
+    base_claims = {
+        "iss": _ISSUER,
+        "aud": "web-client",
+        "sub": "u_multi",
+        "email": "user@acme.test",
+        "email_verified": True,
+        "exp": _EXP_FUTURE,
+    }
+    tok = jwt.encode(base_claims, priv, algorithm="RS256", headers={"kid": "k_multi"})
+    with pytest.raises(AuthenticationError, match="audience"):
+        await empty_provider.authenticate(RequestCredentials(bearer_token=tok))
+
+    cfg = OidcProviderConfig(
+        enabled=True,
+        issuer_url=_ISSUER,
+        jwks_url=_JWKS_URL,
+        audience="legacy-client",
+        audiences=("  web-client  ", "", "legacy-client", "desktop-client"),
+    )
+    assert cfg.resolved_audiences() == ("web-client", "legacy-client", "desktop-client")
+    provider = OidcJwtAuthProvider(cfg, jwks_fetcher=fetcher)
+
+    # azp present and authorized overrides aud for oauth_client_id
+    azp_tok = jwt.encode(
+        {**base_claims, "aud": "web-client", "azp": " desktop-client "},
+        priv,
+        algorithm="RS256",
+        headers={"kid": "k_multi"},
+    )
+    azp_principal = await provider.authenticate(RequestCredentials(bearer_token=azp_tok))
+    assert azp_principal.oauth_client_id == "desktop-client"
+
+    # aud as list picks first matching configured audience when azp is absent or None
+    list_tok = jwt.encode(
+        {**base_claims, "aud": ["other-aud", "legacy-client", "web-client"], "azp": None},
+        priv,
+        algorithm="RS256",
+        headers={"kid": "k_multi"},
+    )
+    list_principal = await provider.authenticate(RequestCredentials(bearer_token=list_tok))
+    assert list_principal.oauth_client_id == "legacy-client"
+
+    # Unauthorized or non-string azp fails closed
+    for bad_azp in ("rogue-client", "", 12345):
+        bad_tok = jwt.encode(
+            {**base_claims, "azp": bad_azp},
+            priv,
+            algorithm="RS256",
+            headers={"kid": "k_multi"},
+        )
+        with pytest.raises(AuthenticationError):
+            await provider.authenticate(RequestCredentials(bearer_token=bad_tok))

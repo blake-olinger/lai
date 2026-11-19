@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, Self, cast
 
 import yaml
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
 
+from lai.config._validators import validate_lai_settings
 from lai.config.profiles import DEFAULT_MODEL_PROFILE_NAME
 from lai.domain.errors import ValidationFailedError
 from lai.domain.guardrails import GuardrailConfig
@@ -68,6 +69,9 @@ class LaiSettings(BaseSettings):
     map_window_tokens: int = Field(default=9000, ge=256)
     map_window_overlap_tokens: int = Field(default=300, ge=0)
     max_queued_jobs: int = Field(default=64, ge=1)
+    max_projects_per_principal: int = Field(default=10, ge=1)
+    max_storage_bytes_per_principal: int = Field(default=1_073_741_824, ge=1)
+    max_queued_jobs_per_principal: int = Field(default=4, ge=1)
 
     keepalive_interval_seconds: float = Field(default=10.0, gt=0.0)
     json_keepalive_threshold_seconds: float = Field(default=20.0, gt=0.0)
@@ -75,6 +79,8 @@ class LaiSettings(BaseSettings):
     ip_rate_limit_rpm: int = Field(default=240, ge=1)
 
     cf_access_enabled: bool = False
+    trust_cloudflare_headers: bool = False
+    cors_allowed_origins: tuple[str, ...] = ()
     cf_access_client_id: str | None = None
     cf_access_client_secret: str | None = None
     cf_access_team_domain: str | None = None
@@ -85,10 +91,12 @@ class LaiSettings(BaseSettings):
     oidc_issuer_url: str = "https://accounts.google.com"
     oidc_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
     oidc_audience: str | None = None
+    oidc_audiences: tuple[str, ...] = ()
     oidc_allowed_emails: tuple[str, ...] = ()
     oidc_allowed_domains: tuple[str, ...] = ()
     oidc_default_scopes: tuple[str, ...] = (
         "projects:read",
+        "projects:write",
         "files:read",
         "files:write",
         "chat:read",
@@ -103,6 +111,21 @@ class LaiSettings(BaseSettings):
     guardrails: GuardrailConfig = Field(default_factory=GuardrailConfig)
     log_level: str = "INFO"
     log_json: bool = False
+
+    def resolved_oidc_audiences(self) -> tuple[str, ...]:
+        """Return deduplicated, non-empty OIDC audiences from oidc_audiences and oidc_audience."""
+        items = [item.strip() for item in self.oidc_audiences if item.strip()]
+        if self.oidc_audience is not None:
+            legacy = self.oidc_audience.strip()
+            if legacy:
+                items.append(legacy)
+        return tuple(dict.fromkeys(items))
+
+    @model_validator(mode="after")
+    def _validate_security_constraints(self) -> Self:
+        """Enforce fail-closed OIDC, Cloudflare Access, and CORS origin settings."""
+        validate_lai_settings(self)
+        return self
 
 
 def load_yaml_mapping(config_path: Path) -> dict[str, object]:

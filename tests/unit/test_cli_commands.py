@@ -94,6 +94,12 @@ def test_cli_keys_create_list_expired_revoke_and_error_cases(tmp_path: Path) -> 
     assert "projects:read,chat:read" in res_create.output
     assert "lai_sk_" in res_create.output
 
+    res_default = runner.invoke(
+        cli_app, ["keys", "create", "--db-path", str(db_path), "--name", "default-user"]
+    )
+    assert res_default.exit_code == 0, res_default.output
+    assert "projects:write" in res_default.output
+
     res_admin = runner.invoke(
         cli_app, ["keys", "create", "--db-path", str(db_path), "--name", "root", "--admin"]
     )

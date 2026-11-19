@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from lai.domain.auth import ApiScope
 from lai.domain.chat import MessageRole, OrchestratorEvent
 from lai.domain.inference import InferenceMessage, InferenceRequest
 from lai.domain.scheduler import JobPriority, LeaseRequest
@@ -100,6 +101,7 @@ async def run_direct_stream(  # noqa: PLR0913
         project_id=turn_input.project_id,
         principal_id=principal.principal_id,
         priority=JobPriority.INTERACTIVE,
+        bypass_principal_quota=principal.has_scope(ApiScope.ADMIN),
     )
     acc = StreamedInferenceAccumulator()
     async for event in stream_leased_inference(

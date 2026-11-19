@@ -316,3 +316,16 @@ class SqliteFileRepository(FileRepositoryPort):
             await conn.execute("DELETE FROM chunks_fts WHERE file_id = ?;", (file_id,))
             cursor = await conn.execute("DELETE FROM files WHERE id = ?;", (file_id,))
             return cursor.rowcount > 0
+
+    async def sum_bytes_for_owner(self, owner_principal_id: str) -> int:
+        """Return total stored file bytes across projects owned by a principal."""
+        row = await self._db.fetch_one(
+            """
+            SELECT COALESCE(SUM(f.size_bytes), 0) AS total_bytes
+            FROM files AS f
+            JOIN projects AS p ON p.id = f.project_id
+            WHERE p.owner_principal_id = ?;
+            """,
+            (owner_principal_id,),
+        )
+        return int(row["total_bytes"]) if row is not None else 0

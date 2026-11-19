@@ -29,7 +29,7 @@ async def get_health() -> HealthResponse:
 
 @router.get("/v1/system/status", response_model=SystemStatusResponse)
 async def get_system_status(
-    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.CHAT_READ))],
+    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.ADMIN))],
     services: Annotated[AppServices, Depends(get_services)],
 ) -> SystemStatusResponse:
     """Return GPU telemetry, backend health, spooler snapshot, and alert count."""

@@ -74,6 +74,13 @@ class NotFoundError(LaiError):
     default_status_code: ClassVar[int] = 404
 
 
+class ConflictError(LaiError):
+    """Raised when a resource state or unique constraint conflicts with the request."""
+
+    default_code: ClassVar[str] = "conflict"
+    default_status_code: ClassVar[int] = 409
+
+
 class ValidationFailedError(LaiError):
     """Raised when domain validation or invariant checks fail."""
 

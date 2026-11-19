@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from lai.api._tenancy import require_accessible_project, require_accessible_session
 from lai.api.schemas.openai import (
     OpenAIChatChoice,
     OpenAIChatChoiceMessage,
@@ -39,9 +40,9 @@ if TYPE_CHECKING:
     from lai.api.deps import AppServices
     from lai.api.schemas.openai import OpenAIChatMessageInput
     from lai.config.settings import LaiSettings
+    from lai.domain.auth import AuthPrincipal
     from lai.domain.chat import OrchestratorEvent, Session, TurnOutput
 
-_DEFAULT_OPENAI_PROJECT_ID = "default"
 _SYSTEM_ROLES = frozenset({"system", "developer"})
 _HISTORY_ROLES = frozenset({"user", "assistant"})
 _GUARDRAIL_ROLES = frozenset({"system", "developer", "user"})
@@ -168,23 +169,24 @@ def parse_context_mode(
 async def resolve_session_and_project(
     services: AppServices,
     *,
+    principal: AuthPrincipal,
     explicit_session_id: str,
     explicit_project_id: str,
-) -> tuple[str, str, Session | None]:
-    """Resolve (session_id, project_id, existing_session) and enforce session ownership."""
+) -> tuple[str, str, Session | None, bool]:
+    """Resolve (session_id, project_id, existing_session, has_owned_project) with isolation."""
     if not explicit_session_id:
-        return new_session_id(), explicit_project_id or _DEFAULT_OPENAI_PROJECT_ID, None
+        if explicit_project_id:
+            await require_accessible_project(services, explicit_project_id, principal)
+            return new_session_id(), explicit_project_id, None, True
+        return new_session_id(), f"default:{principal.principal_id}", None, False
 
-    existing_session = await services.session_repo.get_session(explicit_session_id)
-    if existing_session is not None:
-        if explicit_project_id and explicit_project_id != existing_session.project_id:
-            msg = (
-                f"Session {existing_session.id!r} does not belong to "
-                f"project {explicit_project_id!r}."
-            )
-            raise AuthorizationError(msg, details={"session_id": existing_session.id})
-        return explicit_session_id, existing_session.project_id, existing_session
-    return explicit_session_id, explicit_project_id or _DEFAULT_OPENAI_PROJECT_ID, None
+    if explicit_project_id:
+        await require_accessible_project(services, explicit_project_id, principal)
+    existing_session = await require_accessible_session(services, explicit_session_id, principal)
+    if explicit_project_id and explicit_project_id != existing_session.project_id:
+        msg = f"Session {existing_session.id!r} does not belong to project {explicit_project_id!r}."
+        raise AuthorizationError(msg, details={"session_id": existing_session.id})
+    return explicit_session_id, existing_session.project_id, existing_session, True
 
 
 def resolve_openai_model(

@@ -91,6 +91,7 @@ async def _build_authenticator(
             issuer_url=settings.oidc_issuer_url,
             jwks_url=settings.oidc_jwks_url,
             audience=settings.oidc_audience,
+            audiences=settings.resolved_oidc_audiences(),
             allowed_emails=settings.oidc_allowed_emails,
             allowed_domains=settings.oidc_allowed_domains,
             default_scopes=tuple(ApiScope(scope) for scope in settings.oidc_default_scopes),
@@ -198,7 +199,10 @@ async def build_app_services(
     )
 
     inference_provider = _build_inference_provider(settings)
-    spooler = InferenceSpooler(max_queued_jobs=settings.max_queued_jobs)
+    spooler = InferenceSpooler(
+        max_queued_jobs=settings.max_queued_jobs,
+        max_queued_jobs_per_principal=settings.max_queued_jobs_per_principal,
+    )
     session_gate = SessionGate()
 
     audit_logger = PromptAuditLogger(

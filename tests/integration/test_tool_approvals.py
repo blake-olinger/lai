@@ -153,9 +153,17 @@ async def test_gated_read_restores_confinement_across_restart_and_enforces_cas(
     read_plugin_after_restart = _GatedReadPlugin()
     spec_after = IntegrationSpec(tools=(read_plugin_after_restart,))
     async with open_services_harness(settings, spec_after) as h2:
-        h_approve = await mint_auth_headers(
-            h2.svc, "approver", (ApiScope.TOOLS_SAFE, ApiScope.TOOLS_APPROVE)
+        h_other = await mint_auth_headers(
+            h2.svc, "other-approver", (ApiScope.TOOLS_SAFE, ApiScope.TOOLS_APPROVE)
         )
+        r_isolated = await h2.client.post(
+            f"/v1/tool-approvals/{approval_id}/resolve",
+            headers=h_other,
+            json={"approved": True},
+        )
+        assert r_isolated.status_code == HTTPStatus.NOT_FOUND
+
+        h_approve = await mint_auth_headers(h2.svc, "approver", (ApiScope.ADMIN,))
         responses = await asyncio.gather(
             *[
                 h2.client.post(

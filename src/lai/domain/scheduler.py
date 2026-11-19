@@ -42,4 +42,5 @@ class LeaseRequest(StrictModel):
     project_id: str = Field(min_length=1)
     principal_id: str = Field(default="anonymous", min_length=1)
     priority: JobPriority = JobPriority.INTERACTIVE
+    bypass_principal_quota: bool = False
     enqueued_at: datetime = Field(default_factory=utc_now)

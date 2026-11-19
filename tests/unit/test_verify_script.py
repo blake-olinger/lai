@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -223,3 +224,23 @@ def test_cmd_all_propagates_tier_and_cov_floor(monkeypatch: pytest.MonkeyPatch) 
         ("schema", None),
         ("mutate", (None, "full", 88.0)),
     ]
+
+
+def test_isolated_temp_env_sets_and_restores_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """isolated_temp_env isolates TEMP/TMP/TMPDIR and restores prior env and cleans up."""
+    monkeypatch.setenv("TEMP", "orig-temp")
+    monkeypatch.setenv("TMP", "orig-tmp")
+    monkeypatch.delenv("TMPDIR", raising=False)
+
+    created_dir: Path | None = None
+    with _verify_targets.isolated_temp_env() as tmp_dir:
+        created_dir = tmp_dir
+        assert tmp_dir.is_dir()
+        for key in ("TEMP", "TMP", "TMPDIR"):
+            assert os.environ.get(key) == str(tmp_dir)
+
+    assert created_dir is not None
+    assert not created_dir.exists()
+    assert os.environ.get("TEMP") == "orig-temp"
+    assert os.environ.get("TMP") == "orig-tmp"
+    assert "TMPDIR" not in os.environ

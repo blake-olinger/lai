@@ -6,7 +6,6 @@ from lai.api.schemas.client_apps import (
     ClientAppListResponse,
     ClientAppResponse,
     CreateClientAppRequest,
-    CreatedClientAppResponse,
 )
 from lai.api.schemas.common import (
     AlertsListResponse,
@@ -52,7 +51,6 @@ __all__ = [
     "ClientAppListResponse",
     "ClientAppResponse",
     "CreateClientAppRequest",
-    "CreatedClientAppResponse",
     "DeleteResponse",
     "ErrorDetail",
     "ErrorResponse",

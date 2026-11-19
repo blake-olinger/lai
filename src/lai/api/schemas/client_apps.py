@@ -15,9 +15,10 @@ if TYPE_CHECKING:
 
 
 class CreateClientAppRequest(StrictModel):
-    """Payload for registering a new client application."""
+    """Payload for registering a new OIDC-bound client application."""
 
     name: str = Field(min_length=1, max_length=120)
+    oauth_client_id: str = Field(min_length=1, max_length=256)
     allowed_tiers: tuple[PermissionTier, ...] = (PermissionTier.READ,)
     registered_tools: tuple[ToolSpec, ...] = ()
     allowed_project_ids: tuple[str, ...] = ()
@@ -25,11 +26,11 @@ class CreateClientAppRequest(StrictModel):
 
 
 class ClientAppResponse(StrictModel):
-    """Public metadata for a registered client application without secret_hash."""
+    """Public metadata for a registered OIDC-bound client application."""
 
     id: str = Field(min_length=1)
     name: str = Field(min_length=1, max_length=120)
-    secret_prefix: str = Field(min_length=4, max_length=32)
+    oauth_client_id: str = Field(min_length=1, max_length=256)
     allowed_tiers: tuple[PermissionTier, ...]
     registered_tools: tuple[ToolSpec, ...]
     allowed_project_ids: tuple[str, ...]
@@ -46,11 +47,11 @@ class ClientAppResponse(StrictModel):
         *,
         now: datetime | None = None,
     ) -> ClientAppResponse:
-        """Convert a ClientAppRecord domain model into a secret-free API response."""
+        """Convert a ClientAppRecord domain model into a public API response."""
         return cls(
             id=record.id,
             name=record.name,
-            secret_prefix=record.secret_prefix,
+            oauth_client_id=record.oauth_client_id,
             allowed_tiers=record.allowed_tiers,
             registered_tools=record.registered_tools,
             allowed_project_ids=record.allowed_project_ids,
@@ -60,13 +61,6 @@ class ClientAppResponse(StrictModel):
             revoked_at=record.revoked_at,
             active=record.is_active(now=now),
         )
-
-
-class CreatedClientAppResponse(StrictModel):
-    """One-time response returning a newly registered client app and its plaintext secret."""
-
-    app: ClientAppResponse
-    client_secret: str = Field(min_length=16)
 
 
 class ClientAppListResponse(StrictModel):

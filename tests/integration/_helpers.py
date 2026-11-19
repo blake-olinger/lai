@@ -2,18 +2,32 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
+import jwt
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 
 from lai.api.app import create_app
 from lai.api.runtime import build_app_services, close_app_services
 from lai.config.profiles import get_model_profile
+from lai.domain.auth import ApiScope
 from lai.ingestion import DeterministicHashEmbedder, LanceDbVectorStore, LocalIngestionPipeline
 from lai.orchestrator import TurnOrchestrator
-from lai.security import generate_api_key, generate_client_app
+from lai.security import (
+    ApiKeyAuthProvider,
+    CompositeAuthenticator,
+    OidcJwtAuthProvider,
+    OidcProviderConfig,
+    build_client_app,
+    generate_api_key,
+)
 from lai.tools import build_default_tool_registry
 from tests._helpers import bearer_headers
 
@@ -25,12 +39,115 @@ if TYPE_CHECKING:
 
     from lai.api.deps import AppServices
     from lai.config.settings import LaiSettings
-    from lai.domain.auth import ApiScope
+    from lai.domain.client_apps import ClientAppRecord
     from lai.domain.tools import PermissionTier, ToolSpec
     from lai.ports.inference import InferenceProviderPort
     from lai.ports.orchestrator import OrchestratorPort
     from lai.ports.scheduler import InferenceSpoolerPort
     from lai.ports.tools import ToolPluginPort
+
+_RSA_PUBLIC_EXPONENT = 65537
+_RSA_KEY_SIZE = 2048
+_DEFAULT_OIDC_ISSUER = "https://accounts.google.com"
+_DEFAULT_OIDC_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+_DEFAULT_OIDC_SCOPES: tuple[ApiScope, ...] = (
+    ApiScope.PROJECTS_READ,
+    ApiScope.PROJECTS_WRITE,
+    ApiScope.FILES_READ,
+    ApiScope.FILES_WRITE,
+    ApiScope.CHAT_READ,
+    ApiScope.CHAT_WRITE,
+    ApiScope.TOOLS_SAFE,
+)
+
+
+@lru_cache(maxsize=1)
+def _test_rsa_keypair() -> tuple[rsa.RSAPrivateKey, dict[str, Any]]:
+    priv = rsa.generate_private_key(public_exponent=_RSA_PUBLIC_EXPONENT, key_size=_RSA_KEY_SIZE)
+    jwk_dict: dict[str, Any] = json.loads(RSAAlgorithm.to_jwk(priv.public_key()))
+    jwk_dict.update({"kid": "test-oidc-k1", "alg": "RS256", "use": "sig"})
+    return priv, jwk_dict
+
+
+class OidcTestAuthority:
+    """In-memory RS256 OIDC JWT issuer wired into AppServices for integration tests."""
+
+    def __init__(self, *, issuer: str = _DEFAULT_OIDC_ISSUER) -> None:
+        self._private_key, self.jwk = _test_rsa_keypair()
+        self.issuer = issuer
+
+    def mint_token(
+        self,
+        *,
+        sub: str = "oidc-user-1",
+        email: str = "dev@acme.test",
+        aud: str | list[str] = "test-client",
+        azp: str | None = None,
+        email_verified: bool = True,
+    ) -> str:
+        """Sign an RS256 OIDC JWT token with configured claims."""
+        now = datetime.now(UTC)
+        claims: dict[str, Any] = {
+            "iss": self.issuer,
+            "aud": aud,
+            "sub": sub,
+            "email": email,
+            "email_verified": email_verified,
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(minutes=10)).timestamp()),
+        }
+        if azp is not None:
+            claims["azp"] = azp
+        return jwt.encode(
+            claims,
+            self._private_key,
+            algorithm="RS256",
+            headers={"kid": str(self.jwk["kid"])},
+        )
+
+    def mint_headers(
+        self,
+        *,
+        sub: str = "oidc-user-1",
+        email: str = "dev@acme.test",
+        aud: str | list[str] = "test-client",
+        azp: str | None = None,
+    ) -> dict[str, str]:
+        """Mint an OIDC JWT and return Bearer authorization headers."""
+        token = self.mint_token(sub=sub, email=email, aud=aud, azp=azp)
+        return bearer_headers(token)
+
+
+def configure_test_oidc(
+    svc: AppServices,
+    *,
+    audiences: Sequence[str],
+    allowed_domains: Sequence[str] = ("acme.test",),
+    admin_emails: Sequence[str] = (),
+    default_scopes: tuple[ApiScope, ...] = _DEFAULT_OIDC_SCOPES,
+) -> OidcTestAuthority:
+    """Wire CompositeAuthenticator with ApiKeyAuthProvider and an in-memory OIDC authority."""
+    authority = OidcTestAuthority()
+
+    async def _jwks_fetcher(_url: str) -> dict[str, Any]:
+        return {"keys": [authority.jwk]}
+
+    oidc_cfg = OidcProviderConfig(
+        enabled=True,
+        issuer_url=authority.issuer,
+        jwks_url=_DEFAULT_OIDC_JWKS_URL,
+        audiences=tuple(audiences),
+        allowed_domains=tuple(allowed_domains),
+        admin_emails=tuple(admin_emails),
+        default_scopes=default_scopes,
+    )
+    svc.authenticator = CompositeAuthenticator(
+        providers=[
+            ApiKeyAuthProvider(svc.api_key_repo),
+            OidcJwtAuthProvider(oidc_cfg, jwks_fetcher=_jwks_fetcher),
+        ]
+    )
+    return authority
 
 
 @dataclass(slots=True)
@@ -196,18 +313,23 @@ async def create_session(
     return str(response.json()["id"])
 
 
-async def register_client_app(
+async def register_client_app(  # noqa: PLR0913
     svc: AppServices,
     name: str,
     *,
+    oauth_client_id: str,
     allowed_tiers: tuple[PermissionTier, ...],
     registered_tools: tuple[ToolSpec, ...],
-) -> tuple[str, str]:
-    """Persist a ClientApp record and return (app_id, plaintext_secret)."""
-    created = generate_client_app(
+    allowed_project_ids: tuple[str, ...] = (),
+    expires_at: datetime | None = None,
+) -> ClientAppRecord:
+    """Persist an OIDC-bound ClientApp record and return it."""
+    record = build_client_app(
         name,
+        oauth_client_id=oauth_client_id,
         allowed_tiers=allowed_tiers,
         registered_tools=registered_tools,
+        allowed_project_ids=allowed_project_ids,
+        expires_at=expires_at,
     )
-    await svc.client_app_repo.create(created.record)
-    return created.record.id, created.plaintext_secret
+    return await svc.client_app_repo.create(record)

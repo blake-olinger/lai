@@ -13,10 +13,10 @@ from lai.cli._common import open_client_app_repo, resolve_db_path, resolve_setti
 from lai.domain.base import utc_now
 from lai.domain.errors import LaiError
 from lai.domain.tools import PermissionTier
-from lai.security import generate_client_app
+from lai.security import build_client_app
 
 if TYPE_CHECKING:
-    from lai.domain.client_apps import ClientAppRecord, CreatedClientApp
+    from lai.domain.client_apps import ClientAppRecord
 
 apps_app = typer.Typer(
     name="apps",
@@ -25,23 +25,25 @@ apps_app = typer.Typer(
 )
 
 
-async def _create_app_async(
+async def _create_app_async(  # noqa: PLR0913
     db_path: Path,
     name: str,
+    *,
+    oauth_client_id: str,
     tiers: tuple[PermissionTier, ...],
     project_ids: tuple[str, ...],
     expires_days: int | None,
-) -> CreatedClientApp:
+) -> ClientAppRecord:
     expires_at = utc_now() + timedelta(days=expires_days) if expires_days is not None else None
-    created = generate_client_app(
+    record = build_client_app(
         name=name,
+        oauth_client_id=oauth_client_id,
         allowed_tiers=tiers,
         allowed_project_ids=project_ids,
         expires_at=expires_at,
     )
     async with open_client_app_repo(db_path) as repo:
-        await repo.create(created.record)
-    return created
+        return await repo.create(record)
 
 
 async def _list_apps_async(db_path: Path) -> list[ClientAppRecord]:
@@ -58,6 +60,10 @@ async def _revoke_app_async(db_path: Path, app_id: str) -> bool:
 def create_app(  # noqa: PLR0913, PLR0917
     name: Annotated[
         str, typer.Option("--name", "-n", help="Human-readable label for the client app.")
+    ],
+    oauth_client_id: Annotated[
+        str,
+        typer.Option("--oauth-client-id", help="OIDC client ID bound to this application."),
     ],
     tier: Annotated[
         list[PermissionTier] | None,
@@ -80,25 +86,31 @@ def create_app(  # noqa: PLR0913, PLR0917
         typer.Option("--db-path", help="Optional explicit SQLite DB path override."),
     ] = None,
 ) -> None:
-    """Register a new client application and print its one-time secret."""
+    """Register a new client application bound to an OIDC client ID."""
     settings = resolve_settings(config)
     target_db = resolve_db_path(settings, db_path)
 
     effective_tiers = tuple(tier) if tier else (PermissionTier.READ,)
     effective_projects = tuple(project_id) if project_id else ()
     try:
-        created = asyncio.run(
-            _create_app_async(target_db, name, effective_tiers, effective_projects, expires_days)
+        record = asyncio.run(
+            _create_app_async(
+                target_db,
+                name,
+                oauth_client_id=oauth_client_id,
+                tiers=effective_tiers,
+                project_ids=effective_projects,
+                expires_days=expires_days,
+            )
         )
     except LaiError as exc:
         typer.echo(f"Error ({exc.code}): {exc.message}", err=True)
         raise typer.Exit(code=1) from exc
 
-    tier_csv = ",".join(item.value for item in created.record.allowed_tiers)
-    projects_csv = ",".join(created.record.allowed_project_ids) or "*"
-    typer.echo(f"Created client app: id={created.record.id} prefix={created.record.secret_prefix}")
+    tier_csv = ",".join(item.value for item in record.allowed_tiers)
+    projects_csv = ",".join(record.allowed_project_ids) or "*"
+    typer.echo(f"Created client app: id={record.id} oauth_client_id={record.oauth_client_id}")
     typer.echo(f"Allowed tiers: {tier_csv} | Projects: {projects_csv}")
-    typer.echo(f"Secret (store securely, shown once): {created.plaintext_secret}")
 
 
 @apps_app.command("list")
@@ -112,7 +124,7 @@ def list_apps(
         typer.Option("--db-path", help="Optional explicit SQLite DB path override."),
     ] = None,
 ) -> None:
-    """List registered client applications without revealing secrets."""
+    """List registered client applications and their bound OIDC client IDs."""
     settings = resolve_settings(config)
     target_db = resolve_db_path(settings, db_path)
     records = asyncio.run(_list_apps_async(target_db))
@@ -132,7 +144,7 @@ def list_apps(
         tier_csv = ",".join(item.value for item in record.allowed_tiers)
         projects_csv = ",".join(record.allowed_project_ids) or "*"
         typer.echo(
-            f"{record.id}\t{record.name}\t{record.secret_prefix}\t{status_label}"
+            f"{record.id}\t{record.name}\t{record.oauth_client_id}\t{status_label}"
             f"\t[{tier_csv}]\t[{projects_csv}]\ttools={len(record.registered_tools)}"
         )
 

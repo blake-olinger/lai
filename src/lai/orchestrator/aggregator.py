@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from lai.domain.auth import ApiScope
 from lai.domain.chat import Citation, OrchestratorEvent, ProgressEvent, TokenUsage
 from lai.domain.inference import InferenceRequest
 from lai.domain.scheduler import JobPriority, LeaseRequest
@@ -61,6 +62,17 @@ class _ReduceParams:
     fallback_citations: Sequence[Citation]
     session_system_prompt: str | None
     history_messages: Sequence[InferenceMessage]
+
+
+def _build_map_reduce_lease(turn_input: TurnInput, principal: AuthPrincipal) -> LeaseRequest:
+    """Build a MAP_REDUCE LeaseRequest with admin quota bypass when authorized."""
+    return LeaseRequest(
+        session_id=turn_input.session_id,
+        project_id=turn_input.project_id,
+        principal_id=principal.principal_id,
+        priority=JobPriority.MAP_REDUCE,
+        bypass_principal_quota=principal.has_scope(ApiScope.ADMIN),
+    )
 
 
 def _pack_finding_batches(findings: Sequence[str], *, batch_limit_tokens: int) -> list[list[str]]:
@@ -136,12 +148,7 @@ class MapReduceAggregator:
         file_summary_text: str,
     ) -> tuple[str, TokenUsage]:
         """Acquire one MAP_REDUCE lease and extract concise findings for one window."""
-        lease_req = LeaseRequest(
-            session_id=turn_input.session_id,
-            project_id=turn_input.project_id,
-            principal_id=principal.principal_id,
-            priority=JobPriority.MAP_REDUCE,
-        )
+        lease_req = _build_map_reduce_lease(turn_input, principal)
         request = InferenceRequest(
             model=model_profile.name,
             messages=build_map_window_messages(
@@ -177,12 +184,7 @@ class MapReduceAggregator:
         usage = TokenUsage()
         total_batches = len(batches)
         for idx, batch in enumerate(batches):
-            lease_req = LeaseRequest(
-                session_id=turn_input.session_id,
-                project_id=turn_input.project_id,
-                principal_id=principal.principal_id,
-                priority=JobPriority.MAP_REDUCE,
-            )
+            lease_req = _build_map_reduce_lease(turn_input, principal)
             request = InferenceRequest(
                 model=model_profile.name,
                 messages=build_compression_messages(
@@ -224,12 +226,7 @@ class MapReduceAggregator:
         effective_max_tokens = (
             turn_input.max_tokens if turn_input.max_tokens is not None else profile.max_tokens
         )
-        lease_req = LeaseRequest(
-            session_id=turn_input.session_id,
-            project_id=turn_input.project_id,
-            principal_id=params.principal.principal_id,
-            priority=JobPriority.MAP_REDUCE,
-        )
+        lease_req = _build_map_reduce_lease(turn_input, params.principal)
         request = InferenceRequest(
             model=profile.name,
             messages=reduce_messages,

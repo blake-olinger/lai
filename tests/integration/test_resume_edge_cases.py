@@ -38,8 +38,9 @@ from lai.domain.tools import (
 from lai.orchestrator import TurnOrchestrator
 from lai.ports.inference import InferenceProviderPort
 from lai.ports.tools import ToolPluginPort
-from lai.security import generate_api_key, generate_client_app
+from lai.security import build_client_app, generate_api_key
 from lai.tools import GuardedToolExecutor
+from tests.integration._helpers import OidcTestAuthority, configure_test_oidc
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Generator
@@ -110,6 +111,7 @@ class _EdgeEnv:
     svc: AppServices
     client: httpx.AsyncClient
     inf: _InterToolInference
+    oidc: OidcTestAuthority
     admin_hdrs: dict[str, str]
     writer_hdrs: dict[str, str]
     approver_hdrs: dict[str, str]
@@ -159,38 +161,35 @@ async def edge_env(tmp_path: Path) -> AsyncIterator[_EdgeEnv]:
     inf = _InterToolInference()
     svc.inference_provider = inf
     svc.orchestrator = _mk_orch(svc)
-    keys: dict[str, dict[str, str]] = {}
-    for role, scopes in (
-        ("admin", (ApiScope.ADMIN,)),
-        ("writer", (ApiScope.PROJECTS_WRITE, ApiScope.CHAT_WRITE, ApiScope.TOOLS_SAFE)),
-        ("approver", (ApiScope.TOOLS_SAFE, ApiScope.TOOLS_APPROVE)),
-    ):
-        k = generate_api_key(role, scopes)
-        await svc.api_key_repo.create(k.record)
-        keys[role] = {"Authorization": f"Bearer {k.plaintext_key}"}
+    adm_k = generate_api_key("admin", (ApiScope.ADMIN,))
+    apr_k = generate_api_key("approver", (ApiScope.TOOLS_SAFE, ApiScope.TOOLS_APPROVE))
+    await svc.api_key_repo.create(adm_k.record)
+    await svc.api_key_repo.create(apr_k.record)
+    oidc = configure_test_oidc(
+        svc,
+        audiences=("turn-coerce-cid", "shadow-cid", "esc-cid", "unreg-cid"),
+        default_scopes=(ApiScope.PROJECTS_WRITE, ApiScope.CHAT_WRITE, ApiScope.TOOLS_SAFE),
+    )
+    adm_h = {"Authorization": f"Bearer {adm_k.plaintext_key}"}
+    apr_h = {"Authorization": f"Bearer {apr_k.plaintext_key}"}
+    wr_h = oidc.mint_headers(sub="edge-writer", aud="turn-coerce-cid")
 
     app = create_app(settings, services=svc)
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         ) as cli:
-            pid = (
-                await cli.post("/v1/projects", headers=keys["admin"], json={"name": "edge"})
-            ).json()["id"]
-            sid = (
-                await cli.post("/v1/sessions", headers=keys["writer"], json={"project_id": pid})
-            ).json()["id"]
-            yield _EdgeEnv(svc, cli, inf, keys["admin"], keys["writer"], keys["approver"], pid, sid)
+            pid = (await cli.post("/v1/projects", headers=wr_h, json={"name": "edge"})).json()["id"]
+            sid = (await cli.post("/v1/sessions", headers=wr_h, json={"project_id": pid})).json()[
+                "id"
+            ]
+            yield _EdgeEnv(svc, cli, inf, oidc, adm_h, wr_h, apr_h, pid, sid)
     finally:
         await close_app_services(svc)
 
 
 def _sp(name: str, tier: PermissionTier = PermissionTier.READ) -> ToolSpec:
     return ToolSpec(name=name, description=name, permission_tier=tier)
-
-
-def _ch(hdrs: dict[str, str], app_id: str, secret: str) -> dict[str, str]:
-    return {**hdrs, "X-LAI-Client-Id": app_id, "X-LAI-Client-Secret": secret}
 
 
 async def test_asgi_endpoint_4xx_and_client_auth_edge_branches(edge_env: _EdgeEnv) -> None:
@@ -212,9 +211,10 @@ async def test_asgi_endpoint_4xx_and_client_auth_edge_branches(edge_env: _EdgeEn
     assert (await c.get(f"/v1/projects/{pid}", headers=adm)).status_code == S.OK
     assert (await c.delete("/v1/projects/prj_nope", headers=adm)).status_code == S.NOT_FOUND
 
-    created_app = generate_client_app("turn-coerce", allowed_tiers=(PermissionTier.READ,))
-    await edge_env.svc.client_app_repo.create(created_app.record)
-    app_h = _ch(wr, created_app.record.id, created_app.plaintext_secret)
+    created_app = build_client_app(
+        "turn-coerce", oauth_client_id="turn-coerce-cid", allowed_tiers=(PermissionTier.READ,)
+    )
+    await edge_env.svc.client_app_repo.create(created_app)
     adhoc = {
         "name": "adhoc_read",
         "description": "Adhoc",
@@ -223,44 +223,48 @@ async def test_asgi_endpoint_4xx_and_client_auth_edge_branches(edge_env: _EdgeEn
     }
     dup_j = {"content": "x", "client_tools": [adhoc, adhoc]}
     assert (
-        await c.post(f"/v1/sessions/{sid}/messages", headers=app_h, json=dup_j)
-    ).status_code == (S.UNPROCESSABLE_CONTENT)
+        await c.post(f"/v1/sessions/{sid}/messages", headers=wr, json=dup_j)
+    ).status_code == S.UNPROCESSABLE_CONTENT
 
-    sh = generate_client_app(
-        "sh", allowed_tiers=(PermissionTier.READ,), registered_tools=(_sp("search_files"),)
+    sh = build_client_app(
+        "sh",
+        oauth_client_id="shadow-cid",
+        allowed_tiers=(PermissionTier.READ,),
+        registered_tools=(_sp("search_files"),),
     )
-    esc = generate_client_app(
+    esc = build_client_app(
         "esc",
+        oauth_client_id="esc-cid",
         allowed_tiers=(PermissionTier.READ, PermissionTier.EXEC),
         registered_tools=(_sp("bad_exec", PermissionTier.EXEC),),
     )
-    esc_rec = esc.record.model_copy(update={"allowed_tiers": (PermissionTier.READ,)})
-    for app_rec, sec, hdr_code in (
-        (sh.record, sh.plaintext_secret, S.UNPROCESSABLE_CONTENT),
-        (esc_rec, esc.plaintext_secret, S.FORBIDDEN),
+    esc_rec = esc.model_copy(update={"allowed_tiers": (PermissionTier.READ,)})
+    for app_rec, cid, hdr_code in (
+        (sh, "shadow-cid", S.UNPROCESSABLE_CONTENT),
+        (esc_rec, "esc-cid", S.FORBIDDEN),
     ):
         await edge_env.svc.client_app_repo.create(app_rec)
-        h_bad = _ch(wr, app_rec.id, sec)
+        h_bad = edge_env.oidc.mint_headers(sub="edge-writer", aud=cid)
         assert (
             await c.post(f"/v1/sessions/{sid}/messages", headers=h_bad, json={"content": "x"})
         ).status_code == hdr_code
 
     r_ok = await c.post(
         f"/v1/sessions/{sid}/messages",
-        headers=app_h,
+        headers=wr,
         json={"content": "go", "client_tools": [adhoc]},
     )
     assert r_ok.status_code == S.OK
     aid = r_ok.json()["pending_approval_id"]
-    bad_sec = _ch(wr, created_app.record.id, "wrong")
+    unreg_h = edge_env.oidc.mint_headers(sub="edge-writer", aud="unreg-cid")
     assert (
-        await c.post(f"/v1/tool-approvals/{aid}/result", headers=bad_sec, json={"output": "x"})
-    ).status_code == S.UNAUTHORIZED
+        await c.post(f"/v1/tool-approvals/{aid}/result", headers=unreg_h, json={"output": "x"})
+    ).status_code == S.FORBIDDEN
 
     edge_env.inf.emit_server_tool_on_resume = True
     r_fail = await c.post(
         f"/v1/tool-approvals/{aid}/result",
-        headers=app_h,
+        headers=wr,
         json={"output": "stderr line", "success": False, "error": "exit 1"},
     )
     assert (r_fail.status_code, r_fail.json()["message"]["content"]) == (S.OK, "after-tool:srv-ok")
@@ -321,24 +325,16 @@ async def test_resume_direct_fallback_errors_and_client_tool_resolution(edge_env
     base_srv = ["search_files", "read_file_lines", "get_file_overview", "srv_echo"]
     assert [t.name for t in edge_env.inf.requests[-1].tools] == base_srv
 
-    exp = generate_client_app(
+    exp = build_client_app(
         "e",
+        "exp-cid",
         expires_at=datetime.now(UTC) - timedelta(seconds=5),
         registered_tools=(_sp("srv_echo"),),
     )
-    prj = generate_client_app(
-        "p",
-        allowed_tiers=(PermissionTier.READ,),
-        allowed_project_ids=("prj_x",),
-        registered_tools=(_sp("srv_echo"),),
-    )
-    flt = generate_client_app(
-        "f",
-        allowed_tiers=(PermissionTier.READ,),
-        registered_tools=(_sp("srv_echo"), _sp("ok_cli")),
-    )
+    prj = build_client_app("p", "prj-cid", (PermissionTier.READ,), (_sp("srv_echo"),), ("prj_x",))
+    flt = build_client_app("f", "flt-cid", (PermissionTier.READ,), (_sp("srv_echo"), _sp("ok_cli")))
     for app_rec, exp_names in ((exp, base_srv), (prj, base_srv), (flt, [*base_srv, "ok_cli"])):
-        await svc.client_app_repo.create(app_rec.record)
-        upd = {"client_app_id": app_rec.record.id, "tool_call_id": app_rec.record.id}
+        await svc.client_app_repo.create(app_rec)
+        upd = {"client_app_id": app_rec.id, "tool_call_id": app_rec.id}
         await svc.orchestrator.resume_client_tool(apr.model_copy(update=upd), res_ok, principal)
         assert [t.name for t in edge_env.inf.requests[-1].tools] == exp_names

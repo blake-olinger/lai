@@ -66,6 +66,7 @@ async def _load_approved_client_record(
     approval_id: str,
     client_app_id: str,
     principal_id: str,
+    is_admin: bool = False,
 ) -> ToolApprovalRecord:
     """Load and validate an active, non-expired APPROVED client approval record."""
     record = await audit_repo.get_approval(approval_id)
@@ -86,6 +87,15 @@ async def _load_approved_client_record(
         raise AuthorizationError(
             msg,
             details={"approval_id": approval_id, "client_app_id": client_app_id},
+        )
+    if not is_admin and record.requested_by != principal_id:
+        msg = (
+            f"Principal {principal_id!r} is not authorized to submit result "
+            f"for approval {approval_id!r}."
+        )
+        raise AuthorizationError(
+            msg,
+            details={"approval_id": approval_id, "principal_id": principal_id},
         )
     if record.status is not ApprovalStatus.APPROVED:
         msg = f"Tool approval {approval_id!r} is {record.status.value!r}, expected 'approved'."
@@ -226,6 +236,7 @@ async def submit_client_tool_result(  # noqa: PLR0913
     client_app_id: str,
     result: ToolResult,
     principal_id: str,
+    is_admin: bool = False,
     max_output_chars: int,
     max_payload_bytes: int,
 ) -> ToolResult:
@@ -235,6 +246,7 @@ async def submit_client_tool_result(  # noqa: PLR0913
         approval_id=approval_id,
         client_app_id=client_app_id,
         principal_id=principal_id,
+        is_admin=is_admin,
     )
     sanitized = _sanitize_client_result(
         result,

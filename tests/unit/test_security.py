@@ -230,9 +230,11 @@ async def test_oidc_provider_rsa_ec_caching_rotation_and_policies() -> None:
     assert admin_principal.scopes == (ApiScope.ADMIN,)
     assert admin_principal.issuer == _ISSUER
     assert admin_principal.subject == "sub_123"
+    assert admin_principal.oauth_client_id == _AUDIENCE
 
     user_principal = await provider.authenticate(_bearer(ec_token))
     assert user_principal.scopes == cfg.default_scopes
+    assert user_principal.oauth_client_id == _AUDIENCE
     assert fetch_count == 1
 
     # Unknown kid refreshes after cooldown; TTL expiry triggers subsequent refresh.
