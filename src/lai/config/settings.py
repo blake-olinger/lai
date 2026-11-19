@@ -81,6 +81,7 @@ class LaiSettings(BaseSettings):
     cf_access_enabled: bool = False
     trust_cloudflare_headers: bool = False
     cors_allowed_origins: tuple[str, ...] = ()
+    cors_extra_allow_headers: tuple[str, ...] = ()
     cf_access_client_id: str | None = None
     cf_access_client_secret: str | None = None
     cf_access_team_domain: str | None = None
@@ -94,6 +95,7 @@ class LaiSettings(BaseSettings):
     oidc_audiences: tuple[str, ...] = ()
     oidc_allowed_emails: tuple[str, ...] = ()
     oidc_allowed_domains: tuple[str, ...] = ()
+    oidc_leeway_seconds: float = Field(default=30.0, ge=0.0, le=300.0)
     oidc_default_scopes: tuple[str, ...] = (
         "projects:read",
         "projects:write",

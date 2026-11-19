@@ -13,8 +13,12 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _HEADER_REQUEST_ID = b"x-request-id"
+_HEADER_ORIGIN = b"origin"
+_HEADER_ACRM = b"access-control-request-method"
+_HEADER_ACRH = b"access-control-request-headers"
 _HEADER_CACHE_CONTROL = b"cache-control"
 _CACHE_CONTROL_NO_STORE = b"no-store"
+_HTTP_BAD_REQUEST = 400
 _SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
     (b"x-content-type-options", b"nosniff"),
     (b"x-frame-options", b"DENY"),
@@ -47,6 +51,44 @@ def _extract_incoming_request_id(scope: Scope) -> str:
         if key.lower() == _HEADER_REQUEST_ID:
             return _sanitize_request_id(value)
     return _sanitize_request_id(None)
+
+
+def _extract_cors_preflight_headers(scope: Scope) -> tuple[str | None, str | None, str | None]:
+    """Extract (origin, requested_method, requested_headers) from a CORS preflight scope."""
+    raw_headers = cast("list[tuple[bytes, bytes]]", scope.get("headers", []))
+    origin: str | None = None
+    requested_method: str | None = None
+    requested_headers: str | None = None
+    for key, value in raw_headers:
+        lowered = key.lower()
+        if lowered == _HEADER_ORIGIN:
+            origin = value.decode("latin-1", errors="replace").strip() or None
+        elif lowered == _HEADER_ACRM:
+            requested_method = value.decode("latin-1", errors="replace").strip() or None
+        elif lowered == _HEADER_ACRH:
+            requested_headers = value.decode("latin-1", errors="replace").strip() or None
+    return origin, requested_method, requested_headers
+
+
+def _log_rejected_cors_preflight(
+    preflight: tuple[str | None, str | None, str | None] | None,
+    status_code: int | None,
+    path: str,
+) -> None:
+    """Emit a structured warning when a CORS preflight OPTIONS request is rejected (400)."""
+    if (
+        preflight is not None
+        and status_code == _HTTP_BAD_REQUEST
+        and preflight[0] is not None
+        and preflight[1] is not None
+    ):
+        _logger.warning(
+            "cors_preflight_rejected",
+            path=path,
+            origin=preflight[0],
+            requested_method=preflight[1],
+            requested_headers=preflight[2],
+        )
 
 
 def _inject_response_headers(message: Message, request_id: str) -> None:
@@ -96,11 +138,13 @@ class RequestContextMiddleware:
 
         method = str(scope.get("method", "GET"))
         path = str(scope.get("path", ""))
+        preflight = _extract_cors_preflight_headers(scope) if method == "OPTIONS" else None
         with bind_log_context(request_id=request_id, component="api"):
             try:
                 await self.app(scope, receive, send_wrapper)
             finally:
                 duration_ms = round((time.perf_counter() - started) * _MS_PER_SECOND, 2)
+                _log_rejected_cors_preflight(preflight, status_code, path)
                 _logger.info(
                     "http_request_completed",
                     method=method,

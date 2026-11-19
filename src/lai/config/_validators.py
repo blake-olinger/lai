@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from lai.config.settings import LaiSettings
+
+_CORS_HEADER_RE = re.compile(r"^[A-Za-z0-9-]+$")
 
 PUBLIC_CONSUMER_EMAIL_DOMAINS: frozenset[str] = frozenset(
     {
@@ -114,9 +117,21 @@ def _validate_single_cors_origin(origin: str) -> None:
         raise ValueError(msg)
 
 
+def _validate_cors_header_name(header: str) -> None:
+    """Validate that an extra CORS allow header is an explicit ASCII token without '*'."""
+    if not header or header != header.strip() or _CORS_HEADER_RE.fullmatch(header) is None:
+        msg = (
+            f"Invalid CORS header name {header!r}: "
+            "must be a non-empty ASCII header token (letters, digits, '-')."
+        )
+        raise ValueError(msg)
+
+
 def validate_lai_settings(settings: LaiSettings) -> None:
     """Run all fail-closed security and CORS checks on LaiSettings."""
     _validate_oidc_settings(settings)
     _validate_cloudflare_settings(settings)
     for origin in settings.cors_allowed_origins:
         _validate_single_cors_origin(origin)
+    for header in settings.cors_extra_allow_headers:
+        _validate_cors_header_name(header)

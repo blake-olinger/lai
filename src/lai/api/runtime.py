@@ -96,6 +96,7 @@ async def _build_authenticator(
             allowed_domains=settings.oidc_allowed_domains,
             default_scopes=tuple(ApiScope(scope) for scope in settings.oidc_default_scopes),
             admin_emails=settings.oidc_admin_emails,
+            leeway_seconds=settings.oidc_leeway_seconds,
         )
         providers.append(OidcJwtAuthProvider(oidc_cfg))
 

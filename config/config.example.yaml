@@ -33,6 +33,8 @@ max_queued_jobs_per_principal: 4
 
 # Browser CORS allowlist (exact http:// or https:// origins; wildcard "*" is rejected)
 cors_allowed_origins: []
+# Optional additional allowed browser request headers beyond core/LAI/OpenAI SDK defaults
+cors_extra_allow_headers: []
 
 # Authentication providers: ["api_key"] or ["api_key", "oidc"]
 auth_providers:
@@ -47,6 +49,7 @@ oidc_audience: null
 oidc_audiences: [] # Preferred multi-audience list (e.g. Web SPA + Desktop OAuth client IDs)
 oidc_allowed_emails: []
 oidc_allowed_domains: []
+oidc_leeway_seconds: 30.0
 oidc_default_scopes:
   - "projects:read"
   - "projects:write"

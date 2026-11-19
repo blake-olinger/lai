@@ -17,15 +17,50 @@ from lai.api.runtime import (
     close_app_services,
 )
 from lai.config.settings import LaiSettings, load_settings
+from lai.domain.version import PACKAGE_VERSION
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Sequence
 
     from lai.api.deps import AppServices
     from lai.ports.orchestrator import OrchestratorPort
 
 APP_TITLE = "LAI Local AI Server"
-APP_VERSION = "0.1.0"
+APP_VERSION = PACKAGE_VERSION
+
+DEFAULT_CORS_ALLOW_HEADERS: tuple[str, ...] = (
+    "Authorization",
+    "Content-Type",
+    "X-Request-Id",
+    "X-LAI-Project-Id",
+    "X-LAI-Session-Id",
+    "X-LAI-File-Ids",
+    "X-LAI-Filename",
+    "X-LAI-Context-Mode",
+    # Official OpenAI JS/TS SDK (Stainless) browser headers
+    "X-Stainless-Arch",
+    "X-Stainless-Helper-Method",
+    "X-Stainless-Lang",
+    "X-Stainless-OS",
+    "X-Stainless-Package-Version",
+    "X-Stainless-Read-Timeout",
+    "X-Stainless-Retry-Count",
+    "X-Stainless-Runtime",
+    "X-Stainless-Runtime-Version",
+    "X-Stainless-Timeout",
+)
+
+
+def _merge_cors_allow_headers(extra_headers: Sequence[str]) -> list[str]:
+    """Merge default CORS allow headers with optional custom headers case-insensitively."""
+    merged: list[str] = list(DEFAULT_CORS_ALLOW_HEADERS)
+    seen = {header.lower() for header in merged}
+    for header in extra_headers:
+        lowered = header.lower()
+        if lowered not in seen:
+            merged.append(header)
+            seen.add(lowered)
+    return merged
 
 
 def create_app(
@@ -73,17 +108,8 @@ def create_app(
             CORSMiddleware,
             allow_origins=list(resolved_settings.cors_allowed_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-            allow_headers=[
-                "Authorization",
-                "Content-Type",
-                "X-Request-Id",
-                "X-LAI-Project-Id",
-                "X-LAI-Session-Id",
-                "X-LAI-File-Ids",
-                "X-LAI-Filename",
-                "X-LAI-Context-Mode",
-            ],
+            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=_merge_cors_allow_headers(resolved_settings.cors_extra_allow_headers),
             expose_headers=[
                 "X-Request-Id",
                 "Retry-After",

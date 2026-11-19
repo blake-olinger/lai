@@ -65,6 +65,7 @@ EXPECTED_SETTINGS_DEFAULTS: dict[str, object] = {
     "cf_access_enabled": False,
     "trust_cloudflare_headers": False,
     "cors_allowed_origins": (),
+    "cors_extra_allow_headers": (),
     "auth_providers": ("api_key",),
     "oidc_enabled": False,
     "oidc_issuer_url": "https://accounts.google.com",
@@ -73,6 +74,7 @@ EXPECTED_SETTINGS_DEFAULTS: dict[str, object] = {
     "oidc_audiences": (),
     "oidc_allowed_emails": (),
     "oidc_allowed_domains": (),
+    "oidc_leeway_seconds": 30.0,
     "oidc_default_scopes": (
         "projects:read",
         "projects:write",

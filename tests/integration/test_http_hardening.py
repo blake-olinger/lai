@@ -54,10 +54,11 @@ class _SimpleInference(InferenceProviderPort):
         return BackendHealth(healthy=True, status="ok")
 
 
-def _hardening_settings(
+def _hardening_settings(  # noqa: PLR0913
     tmp_path: Path,
     *,
     cors_allowed_origins: tuple[str, ...] = (),
+    cors_extra_allow_headers: tuple[str, ...] = (),
     trust_cloudflare_headers: bool = False,
     cf_access_enabled: bool = False,
     ip_rate_limit_rpm: int = 240,
@@ -70,6 +71,7 @@ def _hardening_settings(
         logging=LoggingConfig(log_dir=data_dir / "logs", enable_file_logs=False),
         guardrails=GuardrailConfig(enabled=False),
         cors_allowed_origins=cors_allowed_origins,
+        cors_extra_allow_headers=cors_extra_allow_headers,
         trust_cloudflare_headers=trust_cloudflare_headers,
         cf_access_enabled=cf_access_enabled,
         ip_rate_limit_rpm=ip_rate_limit_rpm,
@@ -120,23 +122,40 @@ async def test_disabled_docs_routes_and_security_headers_including_sse(tmp_path:
 
 
 async def test_cors_preflight_allowed_vs_disallowed_origins_and_headers(tmp_path: Path) -> None:
-    """Verify strict CORS origin matching, credentials=False, and outermost security headers."""
+    """Verify strict CORS origin matching, OpenAI SDK + extra headers, and PATCH support."""
     allowed = "https://spa.example.com"
-    settings = _hardening_settings(tmp_path, cors_allowed_origins=(allowed,))
+    settings = _hardening_settings(
+        tmp_path,
+        cors_allowed_origins=(allowed,),
+        cors_extra_allow_headers=("X-Custom-Trace", "authorization"),
+    )
     async with open_services_harness(settings) as h:
         r_preflight = await h.client.options(
             "/v1/projects",
             headers={
                 "Origin": allowed,
-                "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "Authorization, Content-Type, X-LAI-Project-Id",
+                "Access-Control-Request-Method": "PATCH",
+                "Access-Control-Request-Headers": (
+                    "Authorization, Content-Type, X-LAI-Project-Id, "
+                    "X-Stainless-Lang, X-Stainless-Package-Version, X-Custom-Trace"
+                ),
             },
         )
         assert r_preflight.status_code == S.OK
         assert r_preflight.headers["access-control-allow-origin"] == allowed
         assert "access-control-allow-credentials" not in r_preflight.headers
-        assert "POST" in r_preflight.headers["access-control-allow-methods"]
+        assert "PATCH" in r_preflight.headers["access-control-allow-methods"]
         _assert_security_headers(r_preflight.headers, expected_cache_control="no-store")
+
+        r_rejected = await h.client.options(
+            "/v1/projects",
+            headers={
+                "Origin": allowed,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "X-Disallowed-Header",
+            },
+        )
+        assert r_rejected.status_code == S.BAD_REQUEST
 
         hdrs = await mint_auth_headers(h.svc, "cors-user", (ApiScope.PROJECTS_READ,))
         r_ok = await h.client.get("/v1/projects", headers={**hdrs, "Origin": allowed})

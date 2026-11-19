@@ -64,6 +64,16 @@ def test_validators_and_oidc_resolved_audiences_boundaries() -> None:
     ):
         with pytest.raises(ValidationError):
             LaiSettings(cors_allowed_origins=(bad_origin,))
+    for bad_header in ("", " ", "*", " X-Custom", "X-Custom ", "X:Bad", "X Bad"):
+        with pytest.raises(ValidationError, match="Invalid CORS header name"):
+            LaiSettings(cors_extra_allow_headers=(bad_header,))
+    assert LaiSettings(
+        cors_extra_allow_headers=("X-Custom-Trace", "OpenAI-Beta")
+    ).cors_extra_allow_headers == ("X-Custom-Trace", "OpenAI-Beta")
+    assert LaiSettings().oidc_leeway_seconds == 30.0
+    for bad_leeway in (-1.0, 301.0):
+        with pytest.raises(ValidationError):
+            LaiSettings(oidc_leeway_seconds=bad_leeway)
 
     cfg = OidcProviderConfig(
         enabled=True, audience="aud-legacy", audiences=(" aud-1 ", " ", "aud-legacy", "aud-2")
@@ -266,3 +276,73 @@ async def test_oidc_provider_azp_and_multi_aud_claim_extraction() -> None:
             await provider.authenticate(
                 RequestCredentials(authorization_scheme="Bearer", bearer_token=_tok(azp=bad_azp))
             )
+
+    slightly_expired = _tok(exp=int((now - timedelta(seconds=10)).timestamp()))
+    with pytest.raises(AuthenticationError):
+        await provider.authenticate(
+            RequestCredentials(authorization_scheme="Bearer", bearer_token=slightly_expired)
+        )
+    tolerant = OidcJwtAuthProvider(
+        cfg.model_copy(update={"leeway_seconds": 30.0}),
+        jwks_fetcher=_jwks,
+    )
+    ok_leeway = await tolerant.authenticate(
+        RequestCredentials(authorization_scheme="Bearer", bearer_token=slightly_expired)
+    )
+    assert ok_leeway.oauth_client_id == "cid-web"
+
+
+async def test_middleware_logs_cors_preflight_rejected_only_on_400_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RequestContextMiddleware warns cors_preflight_rejected only on 400 CORS preflights."""
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    class _CapLog:
+        def info(self, _event: str, **_kw: object) -> None:
+            pass
+
+        def warning(self, event: str, **kw: object) -> None:
+            warnings.append((event, kw))
+
+    monkeypatch.setattr("lai.api.middleware._logger", _CapLog())
+
+    async def _run(method: str, status_code: int, headers: list[tuple[bytes, bytes]]) -> None:
+        async def _app(_s: Scope, _r: Receive, send: Send) -> None:
+            await send({"type": "http.response.start", "status": status_code, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        async def _recv() -> Message:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def _send(_m: Message) -> None:
+            pass
+
+        scope: Scope = {
+            "type": "http",
+            "method": method,
+            "path": "/v1/projects",
+            "headers": headers,
+        }
+        await RequestContextMiddleware(_app)(scope, _recv, _send)
+
+    preflight_hdrs = [
+        (b"Origin", b"https://spa.example.com"),
+        (b"Access-Control-Request-Method", b"POST"),
+        (b"Access-Control-Request-Headers", b"X-Forbidden"),
+    ]
+    await _run("OPTIONS", 400, preflight_hdrs)
+    await _run("OPTIONS", 200, preflight_hdrs)
+    await _run("GET", 400, preflight_hdrs)
+    await _run("OPTIONS", 400, [(b"Access-Control-Request-Method", b"POST")])
+    await _run("OPTIONS", 400, [(b"Origin", b"https://spa.example.com")])
+    assert len(warnings) == 1
+    assert warnings[0] == (
+        "cors_preflight_rejected",
+        {
+            "path": "/v1/projects",
+            "origin": "https://spa.example.com",
+            "requested_method": "POST",
+            "requested_headers": "X-Forbidden",
+        },
+    )
