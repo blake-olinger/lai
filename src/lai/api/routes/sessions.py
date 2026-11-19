@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from lai.api._analytics import track_turn_output, track_turn_stream
 from lai.api._client_auth import resolve_turn_client_context
 from lai.api._streaming import (
     build_guardrail_headers,
@@ -124,7 +125,11 @@ async def post_session_message(
 
     if body.stream:
         primed = await prime_sse_stream(
-            services.orchestrator.run_turn_stream(turn_input, principal),
+            track_turn_stream(
+                services.orchestrator.run_turn_stream(turn_input, principal),
+                services,
+                principal,
+            ),
             keepalive_interval_seconds=services.settings.keepalive_interval_seconds,
             is_disconnected=request.is_disconnected,
         )
@@ -143,7 +148,11 @@ async def post_session_message(
         )
 
     outcome = await await_or_keepalive_json(
-        services.orchestrator.run_turn(turn_input, principal),
+        track_turn_output(
+            services.orchestrator.run_turn(turn_input, principal),
+            services,
+            principal,
+        ),
         threshold_seconds=services.settings.json_keepalive_threshold_seconds,
         interval_seconds=services.settings.keepalive_interval_seconds,
         is_disconnected=request.is_disconnected,

@@ -257,8 +257,11 @@ def test_cli_serve_runs_lifecycle_and_forwards_overrides(
         async def serve(self) -> None:
             events.append("uvicorn:serve")
 
-    def _fake_create_app(settings: LaiSettings) -> FastAPI:
+    seen_config_paths: list[Path | None] = []
+
+    def _fake_create_app(settings: LaiSettings, *, config_path: Path | None = None) -> FastAPI:
         seen_settings.append(settings)
+        seen_config_paths.append(config_path)
         return fake_app
 
     def _fake_sup_pair(
@@ -291,6 +294,7 @@ def test_cli_serve_runs_lifecycle_and_forwards_overrides(
     assert seen_settings[0].port == EXPECTED_PORT
     assert seen_settings[0].default_model_profile == "gemma4-26b-a4b"
     assert seen_settings[0].inference_backend == "llamacpp"
+    assert seen_config_paths == [cfg_path]
     assert shield_rec.started_configs == [seen_settings[0].guardrails]
     assert configs[0].app is fake_app
     assert configs[0].host == "127.0.0.2"

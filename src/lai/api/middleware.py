@@ -7,6 +7,11 @@ import time
 import uuid
 from typing import TYPE_CHECKING, cast
 
+from lai.api._analytics import (
+    extract_principal_ids,
+    extract_route_template,
+    record_http_analytics,
+)
 from lai.observability.logging import bind_log_context, get_component_logger
 
 if TYPE_CHECKING:
@@ -144,11 +149,25 @@ class RequestContextMiddleware:
                 await self.app(scope, receive, send_wrapper)
             finally:
                 duration_ms = round((time.perf_counter() - started) * _MS_PER_SECOND, 2)
+                route = extract_route_template(scope)
+                principal_id, oauth_client_id = extract_principal_ids(scope)
                 _log_rejected_cors_preflight(preflight, status_code, path)
+                await record_http_analytics(
+                    scope,
+                    method=method,
+                    route=route,
+                    status_code=status_code,
+                    duration_ms=duration_ms,
+                    principal_id=principal_id,
+                    oauth_client_id=oauth_client_id,
+                )
                 _logger.info(
                     "http_request_completed",
                     method=method,
                     path=path,
+                    route=route,
                     status_code=status_code,
                     duration_ms=duration_ms,
+                    principal_id=principal_id,
+                    oauth_client_id=oauth_client_id,
                 )

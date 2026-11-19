@@ -16,9 +16,12 @@ from lai.security import TokenBucketRateLimiter, has_effective_scope, require_sc
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
+    from pathlib import Path
 
+    from lai.api._cors import DynamicCorsController
     from lai.config.settings import LaiSettings
     from lai.domain.inference import BackendHealth
+    from lai.ports.analytics import RuntimeConfigRepositoryPort, UsageAnalyticsPort
     from lai.ports.auth import AuthenticatorPort
     from lai.ports.guardrails import GuardrailPipelinePort
     from lai.ports.inference import InferenceProviderPort
@@ -76,6 +79,10 @@ class AppServices:
     )
     background_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     close_callbacks: list[Callable[[], Awaitable[None] | None]] = field(default_factory=list)
+    analytics_repo: UsageAnalyticsPort | None = None
+    runtime_config_repo: RuntimeConfigRepositoryPort | None = None
+    cors_controller: DynamicCorsController | None = None
+    config_path: Path | None = None
 
     def schedule_background_task(
         self,

@@ -301,7 +301,8 @@ def test_cli_ollama_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         async def serve(self) -> None:
             events.append("uvicorn:serve")
 
-    def _fake_app(settings: LaiSettings) -> FastAPI:
+    def _fake_app(settings: LaiSettings, *, config_path: Path | None = None) -> FastAPI:
+        del config_path
         seen_settings.append(settings)
         return fake_app
 

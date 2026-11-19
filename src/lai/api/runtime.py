@@ -8,6 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from lai.api._runtime_config_sections import merge_persisted_runtime_overrides
 from lai.api.deps import AppServices
 from lai.config.profiles import get_model_profile
 from lai.db import (
@@ -16,8 +17,10 @@ from lai.db import (
     SqliteDatabase,
     SqliteFileRepository,
     SqliteProjectRepository,
+    SqliteRuntimeConfigRepository,
     SqliteSessionRepository,
     SqliteToolAuditRepository,
+    SqliteUsageAnalyticsRepository,
 )
 from lai.domain.auth import ApiScope
 from lai.domain.errors import LaiError
@@ -34,7 +37,13 @@ from lai.ingestion import (
     LocalBlobStore,
     LocalIngestionPipeline,
 )
-from lai.observability import PromptAuditLogger, configure_observability, get_component_logger
+from lai.observability import (
+    PromptAuditLogger,
+    configure_observability,
+    get_component_logger,
+    reconfigure_observability_alerting,
+    set_runtime_log_level,
+)
 from lai.orchestrator.service import TurnOrchestrator
 from lai.scheduler import InferenceSpooler, SessionGate
 from lai.security import (
@@ -164,14 +173,34 @@ async def build_app_services(
     settings: LaiSettings,
     *,
     orchestrator: OrchestratorPort | None = None,
+    config_path: Path | None = None,
 ) -> AppServices:
     """Initialize database, observability, security, ingestion, inference, and orchestrator."""
     logging_cfg = _resolve_logging_config(settings)
-    alert_manager = configure_observability(logging_cfg)
+    alert_manager = configure_observability(
+        logging_cfg,
+        fallback_admin_emails=settings.oidc_admin_emails,
+    )
 
     db = SqliteDatabase(settings.data_dir / "lai.db")
     await db.initialize()
 
+    runtime_config_repo = SqliteRuntimeConfigRepository(db)
+    persisted_overrides = await runtime_config_repo.get_all_sections()
+    if persisted_overrides:
+        settings = merge_persisted_runtime_overrides(settings, persisted_overrides)
+        logging_cfg = _resolve_logging_config(settings)
+        reconfigure_observability_alerting(
+            alert_manager,
+            logging_cfg,
+            fallback_admin_emails=settings.oidc_admin_emails,
+        )
+        set_runtime_log_level(logging_cfg.level)
+
+    analytics_repo = SqliteUsageAnalyticsRepository(
+        db,
+        retention_days=settings.analytics.retention_days,
+    )
     api_key_repo = SqliteApiKeyRepository(db)
     client_app_repo = SqliteClientAppRepository(db)
     project_repo = SqliteProjectRepository(db)
@@ -285,6 +314,9 @@ async def build_app_services(
         tool_registry=tool_registry,
         tool_executor=tool_executor,
         orchestrator=resolved_orchestrator,
+        analytics_repo=analytics_repo,
+        runtime_config_repo=runtime_config_repo,
+        config_path=config_path,
         close_callbacks=close_callbacks,
     )
 

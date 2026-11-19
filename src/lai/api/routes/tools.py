@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from lai.api._analytics import track_turn_output, track_turn_stream
 from lai.api._client_auth import require_authenticated_client_app
 from lai.api._streaming import (
     format_orchestrator_sse,
@@ -110,7 +111,13 @@ async def submit_tool_result(
 
     if body.stream:
         primed = await prime_sse_stream(
-            services.orchestrator.resume_client_tool_stream(updated_approval, sanitized, principal),
+            track_turn_stream(
+                services.orchestrator.resume_client_tool_stream(
+                    updated_approval, sanitized, principal
+                ),
+                services,
+                principal,
+            ),
             keepalive_interval_seconds=services.settings.keepalive_interval_seconds,
             is_disconnected=request.is_disconnected,
         )
@@ -122,7 +129,11 @@ async def submit_tool_result(
         )
 
     outcome = await await_or_keepalive_json(
-        services.orchestrator.resume_client_tool(updated_approval, sanitized, principal),
+        track_turn_output(
+            services.orchestrator.resume_client_tool(updated_approval, sanitized, principal),
+            services,
+            principal,
+        ),
         threshold_seconds=services.settings.json_keepalive_threshold_seconds,
         interval_seconds=services.settings.keepalive_interval_seconds,
         is_disconnected=request.is_disconnected,

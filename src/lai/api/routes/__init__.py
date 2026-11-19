@@ -10,10 +10,12 @@ from lai.api.routes.health import router as health_router
 from lai.api.routes.openai import router as openai_router
 from lai.api.routes.projects import router as projects_router
 from lai.api.routes.sessions import router as sessions_router
+from lai.api.routes.system_config import router as system_config_router
 from lai.api.routes.tools import router as tools_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
+api_router.include_router(system_config_router)
 api_router.include_router(client_apps_router)
 api_router.include_router(projects_router)
 api_router.include_router(files_router)
@@ -29,5 +31,6 @@ __all__ = [
     "openai_router",
     "projects_router",
     "sessions_router",
+    "system_config_router",
     "tools_router",
 ]

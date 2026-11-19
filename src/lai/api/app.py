@@ -6,8 +6,12 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
+from lai.api._cors import (
+    DEFAULT_CORS_ALLOW_HEADERS,
+    DynamicCorsController,
+    DynamicCorsMiddleware,
+)
 from lai.api.errors import register_exception_handlers
 from lai.api.middleware import RequestContextMiddleware
 from lai.api.routes import api_router
@@ -20,47 +24,15 @@ from lai.config.settings import LaiSettings, load_settings
 from lai.domain.version import PACKAGE_VERSION
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Sequence
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
     from lai.api.deps import AppServices
     from lai.ports.orchestrator import OrchestratorPort
 
 APP_TITLE = "LAI Local AI Server"
 APP_VERSION = PACKAGE_VERSION
-
-DEFAULT_CORS_ALLOW_HEADERS: tuple[str, ...] = (
-    "Authorization",
-    "Content-Type",
-    "X-Request-Id",
-    "X-LAI-Project-Id",
-    "X-LAI-Session-Id",
-    "X-LAI-File-Ids",
-    "X-LAI-Filename",
-    "X-LAI-Context-Mode",
-    # Official OpenAI JS/TS SDK (Stainless) browser headers
-    "X-Stainless-Arch",
-    "X-Stainless-Helper-Method",
-    "X-Stainless-Lang",
-    "X-Stainless-OS",
-    "X-Stainless-Package-Version",
-    "X-Stainless-Read-Timeout",
-    "X-Stainless-Retry-Count",
-    "X-Stainless-Runtime",
-    "X-Stainless-Runtime-Version",
-    "X-Stainless-Timeout",
-)
-
-
-def _merge_cors_allow_headers(extra_headers: Sequence[str]) -> list[str]:
-    """Merge default CORS allow headers with optional custom headers case-insensitively."""
-    merged: list[str] = list(DEFAULT_CORS_ALLOW_HEADERS)
-    seen = {header.lower() for header in merged}
-    for header in extra_headers:
-        lowered = header.lower()
-        if lowered not in seen:
-            merged.append(header)
-            seen.add(lowered)
-    return merged
+__all__ = ["APP_TITLE", "APP_VERSION", "DEFAULT_CORS_ALLOW_HEADERS", "create_app"]
 
 
 def create_app(
@@ -68,9 +40,24 @@ def create_app(
     *,
     services: AppServices | None = None,
     orchestrator: OrchestratorPort | None = None,
+    config_path: Path | None = None,
 ) -> FastAPI:
     """Construct the FastAPI application with optional prebuilt services or orchestrator."""
     resolved_settings = settings or (services.settings if services is not None else load_settings())
+    cors_controller = (
+        services.cors_controller
+        if services is not None and services.cors_controller is not None
+        else DynamicCorsController(
+            resolved_settings.cors_allowed_origins,
+            resolved_settings.cors_extra_allow_headers,
+        )
+    )
+    if services is not None:
+        services.cors_controller = cors_controller
+        cors_controller.reconfigure(
+            services.settings.cors_allowed_origins,
+            services.settings.cors_extra_allow_headers,
+        )
 
     @asynccontextmanager
     async def lifespan(fastapi_app: FastAPI) -> AsyncGenerator[None]:
@@ -85,6 +72,12 @@ def create_app(
         built_services = await build_app_services(
             resolved_settings,
             orchestrator=orchestrator,
+            config_path=config_path,
+        )
+        built_services.cors_controller = cors_controller
+        cors_controller.reconfigure(
+            built_services.settings.cors_allowed_origins,
+            built_services.settings.cors_extra_allow_headers,
         )
         fastapi_app.state.services = built_services
         try:
@@ -103,20 +96,7 @@ def create_app(
     if services is not None:
         app.state.services = services
 
-    if resolved_settings.cors_allowed_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=list(resolved_settings.cors_allowed_origins),
-            allow_credentials=False,
-            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-            allow_headers=_merge_cors_allow_headers(resolved_settings.cors_extra_allow_headers),
-            expose_headers=[
-                "X-Request-Id",
-                "Retry-After",
-                "X-LAI-Guardrail-Blocked",
-                "X-LAI-Guardrail-Policy",
-            ],
-        )
+    app.add_middleware(DynamicCorsMiddleware, controller=cors_controller)
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
     app.include_router(api_router)

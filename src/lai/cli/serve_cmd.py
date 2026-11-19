@@ -58,7 +58,12 @@ def build_supervisors(
     return llama_supervisor, guardrail_supervisor
 
 
-async def serve_async(settings: LaiSettings, *, supervise: bool = True) -> None:
+async def serve_async(
+    settings: LaiSettings,
+    *,
+    supervise: bool = True,
+    config_path: Path | None = None,
+) -> None:
     """Start supervised backend instances and run the Uvicorn API server."""
     llama_supervisor: InferenceSupervisorPort | None = None
     guardrail_supervisor: ShieldGemmaSupervisor | None = None
@@ -74,7 +79,7 @@ async def serve_async(settings: LaiSettings, *, supervise: bool = True) -> None:
             if guardrail_supervisor is not None:
                 await guardrail_supervisor.ensure_running(settings.guardrails)
 
-        app = create_app(settings)
+        app = create_app(settings, config_path=config_path)
         uv_config = uvicorn.Config(
             app=app,
             host=settings.host,
@@ -132,7 +137,7 @@ def serve_command(  # noqa: PLR0913, PLR0917
 
     settings = resolve_settings(config, **overrides)
     try:
-        asyncio.run(serve_async(settings, supervise=not no_supervise))
+        asyncio.run(serve_async(settings, supervise=not no_supervise, config_path=config))
     except LaiError as exc:
         typer.echo(f"Server startup failed ({exc.code}): {exc.message}", err=True)
         raise typer.Exit(code=1) from exc
