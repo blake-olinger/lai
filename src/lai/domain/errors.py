@@ -102,6 +102,13 @@ class InferenceBackendError(LaiError):
     default_status_code: ClassVar[int] = 502
 
 
+class StorageFailureError(LaiError):
+    """Raised when persistent storage operations fail unexpectedly."""
+
+    default_code: ClassVar[str] = "storage_failure"
+    default_status_code: ClassVar[int] = 500
+
+
 class ToolApprovalRequiredError(LaiError):
     """Raised when tool execution requires explicit human approval."""
 

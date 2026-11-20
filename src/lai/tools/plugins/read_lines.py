@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from lai.ports.storage import BlobStorePort
 
 DEFAULT_MAX_LINES_PER_CALL = 250
+DEFAULT_MAX_CHARS_PER_CALL = 32_768
 
 
 class ReadFileLinesPlugin(ToolPluginPort):
@@ -32,16 +33,18 @@ class ReadFileLinesPlugin(ToolPluginPort):
         blob_store: BlobStorePort,
         *,
         max_lines: int = DEFAULT_MAX_LINES_PER_CALL,
+        max_chars: int = DEFAULT_MAX_CHARS_PER_CALL,
         timeout_seconds: float = 30.0,
     ) -> None:
         self._file_repo = file_repo
         self._blob_store = blob_store
         self._max_lines = max(max_lines, 1)
+        self._max_chars = max(max_chars, 1)
         self._spec = ToolSpec(
             name="read_file_lines",
             description=(
                 "Read an inclusive 1-based line span from a project file blob, "
-                f"clamped to at most {self._max_lines} lines per call."
+                f"clamped to at most {self._max_lines} lines and {self._max_chars} chars per call."
             ),
             permission_tier=PermissionTier.READ,
             parameters_schema={
@@ -90,13 +93,19 @@ class ReadFileLinesPlugin(ToolPluginPort):
                 Path(file_record.blob_path),
                 start_line=start_line,
                 end_line=effective_end,
+                max_chars=self._max_chars + 1,
             )
         except FileNotFoundError as exc:
             msg = f"Blob content for file {file_id!r} was not found."
             raise NotFoundError(msg, details={"file_id": file_id}) from exc
 
-        truncated = requested_clamped or (
-            end_line is None and len(content.splitlines()) >= self._max_lines
+        char_truncated = len(content) > self._max_chars
+        if char_truncated:
+            content = content[: self._max_chars]
+        truncated = (
+            requested_clamped
+            or char_truncated
+            or (end_line is None and len(content.splitlines()) >= self._max_lines)
         )
         payload = {
             "file_id": file_record.id,

@@ -213,9 +213,7 @@ async def test_guardrail_block_short_circuits_refusal_and_http_error(tmp_path: P
         assert s.spooler.leases == []
         assert inf.stream_calls == []
         msgs = await s.sessions.list_messages("ses_1")
-        assert len(msgs) == EXPECTED_TWO
-        assert "[REDACTED" in msgs[0].content
-        assert msgs[1].content == "Refused."
+        assert msgs == []
 
     cfg_err = GuardrailConfig(block_mode=GuardrailBlockMode.HTTP_ERROR)
     async with _open_stack(tmp_path / "err", cfg=cfg_err, block_injection=True) as s:

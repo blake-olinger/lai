@@ -150,6 +150,14 @@ class SessionRepositoryPort(Protocol):
         """List messages within a session in chronological order."""
         ...
 
+    async def list_recent_messages(
+        self,
+        session_id: str,
+        limit: int = 200,
+    ) -> list[Message]:
+        """List the most recent messages within a session in chronological order."""
+        ...
+
 
 @runtime_checkable
 class FileRepositoryPort(Protocol):
@@ -181,8 +189,10 @@ class FileRepositoryPort(Protocol):
         file_id: str,
         start_line: int | None = None,
         end_line: int | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[FileChunk]:
-        """Return ordered chunks for a file, optionally filtered by line range."""
+        """Return ordered chunks for a file, optionally filtered by line range and paginated."""
         ...
 
     async def search_fts(

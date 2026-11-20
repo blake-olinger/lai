@@ -30,6 +30,8 @@ class BlobStorePort(Protocol):
         blob_path: Path,
         start_line: int = 1,
         end_line: int | None = None,
+        *,
+        max_chars: int | None = None,
     ) -> str:
         """Read UTF-8 text lines from blob_path within [start_line, end_line]."""
         ...

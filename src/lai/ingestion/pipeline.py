@@ -76,6 +76,20 @@ def _chunk_by_kind(
     return chunks, None, None
 
 
+def _decode_and_chunk(
+    record: FileRecord,
+    raw_bytes: bytes,
+    target_chunk_tokens: int,
+) -> tuple[FileKind, int, list[FileChunk], LogFileSummary | None, CodeFileSummary | None]:
+    """Decode uploaded bytes, detect kind, count tokens, and chunk off the event loop."""
+    text = raw_bytes.decode("utf-8", errors="replace")
+    del raw_bytes
+    kind = detect_file_kind(record.filename, record.content_type, text[:_SAMPLE_CHARS_LEN])
+    token_count = estimate_tokens(text)
+    chunks, log_summary, code_summary = _chunk_by_kind(record, kind, text, target_chunk_tokens)
+    return kind, token_count, chunks, log_summary, code_summary
+
+
 class LocalIngestionPipeline(IngestionPipelinePort):
     """Streaming upload, classification, chunking, CPU embedding, and indexing pipeline."""
 
@@ -222,16 +236,13 @@ class LocalIngestionPipeline(IngestionPipelinePort):
     async def _index_record(self, record: FileRecord) -> FileRecord:
         """Read blob bytes, classify, chunk, embed, and update SQLite + LanceDB indexes."""
         raw_bytes = await self._blob_store.read_bytes(Path(record.blob_path))
-        text = raw_bytes.decode("utf-8", errors="replace")
-        kind = detect_file_kind(record.filename, record.content_type, text[:_SAMPLE_CHARS_LEN])
-        token_count = estimate_tokens(text)
-
-        chunks, log_summary, code_summary = _chunk_by_kind(
+        kind, token_count, chunks, log_summary, code_summary = await asyncio.to_thread(
+            _decode_and_chunk,
             record,
-            kind,
-            text,
+            raw_bytes,
             self._target_chunk_tokens,
         )
+        del raw_bytes
 
         vectors = await self._embedder.embed_texts([c.text for c in chunks]) if chunks else []
         await self._file_repo.replace_chunks(record.id, chunks)

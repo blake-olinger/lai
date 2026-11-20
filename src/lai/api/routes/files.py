@@ -220,12 +220,14 @@ async def get_file(
 
 
 @router.get("/{file_id}/chunks", response_model=FileChunkListResponse)
-async def list_file_chunks(
+async def list_file_chunks(  # noqa: PLR0913, PLR0917
     file_id: str,
     principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.FILES_READ))],
     services: Annotated[AppServices, Depends(get_services)],
     start_line: Annotated[int | None, Query(ge=1)] = None,
     end_line: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> FileChunkListResponse:
     """Return ordered indexed chunks for file_id, optionally filtered by line range."""
     if start_line is not None and end_line is not None and end_line < start_line:
@@ -236,6 +238,8 @@ async def list_file_chunks(
         file_id,
         start_line=start_line,
         end_line=end_line,
+        limit=limit,
+        offset=offset,
     )
     return FileChunkListResponse(file_id=file_id, items=chunks, count=len(chunks))
 

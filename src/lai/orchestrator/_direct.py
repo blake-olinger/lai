@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from lai.domain.auth import ApiScope
 from lai.domain.chat import MessageRole, OrchestratorEvent
+from lai.domain.errors import ValidationFailedError
 from lai.domain.inference import InferenceMessage, InferenceRequest
 from lai.domain.scheduler import JobPriority, LeaseRequest
 from lai.ingestion.detector import estimate_tokens
@@ -45,6 +46,46 @@ class DirectDeps:
     spooler: InferenceSpoolerPort
 
 
+_MIN_DIRECT_TOKENS = 256
+_MIN_DIRECT_BYTES = 262_144
+_DIRECT_PROMPT_RESERVE_TOKENS = 1024
+_DIRECT_BYTES_PER_TOKEN_CEILING = 8
+
+
+def _enforce_direct_file_limits(
+    target_files: Sequence[FileRecord],
+    *,
+    profile: ModelProfile,
+    max_tokens: int,
+) -> tuple[int, int]:
+    """Verify attached files fit within Direct mode token and byte ceilings before reading."""
+    max_direct_tokens = max(
+        _MIN_DIRECT_TOKENS,
+        profile.ctx_size - max_tokens - _DIRECT_PROMPT_RESERVE_TOKENS,
+    )
+    max_direct_bytes = max(
+        max_direct_tokens * _DIRECT_BYTES_PER_TOKEN_CEILING,
+        _MIN_DIRECT_BYTES,
+    )
+    total_tokens = sum(max(0, record.token_count) for record in target_files)
+    total_bytes = sum(max(0, record.size_bytes) for record in target_files)
+    if total_tokens > max_direct_tokens or total_bytes > max_direct_bytes:
+        msg = (
+            "Attached files exceed the Direct context ceiling "
+            f"(tokens={total_tokens}/{max_direct_tokens}, bytes={total_bytes}/{max_direct_bytes}); "
+            "use context_mode='retrieval' or 'map_reduce'."
+        )
+        raise ValidationFailedError(
+            msg,
+            details={
+                "context_mode": "direct",
+                "max_direct_tokens": str(max_direct_tokens),
+                "max_direct_bytes": str(max_direct_bytes),
+            },
+        )
+    return max_direct_tokens, max_direct_bytes
+
+
 async def run_direct_stream(  # noqa: PLR0913
     deps: DirectDeps,
     *,
@@ -56,9 +97,32 @@ async def run_direct_stream(  # noqa: PLR0913
     existing_messages: Sequence[Message],
 ) -> AsyncGenerator[OrchestratorEvent | TurnOutcome]:
     """Inject full line-numbered file text, acquire INTERACTIVE lease, and stream."""
+    max_tokens = turn_input.max_tokens if turn_input.max_tokens is not None else profile.max_tokens
+    max_direct_tokens = _MIN_DIRECT_TOKENS
+    if target_files:
+        max_direct_tokens, _ = _enforce_direct_file_limits(
+            target_files,
+            profile=profile,
+            max_tokens=max_tokens,
+        )
+
     file_entries: list[tuple[FileRecord, str]] = []
+    loaded_tokens = 0
     for record in target_files:
         content = await read_file_text(deps.blob_store, record, file_repo=deps.file_repo)
+        loaded_tokens += estimate_tokens(content)
+        if loaded_tokens > max_direct_tokens:
+            msg = (
+                f"Loaded file content ({loaded_tokens} tokens) exceeds the Direct context "
+                f"ceiling ({max_direct_tokens} tokens); use 'retrieval' or 'map_reduce'."
+            )
+            raise ValidationFailedError(
+                msg,
+                details={
+                    "context_mode": "direct",
+                    "max_direct_tokens": str(max_direct_tokens),
+                },
+            )
         file_entries.append((record, content))
 
     system_prompt = build_system_prompt(
@@ -71,7 +135,6 @@ async def run_direct_stream(  # noqa: PLR0913
         if file_entries
         else turn_input.user_message
     )
-    max_tokens = turn_input.max_tokens if turn_input.max_tokens is not None else profile.max_tokens
     temperature = (
         turn_input.temperature if turn_input.temperature is not None else profile.temperature
     )

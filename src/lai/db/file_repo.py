@@ -245,14 +245,17 @@ class SqliteFileRepository(FileRepositoryPort):
         file_id: str,
         start_line: int | None = None,
         end_line: int | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[FileChunk]:
-        """Return ordered chunks for a file, optionally overlapping [start_line, end_line]."""
+        """Return ordered chunks for a file, optionally filtered by line range and paginated."""
+        sql_limit = -1 if limit is None else clamp_limit(limit)
         rows = await self._db.fetch_all(
             f"SELECT {_CHUNK_COLUMNS} FROM file_chunks WHERE file_id = ? "  # noqa: S608
             "AND (? IS NULL OR end_line >= ?) "
             "AND (? IS NULL OR start_line <= ?) "
-            "ORDER BY chunk_index ASC, start_line ASC;",
-            (file_id, start_line, start_line, end_line, end_line),
+            "ORDER BY chunk_index ASC, start_line ASC LIMIT ? OFFSET ?;",
+            (file_id, start_line, start_line, end_line, end_line, sql_limit, clamp_offset(offset)),
         )
         return [_row_to_chunk(row) for row in rows]
 

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 
 from lai.db.schema import apply_schema
-from lai.domain.errors import LaiError
+from lai.domain.errors import StorageFailureError
 from lai.domain.observability import AlertCategory
 from lai.observability.logging import get_component_logger
 
@@ -39,8 +39,8 @@ async def _safe_rollback(conn: aiosqlite.Connection) -> None:
         return
 
 
-def _log_and_raise_storage_error(operation: str, exc: Exception) -> LaiError:
-    """Log structured storage failure alert and construct LaiError."""
+def _log_and_raise_storage_error(operation: str, exc: Exception) -> StorageFailureError:
+    """Log structured storage failure alert and construct StorageFailureError."""
     get_component_logger("db").error(
         "sqlite_operation_failed",
         operation=operation,
@@ -49,7 +49,7 @@ def _log_and_raise_storage_error(operation: str, exc: Exception) -> LaiError:
         alert_category=AlertCategory.STORAGE_FAILURE.value,
     )
     msg = f"SQLite {operation} failed: {exc}"
-    return LaiError(msg, code="storage_failure", status_code=500)
+    return StorageFailureError(msg)
 
 
 class SqliteDatabase:

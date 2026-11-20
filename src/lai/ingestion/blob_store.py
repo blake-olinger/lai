@@ -86,15 +86,62 @@ def _cleanup_temp_file(handle: BinaryIO | None, tmp_path: Path) -> None:
     tmp_path.unlink(missing_ok=True)
 
 
+_SKIP_CHUNK_CHARS = 65_536
+
+
+def _read_lines_range_bounded_sync(
+    resolved_path: Path,
+    start_line: int,
+    end_line: int | None,
+    max_chars: int,
+) -> str:
+    """Read inclusive 1-based UTF-8 lines with bounded memory even on giant single lines."""
+    selected: list[str] = []
+    remaining = max(0, max_chars)
+    current_line = 1
+
+    with resolved_path.open("r", encoding="utf-8", errors="replace") as fh:
+        while current_line < start_line:
+            chunk = fh.readline(_SKIP_CHUNK_CHARS)
+            if not chunk:
+                return ""
+            if chunk.endswith("\n"):
+                current_line += 1
+
+        while remaining > 0 and (end_line is None or current_line <= end_line):
+            piece = fh.readline(remaining + 2)
+            if not piece:
+                break
+            has_newline = piece.endswith("\n")
+            cleaned = piece.rstrip("\r\n")
+            sep = 1 if selected else 0
+            if remaining <= sep:
+                if sep and remaining == 1:
+                    selected.append("")
+                break
+            budget = remaining - sep
+            kept = cleaned[:budget]
+            selected.append(kept)
+            remaining -= sep + len(kept)
+            if has_newline:
+                current_line += 1
+            else:
+                break
+    return "\n".join(selected)
+
+
 def _read_lines_range_sync(
     resolved_path: Path,
     start_line: int,
     end_line: int | None,
+    max_chars: int | None = None,
 ) -> str:
-    """Read inclusive 1-based UTF-8 text lines from disk with bounded memory."""
+    """Read inclusive 1-based UTF-8 text lines from disk with optional char cap."""
     if not resolved_path.is_file():
         msg = f"Blob not found: {resolved_path}"
         raise NotFoundError(msg, details={"blob_path": str(resolved_path)})
+    if max_chars is not None:
+        return _read_lines_range_bounded_sync(resolved_path, start_line, end_line, max_chars)
 
     selected: list[str] = []
     with resolved_path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -232,6 +279,8 @@ class LocalBlobStore(BlobStorePort):
         blob_path: Path,
         start_line: int = 1,
         end_line: int | None = None,
+        *,
+        max_chars: int | None = None,
     ) -> str:
         """Read UTF-8 text lines from blob_path within inclusive [start_line, end_line]."""
         if start_line < 1:
@@ -240,8 +289,13 @@ class LocalBlobStore(BlobStorePort):
         if end_line is not None and end_line < start_line:
             msg = f"end_line ({end_line}) must be >= start_line ({start_line})"
             raise ValidationFailedError(msg, details={"end_line": str(end_line)})
+        if max_chars is not None and max_chars < 1:
+            msg = f"max_chars must be >= 1, got {max_chars}"
+            raise ValidationFailedError(msg, details={"max_chars": str(max_chars)})
         resolved = self._resolve_blob_path(blob_path)
-        return await asyncio.to_thread(_read_lines_range_sync, resolved, start_line, end_line)
+        return await asyncio.to_thread(
+            _read_lines_range_sync, resolved, start_line, end_line, max_chars
+        )
 
     async def read_bytes(self, blob_path: Path) -> bytes:
         """Read the raw bytes of a persisted blob."""

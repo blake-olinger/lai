@@ -11,27 +11,21 @@ import pytest
 from lai.domain.auth import ApiScope
 from lai.domain.errors import AuthorizationError, NotFoundError, ValidationFailedError
 from lai.domain.files import (
-    CodeFileSummary,
-    ExceptionFingerprint,
     FileChunk,
     FileKind,
     FileRecord,
     FileStatus,
-    LogFileSummary,
-    LogSeverity,
     ScoredChunk,
 )
-from lai.domain.tools import PermissionTier, ToolExecutionContext
+from lai.domain.tools import ToolExecutionContext
 from lai.ingestion.embedder import DeterministicHashEmbedder
 from lai.ports.repositories import FileRepositoryPort
 from lai.ports.storage import BlobStorePort, VectorStorePort
 from lai.ports.tools import ToolPluginPort
 from lai.tools import (
     DEFAULT_MAX_LINES_PER_CALL,
-    GetFileOverviewPlugin,
     ReadFileLinesPlugin,
     SearchFilesPlugin,
-    build_default_tool_registry,
 )
 
 if TYPE_CHECKING:
@@ -71,14 +65,20 @@ class _RecordingFileRepo(FileRepositoryPort):
         self.chunks_by_file[file_id] = list(chunks)
 
     async def list_chunks(
-        self, file_id: str, start_line: int | None = None, end_line: int | None = None
+        self,
+        file_id: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[FileChunk]:
-        return [
+        matched = [
             c
             for c in self.chunks_by_file.get(file_id, [])
             if (start_line is None or c.end_line >= start_line)
             and (end_line is None or c.start_line <= end_line)
         ]
+        return matched[offset : offset + limit] if limit is not None else matched[offset:]
 
     async def search_fts(
         self, project_id: str, query: str, file_ids: Sequence[str] | None = None, limit: int = 20
@@ -108,14 +108,20 @@ class _RecordingBlobStore(BlobStorePort):
         return path, len(data), "a" * 64
 
     async def read_text_range(
-        self, blob_path: Path, start_line: int = 1, end_line: int | None = None
+        self,
+        blob_path: Path,
+        start_line: int = 1,
+        end_line: int | None = None,
+        *,
+        max_chars: int | None = None,
     ) -> str:
         self.read_calls.append((blob_path, start_line, end_line))
         if blob_path not in self.blobs:
             raise FileNotFoundError(str(blob_path))
         lines = self.blobs[blob_path]
         upper = len(lines) if end_line is None else min(end_line, len(lines))
-        return "\n".join(lines[start_line - 1 : upper])
+        text = "\n".join(lines[start_line - 1 : upper])
+        return text[:max_chars] if max_chars is not None else text
 
     async def read_bytes(self, blob_path: Path) -> bytes:
         if blob_path not in self.blobs:
@@ -300,50 +306,7 @@ async def test_read_file_lines_clamping_and_isolation() -> None:
             await plugin.execute(bad_span, _ctx("prj_1"))
 
 
-async def test_get_file_overview_and_default_registry() -> None:
-    """GetFileOverviewPlugin returns summaries and default registry exposes READ tools."""
-    repo, blob = _RecordingFileRepo(), _RecordingBlobStore()
-    fp = ExceptionFingerprint(
-        fingerprint="fp1",
-        exception_type="TimeoutError",
-        message_sample="t",
-        count=3,
-        first_line=12,
-        last_line=99,
-    )
-    log_sum = LogFileSummary(
-        total_lines=100, severity_counts={LogSeverity.ERROR: 3}, error_count=3, top_exceptions=(fp,)
-    )
-    code_sum = CodeFileSummary(
-        language="python", total_lines=40, symbols=("main",), imports=("json",)
-    )
-    log_rec = _file("fil_log", "prj_1", "srv.log", FileKind.LOG).model_copy(
-        update={"log_summary": log_sum}
-    )
-    code_rec = _file("fil_code", "prj_1", "main.py", FileKind.CODE).model_copy(
-        update={"code_summary": code_sum}
-    )
-    for rec in (log_rec, code_rec, _file("fil_other", "prj_2", "other.py", FileKind.CODE)):
-        await repo.upsert_file(rec)
-
-    overview = GetFileOverviewPlugin(repo)
-    log_out = json.loads((await overview.execute({"file_id": "fil_log"}, _ctx("prj_1"))).output)
-    assert log_out["log_summary"]["error_count"] == EXPECTED_THREE
-    assert log_out["code_summary"] is None
-    code_out = json.loads((await overview.execute({"file_id": "fil_code"}, _ctx("prj_1"))).output)
-    assert code_out["code_summary"]["language"] == "python"
-    assert code_out["code_summary"]["symbols"] == ["main"]
-
-    for bad_args, ctx in (
-        ({"file_id": "fil_other"}, _ctx("prj_1")),
-        ({"file_id": "fil_log"}, _ctx("prj_1", ("fil_code",))),
-    ):
-        with pytest.raises(AuthorizationError):
-            await overview.execute(bad_args, ctx)
-    with pytest.raises(NotFoundError):
-        await overview.execute({"file_id": "fil_missing"}, _ctx("prj_1"))
-
-    specs = build_default_tool_registry(repo, blob).list_specs()
-    assert {s.name for s in specs} == {"search_files", "read_file_lines", "get_file_overview"}
-    assert all(s.permission_tier is PermissionTier.READ for s in specs)
-    assert all(not s.requires_approval_by_default for s in specs)
+RecordingFileRepo = _RecordingFileRepo
+RecordingBlobStore = _RecordingBlobStore
+make_file_record = _file
+make_tool_ctx = _ctx

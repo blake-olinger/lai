@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from lai.domain.auth import ApiScope
-from lai.domain.chat import Citation, OrchestratorEvent, ProgressEvent, TokenUsage
+from lai.domain.chat import OrchestratorEvent, ProgressEvent, TokenUsage
 from lai.domain.inference import InferenceRequest
-from lai.domain.scheduler import JobPriority, LeaseRequest
 from lai.ingestion.detector import estimate_tokens
 from lai.observability.logging import get_component_logger
+from lai.orchestrator._aggregator_helpers import (
+    DEFAULT_MAX_WINDOWS,
+    MAX_COMPRESSION_PASSES,
+    ReduceParams,
+    build_map_reduce_lease,
+    build_window_fallback_citations,
+    clamp_findings_to_budget,
+    compute_reduce_findings_budget,
+    pack_finding_batches,
+    raise_max_windows_exceeded,
+)
 from lai.orchestrator._helpers import add_token_usage, extract_citations, read_file_text
 from lai.orchestrator._stream import (
     StreamedInferenceAccumulator,
@@ -49,53 +57,8 @@ _MAP_MAX_TOKENS = 1024
 _COMPRESS_MAX_TOKENS = 2048
 
 
-@dataclass(slots=True)
-class _ReduceParams:
-    """Bundled inputs for the final Map-Reduce synthesis turn."""
-
-    turn_input: TurnInput
-    principal: AuthPrincipal
-    model_profile: ModelProfile
-    files: Sequence[FileRecord]
-    file_summaries: Sequence[str]
-    findings: Sequence[str]
-    fallback_citations: Sequence[Citation]
-    session_system_prompt: str | None
-    history_messages: Sequence[InferenceMessage]
-
-
-def _build_map_reduce_lease(turn_input: TurnInput, principal: AuthPrincipal) -> LeaseRequest:
-    """Build a MAP_REDUCE LeaseRequest with admin quota bypass when authorized."""
-    return LeaseRequest(
-        session_id=turn_input.session_id,
-        project_id=turn_input.project_id,
-        principal_id=principal.principal_id,
-        priority=JobPriority.MAP_REDUCE,
-        bypass_principal_quota=principal.has_scope(ApiScope.ADMIN),
-    )
-
-
-def _pack_finding_batches(findings: Sequence[str], *, batch_limit_tokens: int) -> list[list[str]]:
-    """Group findings into token-bounded batches for hierarchical compression."""
-    batches: list[list[str]] = []
-    current: list[str] = []
-    current_tokens = 0
-    for item in findings:
-        item_tokens = max(1, estimate_tokens(item) + 4)
-        if current and current_tokens + item_tokens > batch_limit_tokens:
-            batches.append(current)
-            current = [item]
-            current_tokens = item_tokens
-        else:
-            current.append(item)
-            current_tokens += item_tokens
-    if current:
-        batches.append(current)
-    return batches
-
-
 class MapReduceAggregator:
-    """Executes Map-Reduce over oversized files with per-window GPU lease interleaving."""
+    """Executes bounded Map-Reduce over oversized files with per-window GPU lease interleaving."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -107,6 +70,7 @@ class MapReduceAggregator:
         window_tokens: int = DEFAULT_WINDOW_TOKENS,
         overlap_tokens: int = DEFAULT_OVERLAP_TOKENS,
         compression_threshold_tokens: int = DEFAULT_COMPRESSION_THRESHOLD_TOKENS,
+        max_windows: int = DEFAULT_MAX_WINDOWS,
     ) -> None:
         self._blob_store = blob_store
         self._inference_provider = inference_provider
@@ -115,18 +79,40 @@ class MapReduceAggregator:
         self._window_tokens = window_tokens
         self._overlap_tokens = overlap_tokens
         self._compression_threshold_tokens = compression_threshold_tokens
+        self._max_windows = max(1, max_windows)
         self._log = get_component_logger("orchestrator")
+
+    def update_budgets(
+        self,
+        *,
+        window_tokens: int,
+        overlap_tokens: int,
+        max_windows: int,
+    ) -> None:
+        """Refresh Map-Reduce window size, overlap, and ceiling budgets in place."""
+        self._window_tokens = window_tokens
+        self._overlap_tokens = overlap_tokens
+        self._max_windows = max(1, max_windows)
 
     async def _collect_windows_and_summaries(
         self,
         files: Sequence[FileRecord],
     ) -> tuple[list[tuple[TextWindow, str]], list[str]]:
-        """Build deterministic summaries and line-preserving windows across target files."""
+        """Build summaries and windows one file at a time, failing fast above max_windows."""
         window_items: list[tuple[TextWindow, str]] = []
         file_summaries: list[str] = []
+        stride_tokens = max(1, self._window_tokens - self._overlap_tokens)
+
         for record in files:
             summary_text = format_file_summary(record)
             file_summaries.append(summary_text)
+            if record.token_count > 0:
+                est_windows = max(1, (record.token_count + stride_tokens - 1) // stride_tokens)
+                if len(window_items) + est_windows > self._max_windows * 2:
+                    raise_max_windows_exceeded(
+                        estimated_count=len(window_items) + est_windows,
+                        max_windows=self._max_windows,
+                    )
             raw_text = await read_file_text(self._blob_store, record, file_repo=self._file_repo)
             windows = slice_text_into_windows(
                 record.id,
@@ -135,6 +121,12 @@ class MapReduceAggregator:
                 window_tokens=self._window_tokens,
                 overlap_tokens=self._overlap_tokens,
             )
+            del raw_text
+            if len(window_items) + len(windows) > self._max_windows:
+                raise_max_windows_exceeded(
+                    estimated_count=len(window_items) + len(windows),
+                    max_windows=self._max_windows,
+                )
             window_items.extend((window, summary_text) for window in windows)
         return window_items, file_summaries
 
@@ -148,7 +140,7 @@ class MapReduceAggregator:
         file_summary_text: str,
     ) -> tuple[str, TokenUsage]:
         """Acquire one MAP_REDUCE lease and extract concise findings for one window."""
-        lease_req = _build_map_reduce_lease(turn_input, principal)
+        lease_req = build_map_reduce_lease(turn_input, principal)
         request = InferenceRequest(
             model=model_profile.name,
             messages=build_map_window_messages(
@@ -176,7 +168,7 @@ class MapReduceAggregator:
         findings: list[str],
     ) -> tuple[list[str], TokenUsage]:
         """Perform one hierarchical compression pass over oversized map findings."""
-        batches = _pack_finding_batches(
+        batches = pack_finding_batches(
             findings,
             batch_limit_tokens=_COMPRESSION_BATCH_LIMIT_TOKENS,
         )
@@ -184,7 +176,7 @@ class MapReduceAggregator:
         usage = TokenUsage()
         total_batches = len(batches)
         for idx, batch in enumerate(batches):
-            lease_req = _build_map_reduce_lease(turn_input, principal)
+            lease_req = build_map_reduce_lease(turn_input, principal)
             request = InferenceRequest(
                 model=model_profile.name,
                 messages=build_compression_messages(
@@ -207,7 +199,7 @@ class MapReduceAggregator:
 
     async def _stream_reduce(
         self,
-        params: _ReduceParams,
+        params: ReduceParams,
         total_usage: TokenUsage,
     ) -> AsyncGenerator[OrchestratorEvent | TurnOutcome]:
         """Acquire final MAP_REDUCE lease, stream Reduce synthesis, and yield TurnOutcome."""
@@ -226,7 +218,7 @@ class MapReduceAggregator:
         effective_max_tokens = (
             turn_input.max_tokens if turn_input.max_tokens is not None else profile.max_tokens
         )
-        lease_req = _build_map_reduce_lease(turn_input, params.principal)
+        lease_req = build_map_reduce_lease(turn_input, params.principal)
         request = InferenceRequest(
             model=profile.name,
             messages=reduce_messages,
@@ -267,7 +259,7 @@ class MapReduceAggregator:
         session_system_prompt: str | None = None,
         history_messages: Sequence[InferenceMessage] = (),
     ) -> AsyncGenerator[OrchestratorEvent | TurnOutcome]:
-        """Run Map, optional hierarchical compression, and Reduce synthesis as an event stream."""
+        """Run bounded Map, multi-pass compression, and Reduce synthesis as an event stream."""
         window_items, file_summaries = await self._collect_windows_and_summaries(files)
         total_windows = len(window_items)
         self._log.info("map_reduce_started", file_count=len(files), window_count=total_windows)
@@ -294,10 +286,24 @@ class MapReduceAggregator:
             findings.append(finding)
             total_usage = add_token_usage(total_usage, map_usage)
 
-        if findings and estimate_tokens("\n\n".join(findings)) > self._compression_threshold_tokens:
+        effective_max_tokens = (
+            turn_input.max_tokens if turn_input.max_tokens is not None else model_profile.max_tokens
+        )
+        reduce_budget = compute_reduce_findings_budget(
+            model_profile,
+            max_output_tokens=effective_max_tokens,
+            compression_threshold_tokens=self._compression_threshold_tokens,
+        )
+        compression_pass = 0
+        while (
+            findings
+            and compression_pass < MAX_COMPRESSION_PASSES
+            and estimate_tokens("\n\n".join(findings)) > reduce_budget
+        ):
+            compression_pass += 1
             yield ProgressEvent(
                 stage="compress_findings",
-                message="Compressing oversized intermediate Map findings.",
+                message=f"Compressing oversized Map findings (pass {compression_pass}).",
                 completed_steps=total_windows,
                 total_steps=total_windows,
             )
@@ -309,23 +315,17 @@ class MapReduceAggregator:
             )
             total_usage = add_token_usage(total_usage, compress_usage)
 
+        findings = clamp_findings_to_budget(findings, max_tokens=reduce_budget)
+
         yield ProgressEvent(
             stage="reduce",
             message="Synthesizing unified final response.",
             completed_steps=total_windows,
             total_steps=total_windows,
         )
-        window_fallbacks = [
-            Citation(
-                file_id=w.file_id,
-                filename=w.filename,
-                start_line=w.start_line,
-                end_line=w.end_line,
-            )
-            for w, _ in window_items
-        ] or [Citation(file_id=f.id, filename=f.filename) for f in files]
+        window_fallbacks = build_window_fallback_citations(window_items, files)
 
-        params = _ReduceParams(
+        params = ReduceParams(
             turn_input=turn_input,
             principal=principal,
             model_profile=model_profile,

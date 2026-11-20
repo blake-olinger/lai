@@ -22,7 +22,12 @@ from lai.domain.auth import (
 )
 from lai.domain.chat import ClientToolCallEvent, InferenceToolCall
 from lai.domain.client_apps import ClientAppRecord
-from lai.domain.errors import ClientToolDispatchError, ConflictError, GuardrailBlockedError
+from lai.domain.errors import (
+    ClientToolDispatchError,
+    ConflictError,
+    GuardrailBlockedError,
+    StorageFailureError,
+)
 from lai.domain.guardrails import (
     GuardrailBlockMode,
     GuardrailConfig,
@@ -72,6 +77,7 @@ __all__ = [
     "SafetyPrinciple",
     "SmtpAlertConfig",
     "SmtpTlsMode",
+    "StorageFailureError",
     "TokenUsageRecord",
     "UsageEvent",
     "expand_scopes",

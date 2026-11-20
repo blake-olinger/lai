@@ -11,27 +11,33 @@ if TYPE_CHECKING:
 
     from lai.domain.files import FileRecord
 
-_HOLISTIC_CUES: tuple[str, ...] = (
-    "summarize",
-    "entire",
-    "whole",
+_MULTI_FILE_HOLISTIC_CUES: tuple[str, ...] = (
     "all errors",
     "every file",
-    "timeline",
-    "overview",
     "audit all",
     "across the log",
     "count all",
     "full summary",
 )
 
+_HOLISTIC_CUES: tuple[str, ...] = (
+    *_MULTI_FILE_HOLISTIC_CUES,
+    "summarize",
+    "entire",
+    "whole",
+    "timeline",
+    "overview",
+)
 
-def classify_context_mode(
+
+def classify_context_mode(  # noqa: PLR0913
     requested_mode: ContextMode,
     user_message: str,
     files: Sequence[FileRecord],
     *,
     direct_budget_tokens: int,
+    max_map_reduce_tokens: int | None = None,
+    explicit_files: bool = True,
 ) -> ContextMode:
     """Select Direct, Retrieval, or Map-Reduce mode for the active turn."""
     if requested_mode is not ContextMode.AUTO:
@@ -44,8 +50,14 @@ def classify_context_mode(
     if total_tokens <= direct_budget_tokens:
         return ContextMode.DIRECT
 
+    if max_map_reduce_tokens is not None and total_tokens > max_map_reduce_tokens:
+        return ContextMode.RETRIEVAL
+
     normalized_query = " ".join(user_message.lower().split())
-    if any(cue in normalized_query for cue in _HOLISTIC_CUES):
+    active_cues = (
+        _MULTI_FILE_HOLISTIC_CUES if (not explicit_files and len(files) > 1) else _HOLISTIC_CUES
+    )
+    if any(cue in normalized_query for cue in active_cues):
         return ContextMode.MAP_REDUCE
 
     return ContextMode.RETRIEVAL

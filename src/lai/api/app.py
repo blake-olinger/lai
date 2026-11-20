@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from lai.api._body_limit import RequestBodySizeLimitMiddleware
 from lai.api._cors import (
     DEFAULT_CORS_ALLOW_HEADERS,
     DynamicCorsController,
@@ -96,6 +97,11 @@ def create_app(
     if services is not None:
         app.state.services = services
 
+    app.add_middleware(
+        RequestBodySizeLimitMiddleware,
+        max_json_body_bytes=resolved_settings.max_json_body_bytes,
+        max_upload_bytes=resolved_settings.max_upload_bytes,
+    )
     app.add_middleware(DynamicCorsMiddleware, controller=cors_controller)
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
