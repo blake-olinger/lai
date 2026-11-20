@@ -1,4 +1,4 @@
-"""Opt-in hardware tests exercising live ONNX embeddings and local inference binaries."""
+"""Opt-in hardware tests exercising live ONNX embeddings, llama-server, and ShieldGemma-2B."""
 
 from __future__ import annotations
 
@@ -11,16 +11,9 @@ import pytest
 from lai.cli._common import resolve_llama_executable
 from lai.config.profiles import get_model_profile
 from lai.config.settings import load_settings
-from lai.domain.chat import MessageRole
-from lai.domain.errors import InferenceBackendError
-from lai.domain.inference import BackendHealth, InferenceMessage, InferenceRequest
-from lai.inference import (
-    LlamaCppProvider,
-    LlamaCppSupervisor,
-    OllamaSupervisor,
-    OpenAICompatProvider,
-)
-from lai.inference.ollama_manager import resolve_ollama_executable
+from lai.domain.guardrails import GuardrailVerdict
+from lai.guardrails import ShieldGemmaCpuProvider, ShieldGemmaSupervisor
+from lai.inference import LlamaCppProvider, LlamaCppSupervisor
 from lai.ingestion.embedder import DEFAULT_EMBEDDING_DIMENSIONS, FastEmbedCpuAdapter
 
 if TYPE_CHECKING:
@@ -31,7 +24,6 @@ pytestmark = pytest.mark.hardware
 _HARDWARE_ALLOW_DOWNLOAD_ENV = "LAI_HARDWARE_ALLOW_DOWNLOAD"
 _L2_NORM_TOL = 1e-3
 _SIMILARITY_DOC_COUNT = 2
-_SAMPLE_CHAT_MAX_TOKENS = 8
 
 
 def _dot(vec_a: list[float], vec_b: list[float]) -> float:
@@ -70,74 +62,6 @@ async def test_live_fastembed_cpu_embeddings() -> None:
 
 
 @pytest.mark.hardware
-async def test_live_ollama_supervisor_and_provider_health(tmp_path: Path) -> None:
-    """Probe live OllamaSupervisor and OpenAICompatProvider health when ollama is installed."""
-    try:
-        ollama_exe = resolve_ollama_executable()
-    except InferenceBackendError as exc:
-        pytest.skip(f"Ollama binary not installed on host: {exc.message}")
-
-    settings = load_settings()
-    supervisor = OllamaSupervisor(
-        base_url=settings.ollama_base_url,
-        log_dir=tmp_path / "ollama-logs",
-        executable_path=ollama_exe,
-    )
-    provider = OpenAICompatProvider(settings.ollama_base_url, health_timeout_seconds=2.0)
-    try:
-        sup_health = await supervisor.health()
-        prov_health = await provider.health()
-    finally:
-        await provider.aclose()
-
-    assert isinstance(sup_health, BackendHealth)
-    assert isinstance(prov_health, BackendHealth)
-    assert sup_health.status
-    assert prov_health.status
-    assert sup_health.latency_ms is not None
-    assert sup_health.latency_ms >= 0.0
-    assert prov_health.latency_ms is not None
-    assert prov_health.latency_ms >= 0.0
-    if sup_health.healthy:
-        assert prov_health.healthy
-
-
-@pytest.mark.hardware
-async def test_live_ollama_chat_completion_when_daemon_ready(tmp_path: Path) -> None:
-    """Run a tiny live chat completion when an Ollama daemon and model are already running."""
-    try:
-        ollama_exe = resolve_ollama_executable()
-    except InferenceBackendError as exc:
-        pytest.skip(f"Ollama binary not installed on host: {exc.message}")
-
-    settings = load_settings()
-    supervisor = OllamaSupervisor(
-        base_url=settings.ollama_base_url,
-        log_dir=tmp_path / "ollama-chat-logs",
-        executable_path=ollama_exe,
-    )
-    health = await supervisor.health()
-    if not health.healthy or not health.model_loaded:
-        pytest.skip(
-            f"Live Ollama daemon not ready with a loaded model ({health.status}): {health.error}"
-        )
-
-    provider = OpenAICompatProvider(settings.ollama_base_url, timeout_seconds=30.0)
-    try:
-        request = InferenceRequest(
-            model=health.model_loaded,
-            messages=(InferenceMessage(role=MessageRole.USER, content="Reply with OK."),),
-            max_tokens=_SAMPLE_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        )
-        response = await provider.chat_complete(request)
-    finally:
-        await provider.aclose()
-
-    assert response.content.strip() or response.thinking.strip()
-
-
-@pytest.mark.hardware
 async def test_live_llamacpp_supervisor_and_provider(tmp_path: Path) -> None:
     """Verify live LlamaCppSupervisor + LlamaCppProvider when binary and GGUF model exist."""
     settings = load_settings()
@@ -170,4 +94,33 @@ async def test_live_llamacpp_supervisor_and_provider(tmp_path: Path) -> None:
         assert supervisor.active_profile() == profile
     finally:
         await provider.aclose()
+        await supervisor.stop()
+
+
+@pytest.mark.hardware
+async def test_live_shieldgemma_supervisor_and_provider(tmp_path: Path) -> None:
+    """Verify live ShieldGemmaSupervisor + ShieldGemmaCpuProvider when binary and GGUF exist."""
+    settings = load_settings()
+    exe_path = resolve_llama_executable(settings.bin_dir)
+    if not exe_path.exists():
+        pytest.skip(f"llama-server executable not found at {exe_path}")
+
+    guardrail_model_path = settings.models_dir / settings.guardrails.hf_filename
+    if not guardrail_model_path.exists():
+        pytest.skip(f"ShieldGemma GGUF model not found at {guardrail_model_path}")
+
+    supervisor = ShieldGemmaSupervisor(
+        executable_path=exe_path,
+        model_path=guardrail_model_path,
+        log_dir=tmp_path / "shieldgemma-logs",
+    )
+    provider = ShieldGemmaCpuProvider(settings.guardrails)
+    try:
+        sup_health = await supervisor.ensure_running(settings.guardrails)
+        prov_health = await provider.health()
+        assert sup_health.healthy
+        assert prov_health.healthy
+        decision = await provider.evaluate("Summarize the key features of Python 3.13.")
+        assert decision.verdict is GuardrailVerdict.ALLOW
+    finally:
         await supervisor.stop()

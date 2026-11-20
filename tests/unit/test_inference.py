@@ -1,12 +1,14 @@
-"""Unit tests for llama.cpp flags, thinking parser, client, and supervisor."""
+"""Unit tests for llama.cpp flags, thinking parser, client, and POSIX supervisor."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import logging
 import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import httpx
@@ -251,39 +253,46 @@ class _FakeProcess:
         self._returncode = code
 
 
-async def test_llama_cpp_supervisor_lifecycle_crash_and_timeout(
+async def test_llama_cpp_supervisor_lifecycle_pdeathsig_and_alerts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """LlamaCppSupervisor logs stdout, validates flags, and alerts on crash or timeout."""
-    exe_path = tmp_path / "llama-server.exe"
-    exe_path.write_bytes(b"")
+    """LlamaCppSupervisor attaches PR_SET_PDEATHSIG on Linux and alerts on crash/timeout."""
+    exe_path = tmp_path / "llama-server"
+    exe_path.write_bytes(b"ELF")
     models_dir = tmp_path / "models"
     models_dir.mkdir()
-    profile = _sample_profile()
-    (models_dir / profile.hf_filename).write_bytes(b"GGUF")
+    model_bytes = b"GGUF_WEIGHTS"
+    profile = _sample_profile(sha256=hashlib.sha256(model_bytes).hexdigest())
+    (models_dir / profile.hf_filename).write_bytes(model_bytes)
     log_dir = tmp_path / "logs"
 
     captured_cmds: list[list[str]] = []
+    captured_kwargs: list[dict[str, object]] = []
     fake_proc = _FakeProcess(b"llama_model_loader: loaded\n")
 
-    def _fake_popen(cmd: list[str], **_kw: object) -> _FakeProcess:
+    def _fake_popen(cmd: list[str], **kw: object) -> _FakeProcess:
         captured_cmds.append(cmd)
+        captured_kwargs.append(dict(kw))
         return fake_proc
 
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
     ready = True
 
     async def _probe() -> BackendHealth:
         return BackendHealth(healthy=ready, status="ok" if ready else "loading")
 
-    manager = configure_observability(LoggingConfig(log_dir=log_dir, enable_file_logs=False))
+    manager = configure_observability(
+        LoggingConfig(log_dir=log_dir, enable_file_logs=False, alert_cooldown_seconds=0.0)
+    )
     supervisor = LlamaCppSupervisor(
         executable_path=exe_path,
         models_dir=models_dir,
         log_dir=log_dir,
         startup_timeout_seconds=0.2,
         poll_interval_seconds=0.01,
+        verify_sha256=True,
         health_probe=_probe,
     )
     try:
@@ -293,12 +302,13 @@ async def test_llama_cpp_supervisor_lifecycle_crash_and_timeout(
         assert supervisor.active_profile() == profile
         assert captured_cmds[0][0] == str(exe_path)
         assert "--n-cpu-moe" in captured_cmds[0]
+        assert captured_kwargs[0]["start_new_session"] is True
+        assert callable(captured_kwargs[0]["preexec_fn"])
 
         fake_proc.crash(code=139)
         crashed = await supervisor.health()
         assert crashed.healthy is False
         assert crashed.status == "crashed"
-        assert supervisor.active_profile() is None
         assert "llama_model_loader: loaded" in (log_dir / "llama-server.log").read_text("utf-8")
 
         ready = False
@@ -309,6 +319,31 @@ async def test_llama_cpp_supervisor_lifecycle_crash_and_timeout(
         categories = [alert.category for alert in manager.recent_alerts()]
         assert AlertCategory.SUBPROCESS_CRASH in categories
         assert AlertCategory.TIMEOUT in categories
+    finally:
+        await supervisor.stop()
+        manager.close()
+
+
+async def test_llama_cpp_supervisor_rejects_corrupt_model_sha256(tmp_path: Path) -> None:
+    """LlamaCppSupervisor blocks spawn and emits SECURITY_ALERT when GGUF SHA-256 mismatches."""
+    exe_path = tmp_path / "llama-server"
+    exe_path.write_bytes(b"ELF")
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    profile = _sample_profile(sha256="0" * 64)
+    (models_dir / profile.hf_filename).write_bytes(b"TAMPERED")
+
+    manager = configure_observability(LoggingConfig(log_dir=tmp_path, enable_file_logs=False))
+    supervisor = LlamaCppSupervisor(
+        executable_path=exe_path,
+        models_dir=models_dir,
+        log_dir=tmp_path / "logs",
+        verify_sha256=True,
+    )
+    try:
+        with pytest.raises(InferenceBackendError, match="SHA-256 integrity mismatch"):
+            await supervisor.ensure_running(profile)
+        assert any(a.category is AlertCategory.SECURITY_ALERT for a in manager.recent_alerts())
     finally:
         await supervisor.stop()
         manager.close()

@@ -6,7 +6,7 @@ import io
 import json
 import logging
 import subprocess
-import zipfile
+import tarfile
 from typing import TYPE_CHECKING, cast
 
 import httpx
@@ -24,6 +24,7 @@ from lai.domain.inference import (
 )
 from lai.domain.observability import AlertCategory, LoggingConfig
 from lai.inference import (
+    DEFAULT_LLAMA_CPP_TAG,
     LlamaCppProvider,
     LlamaCppSupervisor,
     ModelDownloader,
@@ -48,6 +49,17 @@ def _reset_root_logging() -> Generator[None]:
         handler.flush()
         handler.close()
     root.handlers.clear()
+
+
+def _make_tar_gz_files(entries: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
 
 def test_thinking_parser_mid_thought_eof_and_multi_blocks() -> None:
@@ -165,7 +177,7 @@ async def test_supervisor_missing_files_startup_crash_and_profile_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Supervisor rejects missing paths, alerts on startup crash, and switches profiles."""
-    exe = tmp_path / "llama-server.exe"
+    exe = tmp_path / "llama-server"
     models = tmp_path / "models"
     models.mkdir()
     log_dir = tmp_path / "logs"
@@ -216,12 +228,10 @@ async def test_supervisor_missing_files_startup_crash_and_profile_switch(
         monkeypatch.setattr(subprocess, "Popen", _spawn)
         h1 = await sup.ensure_running(p1)
         assert h1.model_loaded == "p1"
-        # Idempotent call on same profile reuses running process.
         h1_again = await sup.ensure_running(p1)
         assert h1_again.model_loaded == "p1"
         assert idx == 1
 
-        # Switching profile stops first process cleanly and launches second.
         h2 = await sup.ensure_running(p2)
         assert procs[0].terminated is True
         assert h2.model_loaded == "p2"
@@ -234,72 +244,80 @@ async def _ok_health() -> BackendHealth:
     return BackendHealth(healthy=True, status="ok")
 
 
+def _no_cuda() -> tuple[int, int] | None:
+    return None
+
+
+def _rel(name: str, url: str, tag: str = DEFAULT_LLAMA_CPP_TAG) -> dict[str, object]:
+    return {"tag_name": tag, "assets": [{"name": name, "browser_download_url": url}]}
+
+
 async def test_downloader_timeout_and_missing_cuda_asset(tmp_path: Path) -> None:
-    """ModelDownloader alerts on timeouts and fails cleanly on missing CUDA assets."""
+    """ModelDownloader alerts on timeouts and fails cleanly on missing Linux CUDA assets."""
     manager = configure_observability(LoggingConfig(log_dir=tmp_path, enable_file_logs=False))
     try:
-        downloader = ModelDownloader(bin_dir=tmp_path / "bin", models_dir=tmp_path / "models")
+        downloader = ModelDownloader(
+            bin_dir=tmp_path / "bin",
+            models_dir=tmp_path / "models",
+            platform_name="linux",
+            machine_arch="x86_64",
+            cuda_detector=_no_cuda,
+        )
+        tag_url = (
+            f"https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{DEFAULT_LLAMA_CPP_TAG}"
+        )
+        cu12 = "llama-b12552-bin-ubuntu-cuda-12.8-x64.tar.gz"
         with respx.mock(assert_all_called=True) as mock:
-            mock.get("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest").mock(
+            mock.get(tag_url).mock(
                 side_effect=[
                     httpx.ReadTimeout("github timeout"),
-                    httpx.Response(
-                        HTTP_OK,
-                        json={
-                            "assets": [{"name": "llama-src.tar.gz", "browser_download_url": "u"}]
-                        },
-                    ),
+                    httpx.Response(HTTP_ERROR, text="server error"),
+                    httpx.Response(HTTP_OK, json=_rel("src.tgz", "u")),
+                    httpx.Response(HTTP_OK, json=_rel(cu12, "https://dl.test/fail.tar.gz")),
+                    httpx.Response(HTTP_OK, json=_rel(cu12, "https://dl.test/slow.tar.gz")),
                 ]
             )
-            mock.get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10").mock(
-                return_value=httpx.Response(
-                    HTTP_OK,
-                    json=[{"assets": [{"name": "llama-src.tar.gz", "browser_download_url": "u"}]}],
-                )
+            mock.get("https://dl.test/fail.tar.gz").mock(
+                return_value=httpx.Response(HTTP_ERROR, text="download fail")
             )
-            with pytest.raises(InferenceBackendError, match="timed out"):
-                await downloader.download_llama_binaries()
-            with pytest.raises(InferenceBackendError, match="Windows CUDA"):
-                await downloader.download_llama_binaries()
+            mock.get("https://dl.test/slow.tar.gz").mock(side_effect=httpx.ReadTimeout("dl stall"))
+            for expected in ("timed out", "HTTP 500", "Linux CUDA x64", "HTTP 500", "timed out"):
+                with pytest.raises(InferenceBackendError, match=expected):
+                    await downloader.download_llama_binaries()
 
         assert any(a.category is AlertCategory.TIMEOUT for a in manager.recent_alerts())
     finally:
         manager.close()
 
 
-async def test_downloader_falls_back_to_rolling_releases(tmp_path: Path) -> None:
-    """When /releases/latest lacks CUDA zips, download_llama_binaries scans /releases."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("llama-server.exe", b"MZ_FALLBACK")
-    zip_bytes = buf.getvalue()
-
-    downloader = ModelDownloader(bin_dir=tmp_path / "bin", models_dir=tmp_path / "models")
+async def test_downloader_latest_falls_back_to_rolling_releases(tmp_path: Path) -> None:
+    """When tag='latest' lacks Linux CUDA tarballs, download_llama_binaries scans /releases."""
+    tar_bytes = _make_tar_gz_files({"llama-b12478/llama-server": b"ELF_FALLBACK"})
+    downloader = ModelDownloader(
+        bin_dir=tmp_path / "bin",
+        models_dir=tmp_path / "models",
+        platform_name="linux",
+        machine_arch="x86_64",
+        cuda_detector=_no_cuda,
+    )
+    asset = "llama-b12478-bin-ubuntu-cuda-12.8-x64.tar.gz"
     with respx.mock(assert_all_called=True) as mock:
         mock.get("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest").mock(
-            return_value=httpx.Response(
-                HTTP_OK,
-                json={"assets": [{"name": "v1.0.0-source.tar.gz", "browser_download_url": "u"}]},
-            )
+            return_value=httpx.Response(HTTP_OK, json=_rel("v1.0.0-source.tar.gz", "u", "v1.0.0"))
         )
         mock.get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10").mock(
             return_value=httpx.Response(
                 HTTP_OK,
                 json=[
-                    {"assets": [{"name": "notes.txt", "browser_download_url": "n"}]},
-                    {
-                        "assets": [
-                            {
-                                "name": "llama-b12478-bin-win-cuda-13.5-x64.zip",
-                                "browser_download_url": "https://dl.test/b12478.zip",
-                            }
-                        ]
-                    },
+                    _rel("notes.txt", "n", "notes"),
+                    _rel(asset, "https://dl.test/b12478.tar.gz", "b12478"),
                 ],
             )
         )
-        mock.get("https://dl.test/b12478.zip").mock(
-            return_value=httpx.Response(HTTP_OK, content=zip_bytes)
+        mock.get("https://dl.test/b12478.tar.gz").mock(
+            return_value=httpx.Response(HTTP_OK, content=tar_bytes)
         )
-        exe = await downloader.download_llama_binaries()
-    assert exe.read_bytes() == b"MZ_FALLBACK"
+        exe = await downloader.download_llama_binaries(tag="latest")
+    assert exe == tmp_path / "bin" / "llama" / "current" / "llama-server"
+    assert exe.read_bytes() == b"ELF_FALLBACK"
+    assert (tmp_path / "bin" / "llama" / "releases" / "b12478" / "llama-server").exists()

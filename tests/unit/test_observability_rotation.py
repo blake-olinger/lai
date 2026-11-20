@@ -15,11 +15,15 @@ from typing import TYPE_CHECKING, cast
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
+from lai.config.profiles import GEMMA4_26B_A4B_PROFILE
 from lai.config.settings import LaiSettings
 from lai.domain import AlertCategory, LoggingConfig
 from lai.domain.errors import InferenceBackendError
 from lai.domain.ids import ALERT_ID_PREFIX, new_alert_id
+from lai.domain.inference import ModelIntegrityConfig, ModelProfile
+from lai.inference import DEFAULT_LLAMA_CPP_TAG, LLAMA_CPP_LINUX_X64_MANIFEST
 from lai.observability import (
     AlertManager,
     DailyRotatingStreamWriter,
@@ -313,3 +317,30 @@ def test_make_pdeathsig_preexec_and_posix_process_group_signaling(
     kill_popen_process_group(cast("subprocess.Popen[bytes]", proc))
     assert proc.terminated == 1
     assert proc.killed == 1
+
+
+def test_domain_integrity_models_and_pinned_manifest() -> None:
+    """ModelProfile, ModelIntegrityConfig, and pinned manifest enforce strict SHA-256 hex."""
+    assert GEMMA4_26B_A4B_PROFILE.hf_revision is not None
+    assert GEMMA4_26B_A4B_PROFILE.sha256 is not None
+    assert len(GEMMA4_26B_A4B_PROFILE.sha256) == 64
+    assert set(LLAMA_CPP_LINUX_X64_MANIFEST) == {"12.8", "13.5"}
+    for spec in LLAMA_CPP_LINUX_X64_MANIFEST.values():
+        assert spec.tag == DEFAULT_LLAMA_CPP_TAG
+        assert len(spec.sha256) == 64
+        assert len(spec.cudart_sha256) == 64
+
+    cfg = ModelIntegrityConfig(
+        approved_model_sha256s=("A" * 64,),
+        allowed_hf_repos=("  unsloth/gemma-4-26B-A4B-it-GGUF  ",),
+    )
+    assert cfg.approved_model_sha256s == ("a" * 64,)
+    assert cfg.allowed_hf_repos == ("unsloth/gemma-4-26B-A4B-it-GGUF",)
+    for bad_call in (
+        lambda: ModelIntegrityConfig(approved_model_sha256s=("short",)),
+        lambda: ModelIntegrityConfig(allowed_hf_repos=("   ",)),
+        lambda: ModelProfile(name="p", hf_repo="r/m", hf_filename="m.gguf", sha256="zz" * 32),
+        lambda: ModelProfile(name="p", hf_repo="r/m", hf_filename="m.gguf", hf_revision="  "),
+    ):
+        with pytest.raises(ValidationError):
+            bad_call()
