@@ -302,3 +302,43 @@ async def test_oidc_multi_audience_and_azp_client_binding() -> None:
         )
         with pytest.raises(AuthenticationError):
             await provider.authenticate(RequestCredentials(bearer_token=bad_tok))
+
+
+async def test_oidc_entra_id_identity_claims_and_appid_binding() -> None:
+    """OidcJwtAuthProvider supports Entra ID preferred_username/upn and appid claims."""
+    priv, jwk = _rsa_key_and_jwk("entra-k1")
+    iss = "https://login.microsoftonline.com/tenant-123/v2.0"
+
+    async def fetcher(_url: str) -> dict[str, Any]:
+        return {"keys": [jwk]}
+
+    cfg = OidcProviderConfig(
+        enabled=True,
+        issuer_url=iss,
+        jwks_url="https://login.microsoftonline.com/tenant-123/discovery/v2.0/keys",
+        audiences=("api://lai-prod", "entra-desktop", "entra-web"),
+        allowed_domains=("contoso.com",),
+        admin_emails=("boss@contoso.com",),
+        require_email_verified=False,
+    )
+    assert cfg.identity_claims == ("email", "preferred_username", "upn")
+    provider = OidcJwtAuthProvider(cfg, jwks_fetcher=fetcher)
+
+    def _tok(**claims: object) -> RequestCredentials:
+        body = {"iss": iss, "aud": "api://lai-prod", "sub": "oid-1", "exp": _EXP_FUTURE, **claims}
+        tok = jwt.encode(body, priv, algorithm="RS256", headers={"kid": "entra-k1"})
+        return RequestCredentials(bearer_token=tok)
+
+    p1 = await provider.authenticate(
+        _tok(email="  ", preferred_username="Boss@Contoso.com", appid=" entra-desktop ")
+    )
+    assert (p1.email, p1.oauth_client_id) == ("boss@contoso.com", "entra-desktop")
+    assert p1.scopes == (ApiScope.ADMIN,)
+    p2 = await provider.authenticate(
+        _tok(preferred_username=123, upn="Dev@Contoso.com", azp="entra-web", appid="entra-desktop")
+    )
+    assert (p2.email, p2.oauth_client_id) == ("dev@contoso.com", "entra-web")
+    assert p2.scopes == cfg.default_scopes
+    for bad_appid in ("rogue-entra-app", "", 999):
+        with pytest.raises(AuthenticationError, match="appid"):
+            await provider.authenticate(_tok(preferred_username="dev@contoso.com", appid=bad_appid))

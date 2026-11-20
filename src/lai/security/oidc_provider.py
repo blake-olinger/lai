@@ -49,6 +49,7 @@ class OidcProviderConfig(StrictModel):
     jwks_timeout_seconds: float = Field(default=5.0, gt=0.0)
     min_jwks_refresh_interval_seconds: float = Field(default=30.0, ge=0.0)
     require_email_verified: bool = True
+    identity_claims: tuple[str, ...] = ("email", "preferred_username", "upn")
     leeway_seconds: float = Field(default=0.0, ge=0.0)
 
     def resolved_audiences(self) -> tuple[str, ...]:
@@ -77,10 +78,18 @@ def _extract_jwt_bearer(credentials: RequestCredentials) -> str | None:
     return token
 
 
+def _resolve_identity_claim(config: OidcProviderConfig, claims: Mapping[str, Any]) -> str | None:
+    """Return the first non-empty lowercase identity string from configured identity_claims."""
+    for claim_name in config.identity_claims:
+        raw_val = claims.get(claim_name)
+        if isinstance(raw_val, str) and raw_val.strip():
+            return raw_val.strip().lower()
+    return None
+
+
 def _validate_email_policy(config: OidcProviderConfig, claims: Mapping[str, Any]) -> str | None:
-    """Enforce email verification and email/domain allowlists, returning normalized email."""
-    raw_email = claims.get("email")
-    email = raw_email.strip().lower() if isinstance(raw_email, str) and raw_email.strip() else None
+    """Enforce email verification and identity/domain allowlists, returning normalized identity."""
+    email = _resolve_identity_claim(config, claims)
 
     if config.require_email_verified and claims.get("email_verified") is not True:
         get_component_logger("security").warning("oidc_auth_failed", reason="email_not_verified")
@@ -95,7 +104,7 @@ def _validate_email_policy(config: OidcProviderConfig, claims: Mapping[str, Any]
         get_component_logger("security").warning(
             "oidc_auth_denied", reason="missing_email_for_allowlist"
         )
-        msg = "OIDC token missing email required by allowlist."
+        msg = "OIDC token missing identity claim required by allowlist."
         raise AuthorizationError(msg)
 
     allowed_emails = {item.strip().lower() for item in config.allowed_emails}
@@ -124,14 +133,15 @@ def _resolve_oauth_client_id(
     claims: Mapping[str, Any],
     resolved_audiences: tuple[str, ...],
 ) -> str:
-    """Extract and verify the bound OAuth client ID from OIDC azp or aud claims."""
-    if "azp" in claims and claims["azp"] is not None:
-        azp = claims["azp"]
-        if not isinstance(azp, str) or azp.strip() not in resolved_audiences:
-            get_component_logger("security").warning("oidc_auth_failed", reason="invalid_azp_claim")
-            msg = "OIDC token azp claim is not an authorized client audience."
-            raise AuthenticationError(msg)
-        return azp.strip()
+    """Extract and verify the bound OAuth client ID from azp, appid (Entra ID), or aud claims."""
+    for claim_key, fail_reason in (("azp", "invalid_azp_claim"), ("appid", "invalid_appid_claim")):
+        if claim_key in claims and claims[claim_key] is not None:
+            raw_client = claims[claim_key]
+            if not isinstance(raw_client, str) or raw_client.strip() not in resolved_audiences:
+                get_component_logger("security").warning("oidc_auth_failed", reason=fail_reason)
+                msg = f"OIDC token {claim_key} claim is not an authorized client audience."
+                raise AuthenticationError(msg)
+            return raw_client.strip()
 
     aud = claims.get("aud")
     if isinstance(aud, str):
