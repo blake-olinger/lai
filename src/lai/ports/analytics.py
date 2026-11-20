@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from lai.domain.analytics import AnalyticsReport, TokenUsageRecord, UsageEvent
+    from lai.domain.analytics import (
+        AnalyticsReport,
+        GuardrailUsageEvent,
+        TokenUsageRecord,
+        UsageEvent,
+    )
 
 
 @runtime_checkable
@@ -20,6 +25,10 @@ class UsageAnalyticsPort(Protocol):
 
     async def record_tokens(self, record: TokenUsageRecord) -> None:
         """Record inference token totals for a principal and optional OAuth client app."""
+        ...
+
+    async def record_guardrail(self, event: GuardrailUsageEvent) -> None:
+        """Record a completed guardrail evaluation into the current hourly efficacy rollup."""
         ...
 
     async def get_report(

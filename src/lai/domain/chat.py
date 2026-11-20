@@ -132,6 +132,7 @@ class TurnOutput(StrictModel):
     pending_client_tool_call: ClientToolCallEvent | None = None
     guardrail_blocked: bool = False
     guardrail_policy: str | None = None
+    guardrail_direction: str | None = None
 
 
 class KeepaliveEvent(StrictModel):

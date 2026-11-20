@@ -7,6 +7,7 @@ from datetime import datetime
 from pydantic import Field
 
 from lai.domain.base import StrictModel, utc_now
+from lai.domain.guardrails import GuardrailDirection, GuardrailVerdict
 
 
 class AnalyticsConfig(StrictModel):
@@ -73,6 +74,52 @@ class HourlyUsageBucket(StrictModel):
     total_tokens: int = Field(ge=0)
 
 
+class GuardrailUsageEvent(StrictModel):
+    """Single completed guardrail evaluation measurement (no prompt content)."""
+
+    timestamp: datetime = Field(default_factory=utc_now)
+    direction: GuardrailDirection = GuardrailDirection.INGRESS
+    verdict: GuardrailVerdict
+    policy: str | None = None
+    fail_closed: bool = False
+    latency_ms: float = Field(default=0.0, ge=0.0)
+
+
+class GuardrailDirectionSummary(StrictModel):
+    """Aggregated guardrail evaluation volume, block rate, and latency per direction."""
+
+    direction: GuardrailDirection
+    evaluations: int = Field(ge=0)
+    allowed: int = Field(ge=0)
+    blocked: int = Field(ge=0)
+    block_rate: float = Field(ge=0.0, le=1.0)
+    fail_closed: int = Field(ge=0)
+    avg_latency_ms: float = Field(ge=0.0)
+    max_latency_ms: float = Field(ge=0.0)
+
+
+class GuardrailPolicyCount(StrictModel):
+    """Aggregated block count per violated safety policy and direction."""
+
+    direction: GuardrailDirection
+    policy: str = Field(min_length=1)
+    block_count: int = Field(ge=0)
+
+
+class GuardrailAnalyticsSummary(StrictModel):
+    """Windowed guardrail efficacy summary embedded in AnalyticsReport."""
+
+    total_evaluations: int = Field(default=0, ge=0)
+    total_allowed: int = Field(default=0, ge=0)
+    total_blocked: int = Field(default=0, ge=0)
+    block_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    fail_closed_count: int = Field(default=0, ge=0)
+    avg_latency_ms: float = Field(default=0.0, ge=0.0)
+    max_latency_ms: float = Field(default=0.0, ge=0.0)
+    by_direction: list[GuardrailDirectionSummary] = Field(default_factory=list)
+    top_policies: list[GuardrailPolicyCount] = Field(default_factory=list)
+
+
 class AnalyticsReport(StrictModel):
     """Windowed usage analytics report returned by GET /v1/system/analytics."""
 
@@ -89,3 +136,4 @@ class AnalyticsReport(StrictModel):
     endpoints: list[EndpointUsageSummary] = Field(default_factory=list)
     principals: list[PrincipalUsageSummary] = Field(default_factory=list)
     hourly: list[HourlyUsageBucket] = Field(default_factory=list)
+    guardrails: GuardrailAnalyticsSummary = Field(default_factory=GuardrailAnalyticsSummary)
