@@ -19,8 +19,9 @@ from lai.config.profiles import DEFAULT_MODEL_PROFILE_NAME
 from lai.domain.analytics import AnalyticsConfig
 from lai.domain.errors import ValidationFailedError
 from lai.domain.guardrails import GuardrailConfig
-from lai.domain.inference import ModelProfile
+from lai.domain.inference import ModelIntegrityConfig, ModelProfile
 from lai.domain.observability import LoggingConfig
+from lai.domain.updates import UpdateConfig
 
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
@@ -56,10 +57,8 @@ class LaiSettings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = Field(default=8400, ge=1, le=65535)
-    inference_backend: Literal["llamacpp", "ollama"] = "llamacpp"
     llama_host: str = "127.0.0.1"
     llama_port: int = Field(default=8081, ge=1, le=65535)
-    ollama_base_url: str = "http://127.0.0.1:11434"
 
     data_dir: Path = Path("data")
     models_dir: Path = Path("models")
@@ -81,6 +80,10 @@ class LaiSettings(BaseSettings):
 
     cf_access_enabled: bool = False
     trust_cloudflare_headers: bool = False
+    trusted_proxy_cidrs: tuple[str, ...] = ()
+    proxy_ip_header: Literal["cf-connecting-ip", "x-forwarded-for", "x-azure-clientip"] = (
+        "x-forwarded-for"
+    )
     cors_allowed_origins: tuple[str, ...] = ()
     cors_extra_allow_headers: tuple[str, ...] = ()
     cf_access_client_id: str | None = None
@@ -96,6 +99,8 @@ class LaiSettings(BaseSettings):
     oidc_audiences: tuple[str, ...] = ()
     oidc_allowed_emails: tuple[str, ...] = ()
     oidc_allowed_domains: tuple[str, ...] = ()
+    oidc_require_email_verified: bool = True
+    oidc_identity_claims: tuple[str, ...] = ("email", "preferred_username", "upn")
     oidc_leeway_seconds: float = Field(default=30.0, ge=0.0, le=300.0)
     oidc_default_scopes: tuple[str, ...] = (
         "projects:read",
@@ -110,6 +115,8 @@ class LaiSettings(BaseSettings):
 
     default_model_profile: str = DEFAULT_MODEL_PROFILE_NAME
     custom_profiles: dict[str, ModelProfile] = Field(default_factory=dict)
+    model_integrity: ModelIntegrityConfig = Field(default_factory=ModelIntegrityConfig)
+    updates: UpdateConfig = Field(default_factory=UpdateConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
     guardrails: GuardrailConfig = Field(default_factory=GuardrailConfig)

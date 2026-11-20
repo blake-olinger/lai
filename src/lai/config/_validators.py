@@ -1,7 +1,8 @@
-"""Fail-closed configuration validators for OIDC, Cloudflare Access, and CORS."""
+"""Fail-closed configuration validators for OIDC, proxies, integrity, CORS, and alerting."""
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -61,6 +62,10 @@ def _validate_oidc_settings(settings: LaiSettings) -> None:
                 "use oidc_allowed_emails for explicit allowlisting."
             )
             raise ValueError(msg)
+
+    if not any(claim.strip() for claim in settings.oidc_identity_claims):
+        msg = "OIDC authentication requires at least one non-empty claim in oidc_identity_claims."
+        raise ValueError(msg)
 
 
 def _validate_cloudflare_settings(settings: LaiSettings) -> None:
@@ -198,10 +203,57 @@ def _validate_alerting_settings(settings: LaiSettings) -> None:
         _validate_email_address(recipient, "logging.alert_smtp.to_addresses")
 
 
+def _validate_trusted_proxy_cidrs(settings: LaiSettings) -> None:
+    """Validate trusted_proxy_cidrs entries as strict IPv4/IPv6 networks."""
+    for raw in settings.trusted_proxy_cidrs:
+        cleaned = raw.strip()
+        if not cleaned or cleaned != raw:
+            msg = (
+                f"Invalid trusted proxy CIDR {raw!r}: "
+                "must not be empty or contain surrounding whitespace."
+            )
+            raise ValueError(msg)
+        try:
+            ipaddress.ip_network(cleaned, strict=False)
+        except ValueError as exc:
+            msg = f"Invalid trusted proxy CIDR {raw!r}: {exc}"
+            raise ValueError(msg) from exc
+
+
+def _validate_model_integrity(settings: LaiSettings) -> None:
+    """Enforce boot-only model allowlist and SHA-256 pinning for custom profiles."""
+    integrity = settings.model_integrity
+    if not integrity.strict_allowlist:
+        return
+    approved_digests = frozenset(integrity.approved_model_sha256s)
+    allowed_repos = frozenset(integrity.allowed_hf_repos)
+    for name, profile in settings.custom_profiles.items():
+        if profile.sha256 is None:
+            msg = (
+                f"Custom model profile {name!r} must pin sha256 "
+                "when model_integrity.strict_allowlist is enabled."
+            )
+            raise ValueError(msg)
+        if profile.sha256 not in approved_digests:
+            msg = (
+                f"Custom model profile {name!r} sha256 {profile.sha256!r} "
+                "is not in model_integrity.approved_model_sha256s."
+            )
+            raise ValueError(msg)
+        if allowed_repos and profile.hf_repo not in allowed_repos:
+            msg = (
+                f"Custom model profile {name!r} hf_repo {profile.hf_repo!r} "
+                "is not in model_integrity.allowed_hf_repos."
+            )
+            raise ValueError(msg)
+
+
 def validate_lai_settings(settings: LaiSettings) -> None:
-    """Run all fail-closed security, CORS, and alerting checks on LaiSettings."""
+    """Run all fail-closed security, proxy, integrity, CORS, and alerting checks."""
     _validate_oidc_settings(settings)
     _validate_cloudflare_settings(settings)
+    _validate_trusted_proxy_cidrs(settings)
+    _validate_model_integrity(settings)
     for origin in settings.cors_allowed_origins:
         _validate_single_cors_origin(origin)
     for header in settings.cors_extra_allow_headers:
