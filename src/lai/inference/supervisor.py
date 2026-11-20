@@ -1,4 +1,4 @@
-"""Subprocess lifecycle supervisor and GPU telemetry for local llama-server."""
+"""Subprocess lifecycle supervisor and GPU telemetry for local Linux llama-server."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ from typing import TYPE_CHECKING
 from lai.domain.errors import InferenceBackendError
 from lai.domain.inference import BackendHealth, ModelProfile
 from lai.domain.observability import AlertCategory
-from lai.inference._winjob import (
+from lai.inference._runtime_helpers import (
     GpuTelemetry,
-    WindowsJobObject,
     kill_process_group,
     parse_nvidia_smi_output,
     pump_stream,
@@ -23,6 +22,8 @@ from lai.inference._winjob import (
 )
 from lai.inference.flags import build_llama_server_args
 from lai.inference.llamacpp_client import LlamaCppProvider
+from lai.observability._process import make_pdeathsig_preexec
+from lai.observability.integrity import verify_file_sha256
 from lai.observability.logging import get_component_logger
 from lai.observability.rotation import DailyRotatingStreamWriter
 from lai.ports.inference import InferenceSupervisorPort
@@ -86,6 +87,7 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
         startup_timeout_seconds: float = 120.0,
         poll_interval_seconds: float = 0.25,
         shutdown_timeout_seconds: float = 10.0,
+        verify_sha256: bool = False,
         model_path_resolver: Callable[[ModelProfile], Path] | None = None,
         health_probe: Callable[[], Awaitable[BackendHealth]] | None = None,
     ) -> None:
@@ -97,13 +99,13 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
         self._startup_timeout_seconds = startup_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
+        self._verify_sha256 = verify_sha256
         self._model_path_resolver = model_path_resolver
         self._health_probe = health_probe
 
         self._lifecycle_lock = asyncio.Lock()
         self._process: subprocess.Popen[bytes] | None = None
         self._active_profile: ModelProfile | None = None
-        self._job_object: WindowsJobObject | None = None
         self._log_writer: DailyRotatingStreamWriter | None = None
         self._output_thread: threading.Thread | None = None
         self._health_client: LlamaCppProvider | None = None
@@ -146,9 +148,12 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
             )
         return await self._health_client.health()
 
-    def _spawn_process(self, profile: ModelProfile) -> subprocess.Popen[bytes]:
-        exe = self._resolve_executable()
-        model_path = self._resolve_model_path(profile)
+    def _spawn_process(
+        self,
+        profile: ModelProfile,
+        exe: str,
+        model_path: Path,
+    ) -> subprocess.Popen[bytes]:
         cmd = [exe, *build_llama_server_args(profile, model_path, self._host, self._port)]
         writer = DailyRotatingStreamWriter(
             self._log_dir / "llama-server.log",
@@ -164,8 +169,6 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
 
         self._process = proc
         self._log_writer = writer
-        if sys.platform == "win32":
-            self._attach_windows_job(proc.pid)
         if proc.stdout is not None:
             thread = threading.Thread(
                 target=pump_stream,
@@ -180,14 +183,15 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
 
     @staticmethod
     def _popen_process(cmd: list[str]) -> subprocess.Popen[bytes]:
-        if sys.platform == "win32":
+        if sys.platform != "win32":
             return subprocess.Popen(  # noqa: S603
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=0,
                 shell=False,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                start_new_session=True,
+                preexec_fn=make_pdeathsig_preexec(),  # noqa: PLW1509
             )
         return subprocess.Popen(  # noqa: S603
             cmd,
@@ -195,26 +199,13 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
             stderr=subprocess.STDOUT,
             bufsize=0,
             shell=False,
-            start_new_session=True,
         )
-
-    def _attach_windows_job(self, pid: int) -> None:
-        try:
-            job = WindowsJobObject()
-            if job.active:
-                job.assign_pid(pid)
-                self._job_object = job
-        except OSError as exc:
-            _logger().warning("windows_job_attach_failed", pid=pid, error=str(exc))
 
     async def _cleanup_resources(self) -> None:
         thread = self._output_thread
         self._output_thread = None
         if thread is not None and thread.is_alive():
             await asyncio.to_thread(thread.join, _THREAD_JOIN_TIMEOUT_SECONDS)
-        if self._job_object is not None:
-            self._job_object.close()
-            self._job_object = None
         if self._log_writer is not None:
             self._log_writer.close()
             self._log_writer = None
@@ -299,7 +290,17 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
                 else:
                     await self._stop_locked()
 
-            proc = self._spawn_process(profile)
+            exe = self._resolve_executable()
+            model_path = self._resolve_model_path(profile)
+            if self._verify_sha256 and profile.sha256 is not None:
+                await asyncio.to_thread(
+                    verify_file_sha256,
+                    model_path,
+                    profile.sha256,
+                    label=profile.name,
+                )
+
+            proc = self._spawn_process(profile, exe, model_path)
             try:
                 return await self._await_startup_ready(proc, profile)
             except asyncio.CancelledError:

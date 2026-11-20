@@ -1,15 +1,15 @@
-"""Inference GPU telemetry parsing, log stream pumping, and process-group helpers."""
+"""Linux runtime helpers for GPU telemetry, CUDA detection, log pumping, and process groups."""
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 from typing import IO, TYPE_CHECKING
 
 from pydantic import Field, ValidationError
 
 from lai.domain.base import StrictModel
-from lai.observability._process import (
-    WindowsJobObject,
-)
 from lai.observability._process import (
     kill_popen_process_group as kill_process_group,
 )
@@ -23,11 +23,14 @@ if TYPE_CHECKING:
 _MIN_GPU_CSV_FIELDS = 4
 _GPU_TEMP_FIELD_INDEX = 4
 _MAX_UTIL_PERCENT = 100
+_NVIDIA_SMI_TIMEOUT_SECONDS = 3.0
+_CUDA_VERSION_RE = re.compile(r"CUDA\s+Version:\s*(\d+)\.(\d+)", re.IGNORECASE)
 
 __all__ = [
     "GpuTelemetry",
-    "WindowsJobObject",
+    "detect_nvidia_cuda_version",
     "kill_process_group",
+    "parse_nvidia_smi_cuda_version",
     "parse_nvidia_smi_output",
     "pump_stream",
     "terminate_process_group",
@@ -77,6 +80,35 @@ def parse_nvidia_smi_output(stdout: str) -> GpuTelemetry | None:
         )
     except (ValueError, ValidationError):
         return None
+
+
+def parse_nvidia_smi_cuda_version(stdout: str) -> tuple[int, int] | None:
+    """Extract the driver-supported (major, minor) CUDA version from nvidia-smi header output."""
+    match = _CUDA_VERSION_RE.search(stdout)
+    if match is None:
+        return None
+    return (int(match.group(1)), int(match.group(2)))
+
+
+def detect_nvidia_cuda_version() -> tuple[int, int] | None:
+    """Run nvidia-smi and return the host driver's max CUDA version, or None if unavailable."""
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        return None
+    try:
+        completed = subprocess.run(  # noqa: S603
+            [nvidia_smi],
+            capture_output=True,
+            text=True,
+            timeout=_NVIDIA_SMI_TIMEOUT_SECONDS,
+            shell=False,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return parse_nvidia_smi_cuda_version(completed.stdout)
 
 
 def pump_stream(stream: IO[bytes], writer: DailyRotatingStreamWriter) -> None:

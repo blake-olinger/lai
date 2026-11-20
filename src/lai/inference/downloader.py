@@ -1,86 +1,70 @@
-"""Downloader for llama.cpp CUDA binaries (Windows & Linux) and HuggingFace GGUF models."""
+"""Downloader for Linux x64 llama.cpp CUDA binaries and HuggingFace GGUF models."""
 
 from __future__ import annotations
 
 import asyncio
+import platform
+import shutil
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
 import httpx
-from huggingface_hub import hf_hub_download  # pyright: ignore[reportUnknownVariableType]
-from huggingface_hub.errors import (
-    EntryNotFoundError,
-    HFValidationError,
-    LocalEntryNotFoundError,
-)
 
 from lai.domain.errors import InferenceBackendError
-from lai.domain.observability import AlertCategory
 from lai.inference._archive import (
-    parse_release_assets,
+    atomic_swap_symlink,
     resolve_platform_spec,
-    safe_extract_archive,
-    select_llama_cuda_assets,
+    validate_release_tag,
+)
+from lai.inference._github_release import (
+    download_verify_and_extract_archive,
+    resolve_release_assets,
+)
+from lai.inference._hf_download import HfDownloader, default_hf_download, download_hf_model
+from lai.inference._runtime_helpers import detect_nvidia_cuda_version
+from lai.inference.manifest import (
+    DEFAULT_LLAMA_CPP_TAG,
+    LLAMA_CPP_LINUX_X64_MANIFEST,
+    SUPPORTED_CUDA_VERSIONS,
+    lookup_manifest_sha256,
+    select_compatible_cuda_version,
 )
 from lai.observability.logging import get_component_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable, Mapping
 
     import structlog
 
     from lai.domain.guardrails import GuardrailConfig
-    from lai.domain.inference import ModelProfile
+    from lai.domain.inference import LlamaCppBinarySpec, ModelProfile
 
 _DEFAULT_GITHUB_REPO = "ggml-org/llama.cpp"
-_GITHUB_API_BASE = "https://api.github.com/repos"
-_HTTP_ERROR_THRESHOLD = 400
-_DOWNLOAD_CHUNK_BYTES = 65536
 _POSIX_EXEC_BITS = 0o111
+
+__all__ = ["HfDownloader", "ModelDownloader"]
 
 
 def _logger() -> structlog.stdlib.BoundLogger:
     return get_component_logger("inference")
 
 
-class HfDownloader(Protocol):
-    """Callable protocol matching huggingface_hub.hf_hub_download."""
-
-    def __call__(
-        self,
-        *,
-        repo_id: str,
-        filename: str,
-        local_dir: str,
-        force_download: bool,
-        token: str | None,
-    ) -> object:
-        """Download a file from a HuggingFace Hub repository."""
-        ...
-
-
-def _default_hf_download(
-    *,
-    repo_id: str,
-    filename: str,
-    local_dir: str,
-    force_download: bool,
-    token: str | None,
-) -> str:
-    """Invoke huggingface_hub.hf_hub_download with strict types."""
-    return hf_hub_download(
-        repo_id=repo_id,
-        filename=filename,
-        local_dir=local_dir,
-        force_download=force_download,
-        token=token,
-    )
+def _locate_extracted_binary(staging_dir: Path, binary_name: str) -> Path:
+    direct_exe = staging_dir / binary_name
+    exe_path = direct_exe if direct_exe.exists() else next(staging_dir.rglob(binary_name), None)
+    if exe_path is None:
+        msg = f"Downloaded llama.cpp archive did not contain {binary_name}."
+        raise InferenceBackendError(msg)
+    if sys.platform != "win32":
+        exe_path.chmod(exe_path.stat().st_mode | _POSIX_EXEC_BITS)
+    return exe_path
 
 
 class ModelDownloader:
-    """Fetches official llama.cpp CUDA binaries (Windows/Linux) and GGUF model files."""
+    """Fetches pinned Linux x64 llama.cpp CUDA binaries and HuggingFace GGUF models."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -92,14 +76,24 @@ class ModelDownloader:
         http_client: httpx.AsyncClient | None = None,
         hf_downloader: HfDownloader | None = None,
         platform_name: str | None = None,
+        machine_arch: str | None = None,
+        cuda_detector: Callable[[], tuple[int, int] | None] | None = None,
+        manifest: Mapping[str, LlamaCppBinarySpec] | None = None,
     ) -> None:
         self._bin_dir = bin_dir
         self._models_dir = models_dir
         self._github_repo = github_repo
         self._timeout_seconds = timeout_seconds
         self._http_client = http_client
-        self._hf_downloader: HfDownloader = hf_downloader or _default_hf_download
-        self._platform_name = platform_name or sys.platform
+        self._hf_downloader: HfDownloader = hf_downloader or default_hf_download
+        self._platform_name = platform_name if platform_name is not None else sys.platform
+        self._machine_arch = machine_arch if machine_arch is not None else platform.machine()
+        self._cuda_detector: Callable[[], tuple[int, int] | None] = (
+            cuda_detector if cuda_detector is not None else detect_nvidia_cuda_version
+        )
+        self._manifest: Mapping[str, LlamaCppBinarySpec] = (
+            manifest if manifest is not None else LLAMA_CPP_LINUX_X64_MANIFEST
+        )
 
     @asynccontextmanager
     async def _client_ctx(self) -> AsyncGenerator[httpx.AsyncClient]:
@@ -112,121 +106,32 @@ class ModelDownloader:
         ) as client:
             yield client
 
-    async def _fetch_release_assets(
+    @staticmethod
+    def _rmtree_quietly(path: Path) -> None:
+        shutil.rmtree(path, ignore_errors=True)
+
+    def _cached_binary_if_ready(
         self,
-        client: httpx.AsyncClient,
-        tag: str | None,
-    ) -> list[tuple[str, str]]:
-        suffix = f"tags/{tag}" if tag else "latest"
-        url = f"{_GITHUB_API_BASE}/{self._github_repo}/releases/{suffix}"
-        payload = await self._get_github_json(client, url)
-        assets = parse_release_assets(payload)
-        if not assets:
-            msg = "GitHub release metadata contained no downloadable assets."
-            raise InferenceBackendError(msg)
-        return assets
-
-    async def _get_github_json(self, client: httpx.AsyncClient, url: str) -> object:
-        """Fetch JSON metadata from the GitHub Releases API with timeout alerting."""
-        try:
-            response = await client.get(
-                url,
-                headers={"Accept": "application/vnd.github+json"},
-                timeout=self._timeout_seconds,
-            )
-        except httpx.TimeoutException as exc:
-            _logger().exception(
-                "github_release_timeout",
-                url=url,
-                alert_category=AlertCategory.TIMEOUT.value,
-                exception_type=type(exc).__name__,
-            )
-            msg = f"GitHub release lookup timed out: {exc}"
-            raise InferenceBackendError(msg) from exc
-        except httpx.HTTPError as exc:
-            msg = f"GitHub release lookup failed: {exc}"
-            raise InferenceBackendError(msg) from exc
-
-        if response.status_code >= _HTTP_ERROR_THRESHOLD:
-            msg = f"GitHub release lookup returned HTTP {response.status_code}"
-            raise InferenceBackendError(msg)
-        return response.json()
-
-    async def _resolve_release_assets(
-        self,
-        client: httpx.AsyncClient,
+        llama_dir: Path,
+        binary_name: str,
         *,
         tag: str | None,
-        cuda_version: str | None,
-    ) -> tuple[tuple[str, str], tuple[str, str] | None]:
-        """Resolve CUDA assets from latest/tag release, falling back to recent releases."""
-        latest_assets = await self._fetch_release_assets(client, tag)
-        plat = self._platform_name
-        try:
-            return select_llama_cuda_assets(
-                latest_assets, cuda_version=cuda_version, platform_name=plat
-            )
-        except InferenceBackendError:
-            if tag is not None:
-                raise
-
-        raw_releases = await self._get_github_json(
-            client, f"{_GITHUB_API_BASE}/{self._github_repo}/releases?per_page=10"
-        )
-        if isinstance(raw_releases, list):
-            for release in cast("list[object]", raw_releases):
-                candidate_assets = parse_release_assets(release)
-                if not candidate_assets:
-                    continue
-                try:
-                    return select_llama_cuda_assets(
-                        candidate_assets, cuda_version=cuda_version, platform_name=plat
-                    )
-                except InferenceBackendError:
-                    continue
-        return select_llama_cuda_assets(
-            latest_assets, cuda_version=cuda_version, platform_name=plat
-        )
-
-    @staticmethod
-    def _unlink_quietly(path: Path) -> None:
-        path.unlink(missing_ok=True)
-
-    async def _download_and_extract(
-        self,
-        client: httpx.AsyncClient,
-        url: str,
-        archive_path: Path,
-        dest_dir: Path,
-    ) -> None:
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            async with client.stream("GET", url, timeout=self._timeout_seconds) as response:
-                if response.status_code >= _HTTP_ERROR_THRESHOLD:
-                    msg = f"Binary asset download failed with HTTP {response.status_code}: {url}"
-                    raise InferenceBackendError(msg)
-                with archive_path.open("wb") as handle:
-                    async for chunk in response.aiter_bytes(chunk_size=_DOWNLOAD_CHUNK_BYTES):
-                        handle.write(chunk)
-        except httpx.TimeoutException as exc:
-            await asyncio.to_thread(self._unlink_quietly, archive_path)
-            _logger().exception(
-                "binary_download_timeout",
-                url=url,
-                alert_category=AlertCategory.TIMEOUT.value,
-                exception_type=type(exc).__name__,
-            )
-            msg = f"Binary asset download timed out: {exc}"
-            raise InferenceBackendError(msg) from exc
-        except httpx.HTTPError as exc:
-            await asyncio.to_thread(self._unlink_quietly, archive_path)
-            msg = f"Binary asset download failed: {exc}"
-            raise InferenceBackendError(msg) from exc
-
-        try:
-            await asyncio.to_thread(safe_extract_archive, archive_path, dest_dir)
-        finally:
-            await asyncio.to_thread(self._unlink_quietly, archive_path)
+        force: bool,
+    ) -> Path | None:
+        if force:
+            return None
+        current_link = llama_dir / "current"
+        current_exe = current_link / binary_name
+        if not current_exe.exists():
+            return None
+        if tag is None:
+            return current_exe
+        if tag == "latest":
+            return None
+        target_release = (llama_dir / "releases" / validate_release_tag(tag)).resolve()
+        if current_link.is_symlink() and current_link.resolve() == target_release:
+            return current_exe
+        return None
 
     async def download_llama_binaries(
         self,
@@ -235,43 +140,107 @@ class ModelDownloader:
         cuda_version: str | None = None,
         force: bool = False,
     ) -> Path:
-        """Fetch official llama.cpp CUDA x64 release binaries for Windows or Linux."""
-        _label, _main_re, _cudart_re, binary_name = resolve_platform_spec(self._platform_name)
+        """Fetch official Linux x64 llama.cpp CUDA release binaries and swap current symlink."""
+        _label, _main_re, _cudart_re, binary_name = resolve_platform_spec(
+            self._platform_name,
+            self._machine_arch,
+        )
         llama_dir = self._bin_dir / "llama"
-        existing = llama_dir / binary_name
-        if not force and existing.exists():
-            return existing
+        cached = self._cached_binary_if_ready(llama_dir, binary_name, tag=tag, force=force)
+        if cached is not None:
+            return cached
+
+        supported_cudas = tuple(self._manifest.keys()) or SUPPORTED_CUDA_VERSIONS
+        effective_cuda = (
+            cuda_version
+            if cuda_version is not None
+            else select_compatible_cuda_version(self._cuda_detector(), supported=supported_cudas)
+        )
+        requested_tag = DEFAULT_LLAMA_CPP_TAG if tag is None else tag
 
         async with self._client_ctx() as client:
-            (main_name, main_url), cudart = await self._resolve_release_assets(
+            release_tag, main_asset, cudart_asset, digests = await resolve_release_assets(
                 client,
-                tag=tag,
-                cuda_version=cuda_version,
+                github_repo=self._github_repo,
+                requested_tag=requested_tag,
+                cuda_version=effective_cuda,
+                platform_name=self._platform_name,
+                machine_arch=self._machine_arch,
+                timeout_seconds=self._timeout_seconds,
             )
-            await self._download_and_extract(
+            return await self._install_release_slot(
                 client,
-                main_url,
-                llama_dir / f".{main_name}.tmp",
-                llama_dir,
+                llama_dir=llama_dir,
+                binary_name=binary_name,
+                release_tag=release_tag,
+                main_asset=main_asset,
+                cudart_asset=cudart_asset,
+                digests=digests,
             )
-            exe_path = existing if existing.exists() else next(llama_dir.rglob(binary_name), None)
-            if exe_path is None:
-                msg = f"Downloaded llama.cpp archive did not contain {binary_name}."
-                raise InferenceBackendError(msg)
-            if sys.platform != "win32":
-                exe_path.chmod(exe_path.stat().st_mode | _POSIX_EXEC_BITS)
 
-            if cudart is not None:
-                cudart_name, cudart_url = cudart
-                await self._download_and_extract(
+    async def _install_release_slot(  # noqa: PLR0913
+        self,
+        client: httpx.AsyncClient,
+        *,
+        llama_dir: Path,
+        binary_name: str,
+        release_tag: str,
+        main_asset: tuple[str, str],
+        cudart_asset: tuple[str, str] | None,
+        digests: dict[str, str],
+    ) -> Path:
+        releases_dir = llama_dir / "releases"
+        releases_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir = releases_dir / f".{release_tag}.{uuid.uuid4().hex}.staging"
+        main_name, main_url = main_asset
+        main_sha = lookup_manifest_sha256(main_name, manifest=self._manifest) or digests.get(
+            main_name
+        )
+
+        try:
+            await download_verify_and_extract_archive(
+                client,
+                url=main_url,
+                archive_path=llama_dir / f".{main_name}.tmp",
+                dest_dir=staging_dir,
+                timeout_seconds=self._timeout_seconds,
+                expected_sha256=main_sha,
+                label=main_name,
+            )
+            exe_in_staging = _locate_extracted_binary(staging_dir, binary_name)
+            if cudart_asset is not None:
+                cudart_name, cudart_url = cudart_asset
+                cudart_sha = lookup_manifest_sha256(
+                    cudart_name, manifest=self._manifest
+                ) or digests.get(cudart_name)
+                await download_verify_and_extract_archive(
                     client,
-                    cudart_url,
-                    llama_dir / f".{cudart_name}.tmp",
-                    exe_path.parent,
+                    url=cudart_url,
+                    archive_path=llama_dir / f".{cudart_name}.tmp",
+                    dest_dir=exe_in_staging.parent,
+                    timeout_seconds=self._timeout_seconds,
+                    expected_sha256=cudart_sha,
+                    label=cudart_name,
                 )
+            rel_exe = exe_in_staging.relative_to(staging_dir)
+            release_dir = releases_dir / release_tag
+            if release_dir.exists():
+                await asyncio.to_thread(self._rmtree_quietly, release_dir)
+            staging_dir.replace(release_dir)
+        except Exception:
+            await asyncio.to_thread(self._rmtree_quietly, staging_dir)
+            raise
 
-        _logger().info("llama_binaries_ready", executable_path=str(exe_path), asset=main_name)
-        return exe_path
+        current_link = llama_dir / "current"
+        atomic_swap_symlink(current_link, Path("releases") / release_tag)
+        active_exe = current_link / rel_exe
+        _logger().info(
+            "llama_binaries_ready",
+            executable_path=str(active_exe),
+            release_tag=release_tag,
+            asset=main_name,
+        )
+        return active_exe
 
     async def download_model(
         self,
@@ -280,68 +249,11 @@ class ModelDownloader:
         force: bool = False,
         token: str | None = None,
     ) -> Path:
-        """Download a GGUF model from HuggingFace Hub with fallback repo support."""
-        dest_path = self._models_dir / profile_or_config.hf_filename
-        if not force and dest_path.exists():
-            return dest_path
-
-        self._models_dir.mkdir(parents=True, exist_ok=True)
-        repos = [profile_or_config.hf_repo]
-        fallback = profile_or_config.fallback_hf_repo
-        if fallback and fallback not in repos:
-            repos.append(fallback)
-
-        last_error: Exception | None = None
-        for repo_id in repos:
-            try:
-                result = await asyncio.to_thread(
-                    self._hf_downloader,
-                    repo_id=repo_id,
-                    filename=profile_or_config.hf_filename,
-                    local_dir=str(self._models_dir),
-                    force_download=force,
-                    token=token,
-                )
-            except (
-                httpx.HTTPError,
-                OSError,
-                EntryNotFoundError,
-                LocalEntryNotFoundError,
-                HFValidationError,
-                ValueError,
-            ) as exc:
-                last_error = exc
-                _logger().warning(
-                    "gguf_download_attempt_failed",
-                    repo_id=repo_id,
-                    filename=profile_or_config.hf_filename,
-                    error=str(exc),
-                )
-                continue
-
-            if not isinstance(result, str):
-                msg = f"Unexpected HuggingFace download return type: {type(result).__name__}"
-                raise InferenceBackendError(msg)
-            resolved = Path(result)
-            _logger().info("gguf_model_ready", repo_id=repo_id, path=str(resolved))
-            return resolved
-
-        if isinstance(last_error, httpx.TimeoutException):
-            _logger().error(
-                "gguf_download_timeout",
-                filename=profile_or_config.hf_filename,
-                alert_category=AlertCategory.TIMEOUT.value,
-                exception_type=type(last_error).__name__,
-            )
-        else:
-            _logger().error(
-                "gguf_download_failed",
-                filename=profile_or_config.hf_filename,
-                repos=repos,
-                error=str(last_error),
-            )
-        msg = (
-            f"Failed to download {profile_or_config.hf_filename!r} "
-            f"from repositories {repos}: {last_error}"
+        """Download a GGUF model from HuggingFace Hub with revision pinning and SHA-256 checks."""
+        return await download_hf_model(
+            profile_or_config,
+            models_dir=self._models_dir,
+            hf_downloader=self._hf_downloader,
+            force=force,
+            token=token,
         )
-        raise InferenceBackendError(msg) from last_error
