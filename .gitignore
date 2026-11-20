@@ -20,4 +20,5 @@ config/config.yaml
 *.sqlite*
 .worktrees/
 deploy/cloudflared/config.yml
+dist/
 site/

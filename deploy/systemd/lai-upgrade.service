@@ -18,7 +18,9 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/lai /var/lib/lai /var/log/lai
 PrivateTmp=yes
-UMask=0077
+# Use 0022 so release slots under /opt/lai/releases/v<ver>/.venv are readable/executable
+# by the unprivileged `lai` user; DB backups live under 0700 /var/lib/lai/backups (0600 files).
+UMask=0022
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 LockPersonality=yes

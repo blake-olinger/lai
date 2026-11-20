@@ -91,7 +91,7 @@
         "pyproject.toml"
       ],
       "matchDepTypes": [
-        "dependencies"
+        "project.dependencies"
       ],
       "groupName": "python-runtime"
     },
@@ -104,7 +104,7 @@
         "pyproject.toml"
       ],
       "matchDepTypes": [
-        "dev"
+        "dependency-groups"
       ],
       "groupName": "python-dev-tools"
     },
