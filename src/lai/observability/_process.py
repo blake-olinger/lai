@@ -54,7 +54,7 @@ def _load_libc_prctl() -> Callable[[int, int], int] | None:
         try:
             libc = ctypes.CDLL(lib_name)
             break
-        except OSError:
+        except (OSError, TypeError):
             continue
     if libc is None:
         return None

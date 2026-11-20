@@ -166,6 +166,9 @@ class LlamaCppSupervisor(InferenceSupervisorPort):
             _logger().exception("llama_server_spawn_failed", executable=exe, error=str(exc))
             msg = f"Failed to spawn llama-server: {exc}"
             raise InferenceBackendError(msg) from exc
+        except Exception:
+            writer.close()
+            raise
 
         self._process = proc
         self._log_writer = writer
