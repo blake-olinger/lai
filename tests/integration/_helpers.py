@@ -28,7 +28,7 @@ from lai.security import (
     build_client_app,
     generate_api_key,
 )
-from lai.tools import build_default_tool_registry
+from lai.tools import GuardedToolExecutor, build_default_tool_registry
 from tests._helpers import bearer_headers
 
 if TYPE_CHECKING:
@@ -183,6 +183,7 @@ def _wire_upfront_services(
     embedder = svc.embedder
     vector_store = svc.vector_store
     tool_registry = svc.tool_registry
+    tool_executor = svc.tool_executor
 
     if spec.use_hash_embedder:
         embedder = DeterministicHashEmbedder()
@@ -200,7 +201,13 @@ def _wire_upfront_services(
         tool_registry = build_default_tool_registry(
             svc.file_repo, svc.blob_store, embedder=embedder, vector_store=vector_store
         )
+        tool_executor = GuardedToolExecutor(
+            tool_registry,
+            svc.tool_audit_repo,
+            guardrail_pipeline=svc.guardrail_pipeline,
+        )
         updates["tool_registry"] = tool_registry
+        updates["tool_executor"] = tool_executor
 
     for tool in spec.tools:
         tool_registry.register(tool)
@@ -232,7 +239,7 @@ def _wire_upfront_services(
             session_gate=svc.session_gate,
             guardrail_pipeline=svc.guardrail_pipeline,
             tool_registry=tool_registry,
-            tool_executor=svc.tool_executor,
+            tool_executor=tool_executor,
             embedder=orch_embedder,
             vector_store=orch_vector_store,
             model_profile=profile,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -22,18 +23,60 @@ from lai.api.deps import (
     require_any_scope_dep,
     require_scope_dep,
 )
+from lai.api.errors import serialize_post_header_error_json
 from lai.api.schemas.tools import (
     ResolveApprovalRequest,
     SubmitToolResultRequest,
     ToolListResponse,
 )
 from lai.domain.auth import ApiScope, AuthPrincipal
-from lai.domain.chat import TurnOutput
-from lai.domain.errors import AuthorizationError
-from lai.domain.tools import ToolApprovalRecord, ToolResult
+from lai.domain.chat import Message, MessageRole, TurnOutput
+from lai.domain.errors import AuthorizationError, GuardrailBlockedError, ValidationFailedError
+from lai.domain.tools import ApprovalStatus, ToolApprovalRecord, ToolResult
+from lai.observability.logging import get_request_id
 from lai.scheduler import await_or_keepalive_json
 
 router = APIRouter(tags=["tools"])
+
+
+async def _append_terminal_tool_response_if_pending(
+    services: AppServices,
+    approval: ToolApprovalRecord,
+    *,
+    error_code: str,
+    detail: str,
+) -> None:
+    """Append a synthetic TOOL error reply when an approval terminates without a result."""
+    async with services.session_gate.acquire(approval.session_id):
+        session = await services.session_repo.get_session(approval.session_id)
+        if session is None:
+            return
+        recent = await services.session_repo.list_recent_messages(approval.session_id, limit=50)
+        effective_call_id = approval.tool_call_id or approval.id
+        idx = len(recent) - 1
+        answered_ids: set[str] = set()
+        while idx >= 0 and recent[idx].role is MessageRole.TOOL:
+            tool_call_id = recent[idx].tool_call_id
+            if tool_call_id:
+                answered_ids.add(tool_call_id)
+            idx -= 1
+        if (
+            idx >= 0
+            and recent[idx].role is MessageRole.ASSISTANT
+            and any(tc.id == effective_call_id for tc in recent[idx].tool_calls)
+            and effective_call_id not in answered_ids
+        ):
+            payload = json.dumps({"success": False, "error": error_code, "message": detail})
+            await services.session_repo.add_message(
+                Message(
+                    session_id=approval.session_id,
+                    project_id=approval.project_id,
+                    role=MessageRole.TOOL,
+                    content=payload,
+                    tool_call_id=effective_call_id,
+                    tool_name=approval.tool_name,
+                )
+            )
 
 
 @router.get("/v1/tools", response_model=ToolListResponse)
@@ -68,12 +111,20 @@ async def resolve_tool_approval(
 ) -> ToolApprovalRecord:
     """Approve or deny a pending tool execution request (requires TOOLS_APPROVE)."""
     await require_accessible_approval(services, approval_id, principal)
-    return await services.tool_executor.approve_and_execute(
+    resolved = await services.tool_executor.approve_and_execute(
         approval_id=approval_id,
         decided_by=principal.principal_id,
         approved=body.approved,
         note=body.note,
     )
+    if not body.approved:
+        await _append_terminal_tool_response_if_pending(
+            services,
+            resolved,
+            error_code="tool_approval_denied",
+            detail=body.note or "Tool approval denied by operator.",
+        )
+    return resolved
 
 
 @router.post("/v1/tool-approvals/{approval_id}/result", response_model=TurnOutput)
@@ -101,13 +152,33 @@ async def submit_tool_result(
         error=body.error,
         duration_ms=body.duration_ms,
     )
-    sanitized = await services.tool_executor.submit_client_result(
-        approval_id,
-        client_app.id,
-        raw_result,
-        principal_id=principal.principal_id,
-        is_admin=is_admin_principal(principal),
-    )
+    try:
+        sanitized = await services.tool_executor.submit_client_result(
+            approval_id,
+            client_app.id,
+            raw_result,
+            principal_id=principal.principal_id,
+            is_admin=is_admin_principal(principal),
+        )
+    except GuardrailBlockedError as exc:
+        policy = exc.violated_policy or "policy"
+        await _append_terminal_tool_response_if_pending(
+            services,
+            existing,
+            error_code="tool_output_blocked_by_guardrail",
+            detail=f"Client tool output blocked by safety guardrail ({policy}).",
+        )
+        raise
+    except ValidationFailedError:
+        refreshed = await services.tool_audit_repo.get_approval(approval_id)
+        if refreshed is not None and refreshed.status is ApprovalStatus.EXPIRED:
+            await _append_terminal_tool_response_if_pending(
+                services,
+                refreshed,
+                error_code="tool_approval_expired",
+                detail="Client tool execution lease expired before result submission.",
+            )
+        raise
     updated_approval = (await services.tool_audit_repo.get_approval(approval_id)) or existing
 
     if body.stream:
@@ -137,6 +208,7 @@ async def submit_tool_result(
             headers=headers,
         )
 
+    req_id = get_request_id()
     outcome = await await_or_keepalive_json(
         track_turn_output(
             services.orchestrator.resume_client_tool(updated_approval, sanitized, principal),
@@ -146,6 +218,7 @@ async def submit_tool_result(
         threshold_seconds=services.settings.json_keepalive_threshold_seconds,
         interval_seconds=services.settings.keepalive_interval_seconds,
         is_disconnected=request.is_disconnected,
+        error_serializer=lambda exc: serialize_post_header_error_json(exc, request_id=req_id),
     )
     if isinstance(outcome, TurnOutput):
         headers = build_guardrail_headers(

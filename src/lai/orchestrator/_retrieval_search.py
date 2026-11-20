@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from lai.domain.chat import Citation, MessageRole
-from lai.domain.errors import ClientToolDispatchError, LaiError, ToolApprovalRequiredError
+from lai.domain.errors import (
+    ClientToolDispatchError,
+    GuardrailBlockedError,
+    LaiError,
+    StorageFailureError,
+    ToolApprovalRequiredError,
+)
+from lai.domain.guardrails import GuardrailDirection, GuardrailVerdict
 from lai.domain.inference import InferenceMessage
 from lai.ingestion.detector import estimate_tokens
 from lai.ingestion.rrf import reciprocal_rank_fusion
@@ -18,7 +25,11 @@ from lai.orchestrator._helpers import (
     parse_tool_arguments,
     trim_history_to_budget,
 )
-from lai.orchestrator.prompts import build_system_prompt, format_retrieval_context
+from lai.orchestrator.prompts import (
+    build_system_prompt,
+    format_retrieval_context,
+    wrap_untrusted_data,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -27,6 +38,7 @@ if TYPE_CHECKING:
     from lai.domain.files import FileRecord, ScoredChunk
     from lai.domain.inference import InferenceToolCall, InferenceToolDef, ModelProfile
     from lai.domain.tools import ToolExecutionContext, ToolSpec
+    from lai.ports.guardrails import GuardrailPipelinePort
     from lai.ports.inference import InferenceProviderPort
     from lai.ports.repositories import FileRepositoryPort
     from lai.ports.scheduler import InferenceSpoolerPort
@@ -48,6 +60,7 @@ class RetrievalDeps:
     tool_executor: ToolExecutorPort | None = None
     embedder: EmbedderPort | None = None
     vector_store: VectorStorePort | None = None
+    guardrail_pipeline: GuardrailPipelinePort | None = None
 
 
 @dataclass(slots=True)
@@ -191,9 +204,18 @@ async def invoke_single_tool(
             context,
             client_tools=client_tools,
         )
-    except (ToolApprovalRequiredError, ClientToolDispatchError):
+    except (ToolApprovalRequiredError, ClientToolDispatchError, StorageFailureError):
         raise
-    except (LaiError, ValueError, TypeError) as exc:
+    except LaiError as exc:
+        if exc.status_code >= 500:  # noqa: PLR2004
+            raise
+        get_component_logger("orchestrator").warning(
+            "retrieval_tool_error",
+            tool_name=tool_call.name,
+            error=str(exc),
+        )
+        return json.dumps({"success": False, "error": str(exc)}), None
+    except (ValueError, TypeError) as exc:
         get_component_logger("orchestrator").warning(
             "retrieval_tool_error",
             tool_name=tool_call.name,
@@ -232,3 +254,49 @@ def build_retrieval_citations(
         retrieved_chunks=ranked_hits,
         fallback_citations=(*tool_citations, *hit_fallbacks),
     )
+
+
+async def guard_server_tool_output(  # noqa: PLR0913
+    deps: RetrievalDeps,
+    tool_ctx: ToolExecutionContext,
+    tc: InferenceToolCall,
+    tool_output: str,
+    citation: Citation | None,
+    *,
+    scan_tool_outputs: bool,
+) -> tuple[str, Citation | None]:
+    """Scan server tool output with TOOL_OUTPUT guardrails and apply untrusted spotlighting."""
+    pipeline = deps.guardrail_pipeline
+    if scan_tool_outputs and pipeline is not None and tool_output.strip():
+        violated_policy: str | None = None
+        blocked = False
+        try:
+            decision = await pipeline.check_prompt(
+                tool_output,
+                direction=GuardrailDirection.TOOL_OUTPUT,
+                request_id=tool_ctx.request_id,
+                session_id=tool_ctx.session_id,
+                project_id=tool_ctx.project_id,
+                principal_id=tool_ctx.principal_id,
+            )
+            if decision.verdict is GuardrailVerdict.BLOCK:
+                blocked = True
+                violated_policy = decision.violated_policy
+        except GuardrailBlockedError as exc:
+            blocked = True
+            violated_policy = exc.violated_policy
+        if blocked:
+            get_component_logger("orchestrator").warning(
+                "server_tool_output_guardrail_blocked",
+                tool_name=tc.name,
+                violated_policy=violated_policy,
+            )
+            safe_error = json.dumps(
+                {
+                    "success": False,
+                    "error": "tool_output_blocked_by_guardrail",
+                    "violated_policy": violated_policy,
+                }
+            )
+            return safe_error, None
+    return wrap_untrusted_data(tool_output, source=f"tool:{tc.name}"), citation

@@ -267,7 +267,11 @@ async def test_asgi_endpoint_4xx_and_client_auth_edge_branches(edge_env: _EdgeEn
         headers=wr,
         json={"output": "stderr line", "success": False, "error": "exit 1"},
     )
-    assert (r_fail.status_code, r_fail.json()["message"]["content"]) == (S.OK, "after-tool:srv-ok")
+    assert r_fail.status_code == S.OK
+    assert (
+        r_fail.json()["message"]["content"]
+        == 'after-tool:<untrusted_data source="tool:srv_echo">\nsrv-ok\n</untrusted_data>'
+    )
 
 
 async def test_resume_direct_fallback_errors_and_client_tool_resolution(edge_env: _EdgeEnv) -> None:

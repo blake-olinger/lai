@@ -19,7 +19,6 @@ from lai.domain.errors import AuthorizationError, GuardrailBlockedError
 from lai.domain.guardrails import GuardrailBlockMode, GuardrailDirection, GuardrailVerdict
 from lai.observability.logging import get_component_logger, get_request_id
 from lai.orchestrator._helpers import (
-    persist_turn_if_session,
     resolve_model_profile,
     resolve_target_files,
 )
@@ -108,11 +107,12 @@ async def handle_guardrail_block(
     *,
     session: Session | None,
 ) -> AsyncGenerator[OrchestratorEvent]:
-    """Short-circuit blocked prompts via HTTP error or persisted refusal message."""
+    """Short-circuit blocked prompts via HTTP error or non-persisted refusal message."""
     get_component_logger("orchestrator").warning(
         "turn_guardrail_blocked",
         violated_policy=decision.violated_policy,
         block_mode=deps.settings.guardrails.block_mode.value,
+        has_session=session is not None,
     )
     if deps.settings.guardrails.block_mode is GuardrailBlockMode.HTTP_ERROR:
         raise GuardrailBlockedError(
@@ -128,13 +128,6 @@ async def handle_guardrail_block(
         role=MessageRole.ASSISTANT,
         content=refusal_text,
         usage=TokenUsage(),
-    )
-    await persist_turn_if_session(
-        deps.session_repo,
-        session,
-        turn_input,
-        decision.scrubbed_prompt,
-        assistant_msg,
     )
     mode_used = (
         turn_input.context_mode
@@ -163,7 +156,7 @@ async def prepare_allowed_turn(
 ) -> PreparedTurnContext:
     """Resolve session authority, prior turns, system prompt, model profile, files, and mode."""
     if session is not None:
-        existing_messages = await deps.session_repo.list_messages(session.id, limit=200)
+        existing_messages = await deps.session_repo.list_recent_messages(session.id, limit=200)
         session_prompt = (
             session.system_prompt if session.system_prompt is not None else turn_input.system_prompt
         )
@@ -187,6 +180,8 @@ async def prepare_allowed_turn(
         turn_input.user_message,
         target_files,
         direct_budget_tokens=deps.settings.direct_file_budget_tokens,
+        max_map_reduce_tokens=(deps.settings.map_max_windows * deps.settings.map_window_tokens),
+        explicit_files=bool(turn_input.attached_file_ids),
     )
     if (
         turn_input.context_mode is ContextMode.AUTO

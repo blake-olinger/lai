@@ -176,6 +176,47 @@ async def handle_unexpected_exception(request: Request, exc: Exception) -> Respo
     )
 
 
+def serialize_post_header_error_json(
+    exc: Exception,
+    *,
+    request_id: str | None,
+) -> bytes:
+    """Serialize an error occurring after keepalive whitespace headers were already committed."""
+    if isinstance(exc, LaiError):
+        details, _ = _extract_lai_details_and_headers(exc)
+        details.setdefault("status_code", str(exc.status_code))
+        payload = ErrorResponse(
+            error=ErrorDetail(
+                code=exc.code,
+                message=exc.message,
+                request_id=request_id,
+                details=details,
+            )
+        )
+        return payload.model_dump_json().encode("utf-8")
+
+    alert_payload = json.dumps(
+        {
+            "event": "unhandled_post_header_json_exception",
+            "component": "api",
+            "alert_category": AlertCategory.FATAL_EXCEPTION.value,
+            "request_id": request_id,
+            "exception_type": type(exc).__name__,
+        }
+    )
+    with bind_log_context(request_id=request_id):
+        _fatal_logger.critical(alert_payload, exc_info=exc)
+    payload = ErrorResponse(
+        error=ErrorDetail(
+            code="internal_error",
+            message="An unexpected internal server error occurred.",
+            request_id=request_id,
+            details={"status_code": "500"},
+        )
+    )
+    return payload.model_dump_json().encode("utf-8")
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Register all domain, validation, HTTP, and global catch-all exception handlers."""
     app.add_exception_handler(LaiError, handle_lai_error)

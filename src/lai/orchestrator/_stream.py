@@ -34,7 +34,9 @@ class TurnOutcome:
     pending_approval_id: str | None = None
     pending_client_tool_call: ClientToolCallEvent | None = None
     pending_tool_call: InferenceToolCall | None = None
+    assistant_tool_calls: tuple[InferenceToolCall, ...] = ()
     intermediate_messages: tuple[InferenceMessage, ...] = ()
+    post_assistant_tool_messages: tuple[InferenceMessage, ...] = ()
 
 
 @dataclass(slots=True)

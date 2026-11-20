@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
 _SYSTEM_ROLES = frozenset({"system", "developer"})
 _HISTORY_ROLES = frozenset({"user", "assistant"})
-_GUARDRAIL_ROLES = frozenset({"system", "developer", "user"})
+_GUARDRAIL_ROLES = frozenset({"system", "developer", "user", "assistant", "tool"})
 
 
 @dataclass(frozen=True, slots=True)

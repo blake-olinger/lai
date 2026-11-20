@@ -173,3 +173,18 @@ class SqliteSessionRepository(SessionRepositoryPort):
             (session_id, clamp_limit(limit), clamp_offset(offset)),
         )
         return [_row_to_message(row) for row in rows]
+
+    async def list_recent_messages(
+        self,
+        session_id: str,
+        limit: int = 200,
+    ) -> list[Message]:
+        """List the most recent messages in a session, ordered chronologically."""
+        rows = await self._db.fetch_all(
+            f"SELECT {_MESSAGE_COLUMNS} FROM ("  # noqa: S608
+            f"SELECT {_MESSAGE_COLUMNS}, rowid AS _rid FROM messages "
+            "WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?"
+            ") ORDER BY created_at ASC, _rid ASC;",
+            (session_id, clamp_limit(limit)),
+        )
+        return [_row_to_message(row) for row in rows]

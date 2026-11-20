@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from lai.api._analytics import track_turn_output, track_turn_stream
-from lai.api._client_auth import resolve_turn_client_context
+from lai.api._client_auth import ResolvedClientContext, resolve_turn_client_context
 from lai.api._streaming import (
     build_guardrail_headers,
     guard_openai_sse_frames,
@@ -18,6 +18,7 @@ from lai.api._streaming import (
 )
 from lai.api._tenancy import require_project_files
 from lai.api.deps import AppServices, get_services, require_scope_dep
+from lai.api.errors import serialize_post_header_error_json
 from lai.api.routes._openai_helpers import (
     StreamMeta,
     build_completion_response,
@@ -38,6 +39,7 @@ from lai.config.profiles import BUILTIN_PROFILES
 from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.chat import TurnInput, TurnOutput
 from lai.domain.errors import ValidationFailedError
+from lai.observability.logging import get_request_id
 from lai.scheduler import await_or_keepalive_json
 
 router = APIRouter(tags=["openai"])
@@ -101,12 +103,22 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
         has_owned_project=has_owned_project,
         file_ids=file_ids,
     )
-    client_ctx = await resolve_turn_client_context(
-        services,
-        principal=principal,
-        project_id=project_id,
-        requested_tools=body.client_tools,
-    )
+    if existing_session is None and not body.client_tools:
+        client_ctx = ResolvedClientContext(
+            client_app_id=None,
+            client_allowed_tiers=(),
+            client_tools=(),
+        )
+    else:
+        client_ctx = await resolve_turn_client_context(
+            services,
+            principal=principal,
+            project_id=project_id,
+            requested_tools=body.client_tools,
+        )
+        if existing_session is None:
+            msg = "Client tools on /v1/chat/completions require an explicit persisted session_id."
+            raise ValidationFailedError(msg, details={"field": "session_id"})
     resolved_model_name, turn_model_profile = resolve_openai_model(
         services.settings,
         body.model,
@@ -165,6 +177,7 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
             headers=headers,
         )
 
+    req_id = get_request_id()
     outcome = await await_or_keepalive_json(
         track_turn_output(
             services.orchestrator.run_turn(turn_input, principal),
@@ -177,6 +190,7 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
         serializer=lambda output: (
             build_completion_response(output, meta).model_dump_json().encode("utf-8")
         ),
+        error_serializer=lambda exc: serialize_post_header_error_json(exc, request_id=req_id),
     )
     if isinstance(outcome, TurnOutput):
         payload = build_completion_response(outcome, meta)

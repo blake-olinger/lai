@@ -101,3 +101,12 @@ class ToolExecutorPort(Protocol):
     ) -> ToolResult:
         """Validate, sanitize, guardrail-scan, and consume an approved client tool lease."""
         ...
+
+    async def revoke_approval(
+        self,
+        approval_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        """Atomically revoke a PENDING or APPROVED tool approval/lease to DENIED."""
+        ...

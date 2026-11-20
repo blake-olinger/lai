@@ -15,6 +15,7 @@ from lai.domain.chat import (
 from lai.domain.errors import InferenceBackendError
 from lai.ingestion.detector import estimate_tokens
 from lai.observability.logging import bind_log_context, get_component_logger
+from lai.orchestrator._aggregator_helpers import compute_reduce_findings_budget
 from lai.orchestrator._direct import DirectDeps, run_direct_stream
 from lai.orchestrator._egress import EgressContext, finalize_stream_with_egress
 from lai.orchestrator._helpers import build_trimmed_history, persist_turn_if_session
@@ -33,7 +34,7 @@ from lai.orchestrator._turn_prep import (
     prepare_allowed_turn,
     scan_turn_guardrails,
 )
-from lai.orchestrator.aggregator import MapReduceAggregator
+from lai.orchestrator.aggregator import DEFAULT_COMPRESSION_THRESHOLD_TOKENS, MapReduceAggregator
 from lai.ports.orchestrator import OrchestratorPort
 
 if TYPE_CHECKING:
@@ -104,6 +105,7 @@ class TurnOrchestrator(OrchestratorPort):
             tool_executor=tool_executor,
             embedder=embedder,
             vector_store=vector_store,
+            guardrail_pipeline=guardrail_pipeline,
         )
         self._resume_deps = ResumeDeps(
             settings=settings,
@@ -122,6 +124,7 @@ class TurnOrchestrator(OrchestratorPort):
             file_repo=file_repo,
             window_tokens=settings.map_window_tokens,
             overlap_tokens=settings.map_window_overlap_tokens,
+            max_windows=settings.map_max_windows,
         )
 
     def update_settings(self, settings: LaiSettings) -> None:
@@ -129,6 +132,11 @@ class TurnOrchestrator(OrchestratorPort):
         self._settings = settings
         self._prep_deps = replace(self._prep_deps, settings=settings)
         self._resume_deps.settings = settings
+        self._aggregator.update_budgets(
+            window_tokens=settings.map_window_tokens,
+            overlap_tokens=settings.map_window_overlap_tokens,
+            max_windows=settings.map_max_windows,
+        )
 
     async def run_turn_stream(
         self,
@@ -235,6 +243,10 @@ class TurnOrchestrator(OrchestratorPort):
             has_session=prep.session is not None,
         )
 
+        async def _revoke_approval(approval_id: str, reason: str) -> None:
+            if self._retrieval_deps.tool_executor is not None:
+                await self._retrieval_deps.tool_executor.revoke_approval(approval_id, reason=reason)
+
         egress_ctx = EgressContext(
             settings=self._settings,
             guardrail_pipeline=self._guardrail_pipeline,
@@ -242,6 +254,7 @@ class TurnOrchestrator(OrchestratorPort):
             session_id=turn_input.session_id,
             project_id=turn_input.project_id,
             principal_id=principal.principal_id,
+            revoke_approval=_revoke_approval,
         )
 
         async def _persist(assistant_msg: Message, resolved: TurnOutcome) -> None:
@@ -252,6 +265,7 @@ class TurnOrchestrator(OrchestratorPort):
                 turn_input.user_message,
                 assistant_msg,
                 intermediate_messages=resolved.intermediate_messages,
+                post_assistant_tool_messages=resolved.post_assistant_tool_messages,
             )
             self._log.info(
                 "turn_completed",
@@ -292,10 +306,17 @@ class TurnOrchestrator(OrchestratorPort):
                 if turn_input.max_tokens is not None
                 else prep.profile.max_tokens
             )
+            reduce_findings_reserve = compute_reduce_findings_budget(
+                prep.profile,
+                max_output_tokens=max_out,
+                compression_threshold_tokens=DEFAULT_COMPRESSION_THRESHOLD_TOKENS,
+            )
             trimmed = build_trimmed_history(
                 prep.existing_messages,
                 profile=prep.profile,
-                reserved_prompt_tokens=estimate_tokens(turn_input.user_message) + 2048,
+                reserved_prompt_tokens=(
+                    estimate_tokens(turn_input.user_message) + reduce_findings_reserve + 2048
+                ),
                 max_output_tokens=max_out,
             )
             stream = self._aggregator.run_stream(
@@ -315,6 +336,7 @@ class TurnOrchestrator(OrchestratorPort):
                 target_files=prep.target_files,
                 session_system_prompt=prep.session_prompt,
                 existing_messages=prep.existing_messages,
+                scan_tool_outputs=self._settings.guardrails.enabled,
             )
 
         async for item in stream:

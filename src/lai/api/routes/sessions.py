@@ -21,6 +21,7 @@ from lai.api._tenancy import (
     require_project_files,
 )
 from lai.api.deps import AppServices, get_services, require_scope_dep
+from lai.api.errors import serialize_post_header_error_json
 from lai.api.schemas.common import DeleteResponse
 from lai.api.schemas.sessions import (
     SessionCreateRequest,
@@ -168,6 +169,7 @@ async def post_session_message(
             headers=headers,
         )
 
+    req_id = get_request_id()
     outcome = await await_or_keepalive_json(
         track_turn_output(
             services.orchestrator.run_turn(turn_input, principal),
@@ -177,6 +179,7 @@ async def post_session_message(
         threshold_seconds=services.settings.json_keepalive_threshold_seconds,
         interval_seconds=services.settings.keepalive_interval_seconds,
         is_disconnected=request.is_disconnected,
+        error_serializer=lambda exc: serialize_post_header_error_json(exc, request_id=req_id),
     )
     if isinstance(outcome, TurnOutput):
         headers = build_guardrail_headers(

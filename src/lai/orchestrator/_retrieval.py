@@ -39,6 +39,7 @@ async def run_retrieval_stream(  # noqa: PLR0913
     target_files: Sequence[FileRecord],
     session_system_prompt: str | None = None,
     existing_messages: Sequence[Message] = (),
+    scan_tool_outputs: bool = False,
 ) -> AsyncGenerator[OrchestratorEvent | TurnOutcome]:
     """Execute Retrieval search, bounded tool loop, and final streamed answer."""
     yield ProgressEvent(stage="retrieval", message="Searching indexed project files.")
@@ -107,6 +108,7 @@ async def run_retrieval_stream(  # noqa: PLR0913
             enable_thinking=turn_input.enable_thinking,
             target_files=target_files,
             ranked_hits=ranked_hits,
+            scan_tool_outputs=scan_tool_outputs,
         )
     ):
         yield item

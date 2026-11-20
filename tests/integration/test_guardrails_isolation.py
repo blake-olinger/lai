@@ -78,15 +78,18 @@ class _SpySessionGate(SessionGatePort):
         self._inner = SessionGate()
         self.active = 0
         self.max_concurrent = 0
+        self.events: list[str] = []
 
     @asynccontextmanager
     async def acquire(self, session_id: str) -> AsyncGenerator[None]:
         async with self._inner.acquire(session_id):
             self.active += 1
             self.max_concurrent = max(self.max_concurrent, self.active)
+            self.events.append("enter")
             try:
                 yield
             finally:
+                self.events.append("exit")
                 self.active -= 1
 
 
@@ -123,6 +126,9 @@ class _PausingSessionRepo(SessionRepositoryPort):
         self, session_id: str, limit: int = 200, offset: int = 0
     ) -> list[Message]:
         return await self._inner.list_messages(session_id, limit=limit, offset=offset)
+
+    async def list_recent_messages(self, session_id: str, limit: int = 200) -> list[Message]:
+        return await self._inner.list_recent_messages(session_id, limit=limit)
 
 
 @dataclass(slots=True)
@@ -261,11 +267,10 @@ async def test_openai_blocked_and_allowed_with_session_header_only(tmp_path: Pat
 
         assert len(env.inf.requests) == 1
         msgs = await env.svc.session_repo.list_messages("ses_1")
-        assert [m.role.value for m in msgs] == ["user", "assistant"] * 3
+        assert [m.role.value for m in msgs] == ["user", "assistant"]
         assert all(m.project_id == "prj_1" for m in msgs)
-        assert secret not in msgs[0].content
-        assert "[REDACTED_SECRET]" in msgs[0].content
-        assert [m.content for m in msgs[1::2]] == [_REFUSAL, _REFUSAL, "gemma4 safe reply"]
+        assert all(secret not in m.content and _UNSAFE not in m.content for m in msgs)
+        assert [m.content for m in msgs] == ["Say hello", "gemma4 safe reply"]
 
 
 async def test_http_error_block_mode_across_sessions_and_openai_routes(tmp_path: Path) -> None:
@@ -311,9 +316,10 @@ async def test_concurrent_allowed_then_blocked_serializes_on_session(tmp_path: P
         assert res_a.status_code == HTTPStatus.OK
         assert res_b.status_code == HTTPStatus.OK
         assert env.gate.max_concurrent == 1
-        assert order == ["allowed", "blocked"]
+        assert env.gate.events == ["enter", "exit", "enter", "exit"]
+        assert set(order) == {"allowed", "blocked"}
         msgs = await env.svc.session_repo.list_messages("ses_1")
-        assert [m.content for m in msgs] == ["Explain logs", "gemma4 safe reply", _UNSAFE, _REFUSAL]
+        assert [m.content for m in msgs] == ["Explain logs", "gemma4 safe reply"]
 
 
 async def test_concurrent_blocked_then_allowed_serializes_on_session(tmp_path: Path) -> None:
@@ -339,4 +345,5 @@ async def test_concurrent_blocked_then_allowed_serializes_on_session(tmp_path: P
         assert env.gate.max_concurrent == 1
         assert order == ["blocked", "allowed"]
         msgs = await env.svc.session_repo.list_messages("ses_1")
-        assert [m.content for m in msgs] == [_UNSAFE, _REFUSAL, "Follow-up", "gemma4 safe reply"]
+        assert [m.content for m in msgs] == ["Follow-up", "gemma4 safe reply"]
+        assert all(_UNSAFE not in m.content for m in env.inf.requests[0].messages)

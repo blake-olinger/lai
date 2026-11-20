@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 from lai.config.profiles import get_model_profile
 from lai.domain.chat import Message, MessageRole, TokenUsage
-from lai.domain.errors import AuthorizationError, NotFoundError
+from lai.domain.errors import AuthorizationError, ConflictError, NotFoundError
 from lai.domain.files import FileStatus
 from lai.domain.inference import InferenceMessage, InferenceToolDef, ModelProfile
 from lai.domain.tools import ToolExecutionTarget
-from lai.ingestion.detector import estimate_tokens
 from lai.orchestrator._citations import extract_citations
+from lai.orchestrator._history import repair_tool_call_history, trim_history_to_budget
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -38,6 +38,7 @@ __all__ = [
     "parse_tool_arguments",
     "persist_turn_if_session",
     "read_file_text",
+    "repair_tool_call_history",
     "resolve_model_profile",
     "resolve_target_files",
     "trim_history_to_budget",
@@ -91,6 +92,16 @@ async def resolve_target_files(
                     msg,
                     details={"file_id": file_id, "project_id": project_id},
                 )
+            if record.status is not FileStatus.READY:
+                msg = (
+                    f"Attached file {file_id!r} is not ready for chat "
+                    f"(status={record.status.value})."
+                )
+                raise ConflictError(
+                    msg,
+                    code="file_not_ready",
+                    details={"file_id": file_id, "status": record.status.value},
+                )
             resolved.append(record)
         return resolved
 
@@ -98,7 +109,7 @@ async def resolve_target_files(
     return [
         record
         for record in project_files
-        if record.project_id == project_id and record.status is not FileStatus.FAILED
+        if record.project_id == project_id and record.status is FileStatus.READY
     ]
 
 
@@ -116,49 +127,6 @@ async def read_file_text(
             return ""
         chunks = await file_repo.list_chunks(record.id)
         return "\n".join(chunk.text for chunk in chunks)
-
-
-def trim_history_to_budget(
-    messages: Sequence[Message],
-    *,
-    max_history_tokens: int,
-) -> tuple[InferenceMessage, ...]:
-    """Retain recent USER/ASSISTANT/TOOL messages within budget, stripping orphaned TOOLs."""
-    if max_history_tokens <= 0 or not messages:
-        return ()
-
-    eligible_roles = {MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL}
-    eligible = [msg for msg in messages if msg.role in eligible_roles]
-    selected: list[InferenceMessage] = []
-    used_tokens = 0
-
-    for msg in reversed(eligible):
-        tool_text = "".join(f"{tc.name}{tc.arguments_json}" for tc in msg.tool_calls)
-        msg_tokens = max(1, estimate_tokens(msg.content) + estimate_tokens(tool_text) + 4)
-        if used_tokens + msg_tokens > max_history_tokens:
-            break
-        used_tokens += msg_tokens
-        selected.append(
-            InferenceMessage(
-                role=msg.role,
-                content=msg.content,
-                name=msg.tool_name,
-                tool_call_id=msg.tool_call_id,
-                tool_calls=msg.tool_calls,
-            )
-        )
-
-    selected.reverse()
-    cleaned: list[InferenceMessage] = []
-    seen_call_ids: set[str] = set()
-    for item in selected:
-        if item.role is MessageRole.TOOL:
-            if not item.tool_call_id or item.tool_call_id not in seen_call_ids:
-                continue
-        elif item.role is MessageRole.ASSISTANT and item.tool_calls:
-            seen_call_ids.update(tc.id for tc in item.tool_calls)
-        cleaned.append(item)
-    return tuple(cleaned)
 
 
 def compute_history_budget(
@@ -201,8 +169,9 @@ async def persist_turn_if_session(  # noqa: PLR0913
     assistant_msg: Message,
     *,
     intermediate_messages: Sequence[InferenceMessage] = (),
+    post_assistant_tool_messages: Sequence[InferenceMessage] = (),
 ) -> None:
-    """Persist user, any intermediate tool-loop messages, and assistant Message chronologically."""
+    """Persist user, intermediate, assistant, and post-assistant TOOL messages chronologically."""
     if session is None:
         return
     user_msg = Message(
@@ -227,6 +196,19 @@ async def persist_turn_if_session(  # noqa: PLR0913
             )
         )
     await session_repo.add_message(assistant_msg)
+    for item in post_assistant_tool_messages:
+        await session_repo.add_message(
+            Message(
+                session_id=turn_input.session_id,
+                project_id=turn_input.project_id,
+                role=item.role,
+                content=item.content,
+                tool_calls=item.tool_calls,
+                tool_call_id=item.tool_call_id,
+                tool_name=item.name,
+                created_at=assistant_msg.created_at,
+            )
+        )
 
 
 def add_token_usage(base: TokenUsage, delta: TokenUsage) -> TokenUsage:

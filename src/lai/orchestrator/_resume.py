@@ -116,13 +116,16 @@ async def _append_resume_messages(
     approval: ToolApprovalRecord,
     tool_result: ToolResult,
 ) -> list[Message]:
-    existing = await session_repo.list_messages(session_id, limit=200)
+    existing = await session_repo.list_recent_messages(session_id, limit=200)
     effective_call_id = approval.tool_call_id or approval.id
-    tail = existing[-1] if existing else None
+    tail_idx = len(existing) - 1
+    while tail_idx >= 0 and existing[tail_idx].role is MessageRole.TOOL:
+        tail_idx -= 1
+    tail_assistant = existing[tail_idx] if tail_idx >= 0 else None
     has_tail_call = (
-        tail is not None
-        and tail.role is MessageRole.ASSISTANT
-        and any(tc.id == effective_call_id for tc in tail.tool_calls)
+        tail_assistant is not None
+        and tail_assistant.role is MessageRole.ASSISTANT
+        and any(tc.id == effective_call_id for tc in tail_assistant.tool_calls)
     )
     if not has_tail_call:
         call_msg = Message(
@@ -253,6 +256,11 @@ async def run_client_tool_resume_stream(
                 (m.content for m in reversed(existing) if m.role is MessageRole.USER and m.content),
                 f"Tool result for {approval.tool_name}",
             )
+
+            async def _revoke_approval(approval_id: str, reason: str) -> None:
+                if deps.retrieval.tool_executor is not None:
+                    await deps.retrieval.tool_executor.revoke_approval(approval_id, reason=reason)
+
             egress_ctx = EgressContext(
                 settings=deps.settings,
                 guardrail_pipeline=deps.guardrail_pipeline,
@@ -260,6 +268,7 @@ async def run_client_tool_resume_stream(
                 session_id=session.id,
                 project_id=session.project_id,
                 principal_id=principal.principal_id,
+                revoke_approval=_revoke_approval,
             )
 
             async def _persist(assistant_msg: Message, resolved: TurnOutcome) -> None:
@@ -277,6 +286,19 @@ async def run_client_tool_resume_stream(
                         )
                     )
                 await deps.session_repo.add_message(assistant_msg)
+                for post_msg in resolved.post_assistant_tool_messages:
+                    await deps.session_repo.add_message(
+                        Message(
+                            session_id=session.id,
+                            project_id=session.project_id,
+                            role=post_msg.role,
+                            content=post_msg.content,
+                            tool_calls=post_msg.tool_calls,
+                            tool_call_id=post_msg.tool_call_id,
+                            tool_name=post_msg.name,
+                            created_at=assistant_msg.created_at,
+                        )
+                    )
 
             loop_stream = run_tool_loop(
                 ToolLoopParams(
@@ -292,6 +314,7 @@ async def run_client_tool_resume_stream(
                     enable_thinking=True,
                     target_files=target_files,
                     ranked_hits=(),
+                    scan_tool_outputs=deps.settings.guardrails.enabled,
                 )
             )
             async for event in finalize_stream_with_egress(

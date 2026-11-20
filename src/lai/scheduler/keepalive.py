@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from lai.domain.errors import ClientDisconnectedError, ValidationFailedError
+from lai.domain.errors import ClientDisconnectedError, LaiError, ValidationFailedError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
@@ -209,12 +209,31 @@ async def _await_task_step(
     await asyncio.wait({task}, timeout=wait_seconds)
 
 
+def _default_error_serializer(exc: Exception) -> bytes:
+    """Serialize a post-header exception into a structured JSON error envelope."""
+    if isinstance(exc, LaiError):
+        details = {**exc.details, "status_code": str(exc.status_code)}
+        payload: dict[str, object] = {
+            "error": {"code": exc.code, "message": exc.message, "details": details}
+        }
+    else:
+        payload = {
+            "error": {
+                "code": "internal_error",
+                "message": "An unexpected internal server error occurred.",
+                "details": {"status_code": "500"},
+            }
+        }
+    return json.dumps(payload).encode("utf-8")
+
+
 async def _keepalive_json_stream[T](
     task: asyncio.Task[T],
     *,
     interval_seconds: float,
     is_disconnected: DisconnectCheck | None,
     serialize: Callable[[T], bytes],
+    error_serializer: Callable[[Exception], bytes] | None = None,
 ) -> AsyncIterator[bytes]:
     loop = asyncio.get_running_loop()
     try:
@@ -237,7 +256,14 @@ async def _keepalive_json_stream[T](
                 step = _compute_wait_step(remaining, is_disconnected)
                 await _await_task_step(task, wait_seconds=step)
 
-        result = await task
+        try:
+            result = await task
+        except ClientDisconnectedError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            serialize_err = error_serializer or _default_error_serializer
+            yield serialize_err(exc)
+            return
         yield serialize(result)
     finally:
         if not task.done():
@@ -250,13 +276,14 @@ async def _to_task[T](awaitable: Awaitable[T]) -> T:
     return await awaitable
 
 
-async def await_or_keepalive_json[T](
+async def await_or_keepalive_json[T](  # noqa: PLR0913
     coro: Awaitable[T],
     *,
     threshold_seconds: float = 20.0,
     interval_seconds: float = 15.0,
     is_disconnected: DisconnectCheck | None = None,
     serializer: Callable[[T], bytes] | None = None,
+    error_serializer: Callable[[Exception], bytes] | None = None,
 ) -> T | AsyncIterator[bytes]:
     """Return resolved value within threshold or stream RFC 8259 whitespace before JSON bytes."""
     if threshold_seconds <= 0:
@@ -289,6 +316,7 @@ async def await_or_keepalive_json[T](
                     interval_seconds=interval_seconds,
                     is_disconnected=is_disconnected,
                     serialize=serializer or _serialize_json_bytes,
+                    error_serializer=error_serializer,
                 )
             step = _compute_wait_step(remaining, is_disconnected)
             await _await_task_step(task, wait_seconds=step)

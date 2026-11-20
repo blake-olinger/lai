@@ -29,7 +29,7 @@ from lai.tools._audit import (
     serialize_arguments,
     validate_approval_match,
 )
-from lai.tools._client_dispatch import dispatch_client_tool
+from lai.tools._client_dispatch import dispatch_client_tool, revoke_approval_record
 from lai.tools._client_results import submit_client_tool_result
 from lai.tools._plugin_runner import execute_server_plugin, record_tool_audit
 from lai.tools.policy import DefaultToolPolicy
@@ -251,6 +251,11 @@ class GuardedToolExecutor(ToolExecutorPort):
             max_payload_bytes=self._max_payload_bytes,
         )
 
+    async def revoke_approval(self, approval_id: str, *, reason: str) -> bool:
+        """Atomically revoke an active PENDING or APPROVED tool approval/lease."""
+        self._pending_contexts.pop(approval_id, None)
+        return await revoke_approval_record(self._audit_repo, approval_id, reason=reason)
+
     async def _execute_approved_server_tool(
         self, approved_record: ToolApprovalRecord
     ) -> ToolApprovalRecord:
@@ -305,16 +310,14 @@ class GuardedToolExecutor(ToolExecutorPort):
             self._audit_repo, pending_meta, success=False, error="approval_required"
         )
         msg = f"Tool {spec.name!r} requires explicit approval."
-        details = {"permission_tier": spec.permission_tier.value}
         raise ToolApprovalRequiredError(
-            msg, approval_id=saved.id, tool_name=spec.name, details=details
+            msg,
+            approval_id=saved.id,
+            tool_name=spec.name,
+            details={"permission_tier": spec.permission_tier.value},
         )
 
-    async def _consume_approved_request(
-        self,
-        approval_id: str,
-        meta: InvocationMeta,
-    ) -> None:
+    async def _consume_approved_request(self, approval_id: str, meta: InvocationMeta) -> None:
         """Verify context match and atomically transition APPROVED -> EXECUTED."""
         approval = await self._audit_repo.get_approval(approval_id)
         mismatch_error = validate_approval_match(approval, meta.context, meta.spec.name)
@@ -335,12 +338,7 @@ class GuardedToolExecutor(ToolExecutorPort):
             msg = f"Approval {approval_id!r} was already consumed."
             raise AuthorizationError(msg, details={"approval_id": approval_id})
 
-    def _remember_pending_context(
-        self,
-        approval_id: str,
-        context: ToolExecutionContext,
-    ) -> None:
+    def _remember_pending_context(self, approval_id: str, context: ToolExecutionContext) -> None:
         if len(self._pending_contexts) >= _MAX_CACHED_CONTEXTS:
-            oldest_key = next(iter(self._pending_contexts))
-            del self._pending_contexts[oldest_key]
+            del self._pending_contexts[next(iter(self._pending_contexts))]
         self._pending_contexts[approval_id] = context

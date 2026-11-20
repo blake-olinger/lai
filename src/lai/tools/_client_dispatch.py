@@ -11,6 +11,7 @@ from lai.domain.tools import (
     ApprovalStatus,
     PolicyDecision,
     ToolApprovalRecord,
+    ToolAuditRecord,
     ToolExecutionTarget,
 )
 from lai.tools._audit import InvocationMeta, build_audit_record, normalize_optional_id
@@ -180,3 +181,43 @@ async def _issue_client_lease_and_raise(  # noqa: PLR0913
         expires_at=expires_at,
         details={"permission_tier": spec.permission_tier.value},
     )
+
+
+async def revoke_approval_record(
+    audit_repo: ToolAuditRepositoryPort,
+    approval_id: str,
+    *,
+    reason: str,
+) -> bool:
+    """Atomically revoke a PENDING or APPROVED approval/lease to DENIED with immediate expiry."""
+    record = await audit_repo.get_approval(approval_id)
+    if record is None or record.status not in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
+        return False
+    now = utc_now()
+    revoked = record.model_copy(
+        update={
+            "status": ApprovalStatus.DENIED,
+            "decided_by": "system:egress_guardrail",
+            "decision_note": reason,
+            "decided_at": now,
+            "expires_at": now,
+        }
+    )
+    if not await audit_repo.transition_approval_status(revoked, expected_status=record.status):
+        return False
+    await audit_repo.record_audit(
+        ToolAuditRecord(
+            project_id=record.project_id,
+            session_id=record.session_id,
+            principal_id=record.requested_by,
+            tool_name=record.tool_name,
+            permission_tier=record.permission_tier,
+            policy_decision=PolicyDecision.DENY,
+            arguments_json=record.arguments_json,
+            success=False,
+            output_preview="",
+            error=reason,
+            approval_id=record.id,
+        )
+    )
+    return True
