@@ -207,9 +207,15 @@ async def test_smtp_alert_sink_tls_modes_auth_and_error_handling(
     assert recorded[-1]["has_context"] is True
     assert recorded[-1]["login"] is None
 
-    none_cfg = base.model_copy(update={"tls_mode": SmtpTlsMode.NONE, "port": 25})
+    none_cfg = base.model_copy(
+        update={"host": "127.0.0.1", "tls_mode": SmtpTlsMode.NONE, "port": 25}
+    )
     await SmtpAlertSink(none_cfg).send_alert(event)
     assert recorded[-1]["starttls"] is False
+    with pytest.raises(OSError, match="non-loopback"):
+        await SmtpAlertSink(
+            base.model_copy(update={"tls_mode": SmtpTlsMode.NONE, "port": 25})
+        ).send_alert_strict(event)
 
     fail_box[0] = smtplib.SMTPAuthenticationError(535, b"bad auth")
     with pytest.raises(smtplib.SMTPAuthenticationError):

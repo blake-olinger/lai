@@ -22,6 +22,7 @@ from lai.api._runtime_config_apply import (
 )
 from lai.api._runtime_config_reload import copy_section_from_fresh_settings
 from lai.api._runtime_config_sections import (
+    clear_smtp_password_if_target_changed,
     enforce_guardrail_boot_lock,
     extract_nonsecret_section_payload,
     validate_candidate_settings,
@@ -103,27 +104,29 @@ async def update_alerting_config(
     }
     log_data.update({key: val for key, val in log_map.items() if key in fields and val is not None})
 
-    smtp_map: dict[str, tuple[str, object]] = {
-        "smtp_enabled": ("enabled", body.smtp_enabled),
-        "smtp_host": ("host", body.smtp_host),
-        "smtp_port": ("port", body.smtp_port),
-        "smtp_tls_mode": ("tls_mode", body.smtp_tls_mode),
-        "smtp_username": ("username", body.smtp_username),
-        "smtp_from_address": ("from_address", body.smtp_from_address),
-        "smtp_to_addresses": ("to_addresses", body.smtp_to_addresses),
-        "smtp_use_admin_emails_fallback": (
-            "use_admin_emails_fallback",
-            body.smtp_use_admin_emails_fallback,
-        ),
-        "smtp_subject_prefix": ("subject_prefix", body.smtp_subject_prefix),
-        "smtp_timeout_seconds": ("timeout_seconds", body.smtp_timeout_seconds),
-        "smtp_min_severity": ("min_severity", body.smtp_min_severity),
-        "smtp_categories": ("categories", body.smtp_categories),
-    }
-    for req_field, (smtp_key, val) in smtp_map.items():
+    smtp_fields = (
+        ("smtp_enabled", "enabled"),
+        ("smtp_host", "host"),
+        ("smtp_port", "port"),
+        ("smtp_tls_mode", "tls_mode"),
+        ("smtp_username", "username"),
+        ("smtp_from_address", "from_address"),
+        ("smtp_to_addresses", "to_addresses"),
+        ("smtp_use_admin_emails_fallback", "use_admin_emails_fallback"),
+        ("smtp_subject_prefix", "subject_prefix"),
+        ("smtp_timeout_seconds", "timeout_seconds"),
+        ("smtp_min_severity", "min_severity"),
+        ("smtp_categories", "categories"),
+    )
+    for req_field, smtp_key in smtp_fields:
         if req_field in fields:
-            smtp_data[smtp_key] = val
+            smtp_data[smtp_key] = getattr(body, req_field)
 
+    clear_smtp_password_if_target_changed(
+        smtp_data,
+        boot_smtp_host=services.boot_smtp_host,
+        boot_smtp_port=services.boot_smtp_port,
+    )
     log_data["alert_smtp"] = smtp_data
     data["logging"] = log_data
     services.settings = validate_candidate_settings(data)
@@ -164,23 +167,31 @@ async def update_oidc_config(
 ) -> OidcRuntimeConfigResponse:
     """Validate, live-swap OIDC policy preserving cached JWKS, and persist."""
     data = services.settings.model_dump()
+    for list_field in (
+        "oidc_audiences",
+        "oidc_allowed_client_ids",
+        "oidc_allowed_emails",
+        "oidc_allowed_domains",
+        "oidc_admin_emails",
+        "oidc_admin_roles",
+        "oidc_admin_subjects",
+        "oidc_identity_claims",
+    ):
+        val = getattr(body, list_field)
+        if val is not None:
+            data[list_field] = list(val)
     if body.oidc_audiences is not None:
-        data["oidc_audiences"] = list(body.oidc_audiences)
         data["oidc_audience"] = None
-    if body.oidc_allowed_emails is not None:
-        data["oidc_allowed_emails"] = list(body.oidc_allowed_emails)
-    if body.oidc_allowed_domains is not None:
-        data["oidc_allowed_domains"] = list(body.oidc_allowed_domains)
-    if body.oidc_admin_emails is not None:
-        data["oidc_admin_emails"] = list(body.oidc_admin_emails)
     if body.oidc_default_scopes is not None:
         data["oidc_default_scopes"] = list(validate_scopes_list(body.oidc_default_scopes))
-    if body.oidc_require_email_verified is not None:
-        data["oidc_require_email_verified"] = body.oidc_require_email_verified
-    if body.oidc_identity_claims is not None:
-        data["oidc_identity_claims"] = list(body.oidc_identity_claims)
-    if body.oidc_leeway_seconds is not None:
-        data["oidc_leeway_seconds"] = body.oidc_leeway_seconds
+    for scalar_field in (
+        "oidc_require_email_verified",
+        "oidc_allow_guest_users",
+        "oidc_leeway_seconds",
+    ):
+        val = getattr(body, scalar_field)
+        if val is not None:
+            data[scalar_field] = val
     services.settings = validate_candidate_settings(data)
     apply_live_oidc(services)
     await _persist_section(services, "oidc")
@@ -249,7 +260,7 @@ async def update_guardrails_config(
     """Validate, enforce boot locks, live-swap guardrail policy in place, and persist."""
     data = services.settings.model_dump()
     gr_data = dict(cast("dict[str, object]", data["guardrails"]))
-    for field_name in (
+    gr_fields = (
         "enabled",
         "block_mode",
         "output_mode",
@@ -257,14 +268,14 @@ async def update_guardrails_config(
         "violation_threshold",
         "fail_open",
         "timeout_seconds",
-    ):
-        val = getattr(body, field_name)
-        if val is not None:
-            gr_data[field_name] = val
+    )
+    gr_data.update({f: getattr(body, f) for f in gr_fields if getattr(body, f) is not None})
     data["guardrails"] = gr_data
     candidate = validate_candidate_settings(data)
-    boot_guardrails = services.boot_guardrails_config or services.settings.guardrails
-    enforce_guardrail_boot_lock(boot_guardrails, candidate.guardrails)
+    boot_gr = services.boot_guardrails_config or services.settings.guardrails
+    enforce_guardrail_boot_lock(
+        boot_gr, candidate.guardrails, enforce_min_timeout=body.timeout_seconds is not None
+    )
     services.settings = candidate
     apply_live_guardrails(services)
     await _persist_section(services, "guardrails")
@@ -279,17 +290,15 @@ async def update_updates_config(
     """Validate, live-swap non-privileged self-update settings, and persist."""
     data = services.settings.model_dump()
     upd_data = dict(cast("dict[str, object]", data["updates"]))
-    for field_name in (
+    upd_fields = (
         "enabled",
         "health_timeout_seconds",
         "health_poll_interval_seconds",
         "keep_releases",
         "auto_rollback",
         "allow_prerelease",
-    ):
-        val = getattr(body, field_name)
-        if val is not None:
-            upd_data[field_name] = val
+    )
+    upd_data.update({f: getattr(body, f) for f in upd_fields if getattr(body, f) is not None})
     data["updates"] = upd_data
     services.settings = validate_candidate_settings(data)
     apply_live_updates(services)
@@ -315,6 +324,9 @@ async def reload_config_sections(
         enforce_guardrail_boot_lock(boot_guardrails, candidate.guardrails)
 
     services.settings = candidate
+    if "alerting" in ordered:
+        services.boot_smtp_host = fresh_settings.logging.alert_smtp.host
+        services.boot_smtp_port = fresh_settings.logging.alert_smtp.port
     appliers = {
         "alerting": apply_live_alerting,
         "analytics": apply_live_analytics,

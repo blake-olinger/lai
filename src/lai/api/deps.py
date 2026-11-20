@@ -86,6 +86,8 @@ class AppServices:
     cors_controller: DynamicCorsController | None = None
     config_path: Path | None = None
     boot_guardrails_config: GuardrailConfig | None = None
+    boot_smtp_host: str | None = None
+    boot_smtp_port: int = 587
 
     def schedule_background_task(
         self,

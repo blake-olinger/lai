@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import smtplib
 import ssl
 import sys
@@ -33,6 +34,19 @@ _SEVERITY_RANK: dict[AlertSeverity, int] = {
 }
 _MAX_EMAIL_FIELD_CHARS = 500
 _MAX_EMAIL_TRACEBACK_CHARS = 2000
+
+
+def is_loopback_host(host: str) -> bool:
+    """Return True only for localhost or explicit IPv4/IPv6 loopback addresses."""
+    cleaned = host.strip().lower().strip("[]")
+    if not cleaned:
+        return False
+    if cleaned == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(cleaned).is_loopback
+    except ValueError:
+        return False
 
 
 def _sanitize_header_value(value: str) -> str:
@@ -133,6 +147,10 @@ class SmtpAlertSink(AlertSinkPort):
             raise OSError(msg)
         timeout = self._config.timeout_seconds
         tls_mode = self._config.tls_mode
+        password = (self._config.password or "").strip()
+        if password and tls_mode is SmtpTlsMode.NONE and not is_loopback_host(host):
+            msg = "Refusing plaintext SMTP authentication to non-loopback host."
+            raise OSError(msg)
 
         if tls_mode is SmtpTlsMode.SSL:
             context = ssl.create_default_context()
@@ -149,8 +167,14 @@ class SmtpAlertSink(AlertSinkPort):
 
     def _authenticate_and_send(self, client: smtplib.SMTP, message: EmailMessage) -> None:
         username = (self._config.username or "").strip()
-        if username:
-            client.login(username, self._config.password or "")
+        password = (self._config.password or "").strip()
+        if username and password:
+            if self._config.tls_mode is SmtpTlsMode.NONE and not is_loopback_host(
+                self._config.host or ""
+            ):
+                msg = "Refusing plaintext SMTP authentication to non-loopback host."
+                raise OSError(msg)
+            client.login(username, password)
         client.send_message(message)
 
     async def send_alert_strict(self, event: AlertEvent) -> None:
@@ -256,7 +280,12 @@ async def _deliver_strict_to_sink(
         else:
             await target.send_alert(event)
     except (smtplib.SMTPException, httpx.HTTPError, OSError, RuntimeError) as exc:
-        return AlertSinkDeliveryResult(sink_name=sink_name, delivered=False, error=str(exc))
+        prefix = "SMTP delivery failed" if isinstance(target, SmtpAlertSink) else "Delivery failed"
+        return AlertSinkDeliveryResult(
+            sink_name=sink_name,
+            delivered=False,
+            error=f"{prefix} ({type(exc).__name__})",
+        )
     return AlertSinkDeliveryResult(sink_name=sink_name, delivered=True)
 
 

@@ -33,7 +33,9 @@ async def _assert_guardrails_and_updates_hotswap(
     for forbidden in (
         {"enabled": False},
         {"fail_open": True},
+        {"output_mode": "audit_only"},
         {"output_mode": "off"},
+        {"timeout_seconds": 0.0001},
         {"violation_threshold": 0.95},
     ):
         r_lock = await h.client.patch(
@@ -53,7 +55,6 @@ async def _assert_guardrails_and_updates_hotswap(
         headers=admin_hdrs,
         json={
             "block_mode": "http_error",
-            "output_mode": "audit_only",
             "violation_threshold": 0.75,
             "refusal_text": "Blocked live",
         },
@@ -61,7 +62,7 @@ async def _assert_guardrails_and_updates_hotswap(
     assert r_gr.status_code == S.OK
     gr_body = r_gr.json()
     assert gr_body["block_mode"] == "http_error"
-    assert gr_body["output_mode"] == GuardrailOutputMode.AUDIT_ONLY.value
+    assert gr_body["output_mode"] == GuardrailOutputMode.BUFFERED.value
     assert gr_body["allow_runtime_disable"] is False
     assert gr_body["max_violation_threshold"] == 0.90
 

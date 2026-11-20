@@ -100,10 +100,14 @@ async def _build_authenticator(
             jwks_url=settings.oidc_jwks_url,
             audience=settings.oidc_audience,
             audiences=settings.resolved_oidc_audiences(),
+            allowed_client_ids=settings.oidc_allowed_client_ids,
             allowed_emails=settings.oidc_allowed_emails,
             allowed_domains=settings.oidc_allowed_domains,
             default_scopes=tuple(ApiScope(scope) for scope in settings.oidc_default_scopes),
             admin_emails=settings.oidc_admin_emails,
+            admin_roles=settings.oidc_admin_roles,
+            admin_subjects=settings.oidc_admin_subjects,
+            allow_guest_users=settings.oidc_allow_guest_users,
             require_email_verified=settings.oidc_require_email_verified,
             identity_claims=settings.oidc_identity_claims,
             leeway_seconds=settings.oidc_leeway_seconds,
@@ -176,6 +180,8 @@ async def build_app_services(
     await db.initialize()
 
     boot_guardrails_config = settings.guardrails
+    boot_smtp_host = settings.logging.alert_smtp.host
+    boot_smtp_port = settings.logging.alert_smtp.port
     runtime_config_repo = SqliteRuntimeConfigRepository(db)
     persisted_overrides = await runtime_config_repo.get_all_sections()
     if persisted_overrides:
@@ -183,6 +189,8 @@ async def build_app_services(
             settings,
             persisted_overrides,
             boot_guardrails_config=boot_guardrails_config,
+            boot_smtp_host=boot_smtp_host,
+            boot_smtp_port=boot_smtp_port,
         )
         logging_cfg = _resolve_logging_config(settings)
         reconfigure_observability_alerting(
@@ -314,20 +322,20 @@ async def build_app_services(
         runtime_config_repo=runtime_config_repo,
         config_path=config_path,
         boot_guardrails_config=boot_guardrails_config,
+        boot_smtp_host=boot_smtp_host,
+        boot_smtp_port=boot_smtp_port,
         close_callbacks=close_callbacks,
     )
 
 
 async def cancel_background_tasks(services: AppServices) -> None:
     """Cancel and await any pending background tasks tracked on AppServices."""
-    if not services.background_tasks:
-        return
-    tasks = list(services.background_tasks)
+    tasks = [task for task in services.background_tasks if not task.done()]
     for task in tasks:
-        if not task.done():
-            task.cancel()
-    with suppress(asyncio.CancelledError):
-        await asyncio.gather(*tasks, return_exceptions=True)
+        task.cancel()
+    if tasks:
+        with suppress(asyncio.CancelledError):
+            await asyncio.gather(*tasks, return_exceptions=True)
     services.background_tasks.clear()
 
 

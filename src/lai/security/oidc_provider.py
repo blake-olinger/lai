@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 import jwt
 from pydantic import Field
 
 from lai.domain.auth import ApiScope, AuthMethod, AuthPrincipal, RequestCredentials
 from lai.domain.base import StrictModel
-from lai.domain.errors import AuthenticationError, AuthorizationError
+from lai.domain.errors import AuthenticationError
 from lai.observability.logging import get_component_logger
 from lai.ports.auth import AuthProviderPort
 from lai.security._jwks import JwksCache, JwksCachePolicy, JwksFetchSpec, fetch_jwks_payload
+from lai.security._oidc_claims import (
+    resolve_oauth_client_id,
+    resolve_principal_identity,
+    resolve_scopes,
+    validate_email_policy,
+    validate_guest_policy,
+)
 from lai.security.keys import API_KEY_PREFIX
 
 if TYPE_CHECKING:
@@ -32,6 +39,7 @@ class OidcProviderConfig(StrictModel):
     jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
     audience: str | None = None
     audiences: tuple[str, ...] = ()
+    allowed_client_ids: tuple[str, ...] = ()
     allowed_emails: tuple[str, ...] = ()
     allowed_domains: tuple[str, ...] = ()
     default_scopes: tuple[ApiScope, ...] = (
@@ -44,6 +52,9 @@ class OidcProviderConfig(StrictModel):
         ApiScope.TOOLS_SAFE,
     )
     admin_emails: tuple[str, ...] = ()
+    admin_roles: tuple[str, ...] = ()
+    admin_subjects: tuple[str, ...] = ()
+    allow_guest_users: bool = False
     algorithms: tuple[str, ...] = ("RS256", "ES256")
     jwks_cache_ttl_seconds: float = Field(default=3600.0, gt=0.0)
     jwks_timeout_seconds: float = Field(default=5.0, gt=0.0)
@@ -61,6 +72,12 @@ class OidcProviderConfig(StrictModel):
                 items.append(legacy)
         return tuple(dict.fromkeys(items))
 
+    def resolved_allowed_client_ids(self) -> tuple[str, ...]:
+        """Return deduplicated, non-empty calling OAuth client IDs (azp/appid)."""
+        return tuple(
+            dict.fromkeys(item.strip() for item in self.allowed_client_ids if item.strip())
+        )
+
 
 def _extract_jwt_bearer(credentials: RequestCredentials) -> str | None:
     """Return a 3-part JWT bearer token (excluding `lai_sk_` API keys)."""
@@ -76,86 +93,6 @@ def _extract_jwt_bearer(credentials: RequestCredentials) -> str | None:
     if len(parts) != _JWT_PART_COUNT or not all(parts):
         return None
     return token
-
-
-def _resolve_identity_claim(config: OidcProviderConfig, claims: Mapping[str, Any]) -> str | None:
-    """Return the first non-empty lowercase identity string from configured identity_claims."""
-    for claim_name in config.identity_claims:
-        raw_val = claims.get(claim_name)
-        if isinstance(raw_val, str) and raw_val.strip():
-            return raw_val.strip().lower()
-    return None
-
-
-def _validate_email_policy(config: OidcProviderConfig, claims: Mapping[str, Any]) -> str | None:
-    """Enforce email verification and identity/domain allowlists, returning normalized identity."""
-    email = _resolve_identity_claim(config, claims)
-
-    if config.require_email_verified and claims.get("email_verified") is not True:
-        get_component_logger("security").warning("oidc_auth_failed", reason="email_not_verified")
-        msg = "OIDC token email is not verified."
-        raise AuthenticationError(msg)
-
-    has_allowlist = bool(config.allowed_emails or config.allowed_domains)
-    if not has_allowlist:
-        return email
-
-    if email is None:
-        get_component_logger("security").warning(
-            "oidc_auth_denied", reason="missing_email_for_allowlist"
-        )
-        msg = "OIDC token missing identity claim required by allowlist."
-        raise AuthorizationError(msg)
-
-    allowed_emails = {item.strip().lower() for item in config.allowed_emails}
-    allowed_domains = {item.strip().lower().lstrip("@") for item in config.allowed_domains}
-    domain = email.partition("@")[2]
-    if email in allowed_emails or (domain and domain in allowed_domains):
-        return email
-
-    get_component_logger("security").warning(
-        "oidc_auth_denied", reason="email_not_allowed", email=email
-    )
-    msg = "OIDC caller email is not permitted."
-    raise AuthorizationError(msg, details={"email": email})
-
-
-def _resolve_scopes(config: OidcProviderConfig, email: str | None) -> tuple[ApiScope, ...]:
-    """Map admin emails to ADMIN scope and other principals to default_scopes."""
-    if email is not None:
-        admin_emails = {item.strip().lower() for item in config.admin_emails}
-        if email in admin_emails:
-            return (ApiScope.ADMIN,)
-    return config.default_scopes
-
-
-def _resolve_oauth_client_id(
-    claims: Mapping[str, Any],
-    resolved_audiences: tuple[str, ...],
-) -> str:
-    """Extract and verify the bound OAuth client ID from azp, appid (Entra ID), or aud claims."""
-    for claim_key, fail_reason in (("azp", "invalid_azp_claim"), ("appid", "invalid_appid_claim")):
-        if claim_key in claims and claims[claim_key] is not None:
-            raw_client = claims[claim_key]
-            if not isinstance(raw_client, str) or raw_client.strip() not in resolved_audiences:
-                get_component_logger("security").warning("oidc_auth_failed", reason=fail_reason)
-                msg = f"OIDC token {claim_key} claim is not an authorized client audience."
-                raise AuthenticationError(msg)
-            return raw_client.strip()
-
-    aud = claims.get("aud")
-    if isinstance(aud, str):
-        cleaned = aud.strip()
-        if cleaned in resolved_audiences:
-            return cleaned
-    elif isinstance(aud, list):
-        for item in cast("list[object]", aud):
-            if isinstance(item, str) and item.strip() in resolved_audiences:
-                return item.strip()
-
-    get_component_logger("security").warning("oidc_auth_failed", reason="unmatched_aud_claim")
-    msg = "OIDC token aud claim did not match any configured audience."
-    raise AuthenticationError(msg)
 
 
 class OidcJwtAuthProvider(AuthProviderPort):
@@ -189,7 +126,9 @@ class OidcJwtAuthProvider(AuthProviderPort):
         return "oidc"
 
     def reconfigure(self, config: OidcProviderConfig) -> None:
-        """Update OIDC policy claims and allowlists in place without clearing cached JWKS."""
+        """Update OIDC policy in place, invalidating cached JWKS only if jwks_url changed."""
+        if config.jwks_url != self._config.jwks_url:
+            self._jwks_cache.invalidate()
         self._config = config
 
     def supports(self, credentials: RequestCredentials) -> bool:
@@ -230,19 +169,29 @@ class OidcJwtAuthProvider(AuthProviderPort):
             msg = "OIDC token missing subject claim."
             raise AuthenticationError(msg)
 
-        resolved_client_id = _resolve_oauth_client_id(claims, audiences)
+        resolved_client_id = resolve_oauth_client_id(
+            claims,
+            audiences=audiences,
+            allowed_client_ids=self._config.resolved_allowed_client_ids(),
+        )
         issuer = claims.get("iss")
-        issuer_str = issuer if isinstance(issuer, str) else self._config.issuer_url
-        email = _validate_email_policy(self._config, claims)
-        scopes = _resolve_scopes(self._config, email)
+        issuer_str = (
+            issuer.strip()
+            if isinstance(issuer, str) and issuer.strip()
+            else self._config.issuer_url
+        )
+        validate_guest_policy(self._config, claims, issuer=issuer_str)
+        email = validate_email_policy(self._config, claims)
+        identity_key = resolve_principal_identity(claims)
+        scopes = resolve_scopes(self._config, claims, email=email, identity_key=identity_key)
 
         return AuthPrincipal(
-            principal_id=f"oidc:{subject}",
+            principal_id=f"oidc:{issuer_str.rstrip('/')}:{identity_key}",
             auth_method=AuthMethod.OIDC,
             scopes=scopes,
             email=email,
             issuer=issuer_str,
-            subject=subject,
+            subject=subject.strip(),
             oauth_client_id=resolved_client_id,
         )
 

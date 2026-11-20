@@ -87,7 +87,7 @@ async def test_oidc_provider_reconfigure_preserves_jwks_cache() -> None:
 
     tok_a = authority.mint_token(sub="u1", email="alice@example.test", aud="client-a")
     p1 = await provider.authenticate(RequestCredentials(bearer_token=tok_a))
-    assert p1.principal_id == "oidc:u1"
+    assert p1.principal_id == f"oidc:{authority.issuer.rstrip('/')}:u1"
     assert fetch_count == 1
 
     tok_b = authority.mint_token(sub="u2", email="bob@example.test", aud="client-b")

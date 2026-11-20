@@ -176,6 +176,12 @@ class JwksCache:
         """Return currently cached JWKS mapping if loaded."""
         return self._jwks
 
+    def invalidate(self) -> None:
+        """Clear cached JWKS state (e.g. when the configured jwks_url changes)."""
+        self._jwks = None
+        self._last_fetch_at = None
+        self._expires_at = 0.0
+
     async def refresh(self) -> dict[str, Any]:
         """Unconditionally refresh JWKS under lock (used for startup warm-up/explicit refresh)."""
         async with self._lock:

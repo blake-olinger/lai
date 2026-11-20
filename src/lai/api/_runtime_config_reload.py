@@ -25,9 +25,13 @@ ALERTING_RELOAD_KEYS: tuple[str, ...] = (
 OIDC_RELOAD_KEYS: tuple[str, ...] = (
     "oidc_audience",
     "oidc_audiences",
+    "oidc_allowed_client_ids",
     "oidc_allowed_emails",
     "oidc_allowed_domains",
     "oidc_admin_emails",
+    "oidc_admin_roles",
+    "oidc_admin_subjects",
+    "oidc_allow_guest_users",
     "oidc_default_scopes",
     "oidc_require_email_verified",
     "oidc_identity_claims",

@@ -5,12 +5,15 @@ from __future__ import annotations
 import ipaddress
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+
+from lai.domain.observability import SmtpTlsMode
 
 if TYPE_CHECKING:
     from lai.config.settings import LaiSettings
 
 _CORS_HEADER_RE = re.compile(r"^[A-Za-z0-9-]+$")
+_FORBIDDEN_ENTRA_SEGMENTS: frozenset[str] = frozenset({"common", "organizations", "consumers"})
 
 PUBLIC_CONSUMER_EMAIL_DOMAINS: frozenset[str] = frozenset(
     {
@@ -32,11 +35,49 @@ def _has_text(value: str | None) -> bool:
     return bool(value is not None and value.strip())
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Return True only for localhost or IPv4/IPv6 loopback addresses."""
+    cleaned = host.strip().lower().strip("[]")
+    if not cleaned:
+        return False
+    if cleaned == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(cleaned).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_oidc_https_url(url: str, field_name: str) -> None:
+    """Require strict https:// URLs and forbid multi-tenant Entra meta-segments."""
+    cleaned = url.strip()
+    if not cleaned or cleaned != url or any(ch.isspace() for ch in cleaned):
+        msg = f"Invalid {field_name} {url!r}: must be a non-empty https:// URL."
+        raise ValueError(msg)
+    parsed = urlsplit(cleaned)
+    if parsed.scheme != "https" or not parsed.hostname:
+        msg = f"Invalid {field_name} {url!r}: scheme must be 'https' with a valid hostname."
+        raise ValueError(msg)
+    decoded_path = unquote(unquote(parsed.path))
+    segments = {seg.strip().lower() for seg in decoded_path.split("/") if seg.strip()}
+    forbidden = segments & _FORBIDDEN_ENTRA_SEGMENTS
+    if forbidden:
+        bad = min(forbidden)
+        msg = (
+            f"Invalid {field_name} {url!r}: multi-tenant segment '/{bad}' is forbidden; "
+            "pin a single tenant ID."
+        )
+        raise ValueError(msg)
+
+
 def _validate_oidc_settings(settings: LaiSettings) -> None:
     """Reject insecure or incomplete OIDC configuration when OIDC auth is enabled."""
     normalized_providers = {provider.strip().lower() for provider in settings.auth_providers}
     if not (settings.oidc_enabled or "oidc" in normalized_providers):
         return
+
+    _validate_oidc_https_url(settings.oidc_issuer_url, "oidc_issuer_url")
+    _validate_oidc_https_url(settings.oidc_jwks_url, "oidc_jwks_url")
 
     if not settings.resolved_oidc_audiences():
         msg = (
@@ -171,6 +212,17 @@ def _validate_alerting_settings(settings: LaiSettings) -> None:
     smtp = settings.logging.alert_smtp
     if _has_text(smtp.password) and not _has_text(smtp.username):
         msg = "logging.alert_smtp.password requires logging.alert_smtp.username to be configured."
+        raise ValueError(msg)
+    if (
+        _has_text(smtp.password)
+        and smtp.tls_mode is SmtpTlsMode.NONE
+        and _has_text(smtp.host)
+        and not _is_loopback_host(smtp.host or "")
+    ):
+        msg = (
+            "logging.alert_smtp.password with tls_mode='none' is forbidden for non-loopback "
+            "SMTP hosts; use 'starttls' or 'ssl'."
+        )
         raise ValueError(msg)
     if "\r" in smtp.subject_prefix or "\n" in smtp.subject_prefix:
         msg = "logging.alert_smtp.subject_prefix must not contain CR/LF characters."

@@ -111,6 +111,7 @@ async def test_alerting_admin_api_redaction_test_delivery_and_persistence(
             alert_webhook_url=webhook_url,
             alert_smtp=SmtpAlertConfig(
                 enabled=False,
+                host="smtp.example.test",
                 username="mailer@example.test",
                 password=smtp_cred,
             ),
@@ -240,7 +241,9 @@ async def test_usage_analytics_endpoint_rollups_tokens_and_toggle(tmp_path: Path
         assert report["total_tokens"] == 40
         assert report["unique_client_apps"] == 1
         principals = {p["principal_id"]: p for p in report["principals"]}
-        assert principals["oidc:user-42"]["oauth_client_id"] == "spa-client-1"
+        assert principals[f"oidc:{oidc.issuer.rstrip('/')}:user-42"]["oauth_client_id"] == (
+            "spa-client-1"
+        )
 
         before_total = report["total_requests"]
         r_cfg = await h.client.patch(

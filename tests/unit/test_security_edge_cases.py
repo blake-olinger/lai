@@ -330,10 +330,14 @@ async def test_oidc_entra_id_identity_claims_and_appid_binding() -> None:
         return RequestCredentials(bearer_token=tok)
 
     p1 = await provider.authenticate(
-        _tok(email="  ", preferred_username="Boss@Contoso.com", appid=" entra-desktop ")
+        _tok(email="  ", preferred_username="Boss@Contoso.com", appid=" entra-desktop ", xms_edov=1)
     )
     assert (p1.email, p1.oauth_client_id) == ("boss@contoso.com", "entra-desktop")
     assert p1.scopes == (ApiScope.ADMIN,)
+    p1_unverified = await provider.authenticate(
+        _tok(email="  ", preferred_username="Boss@Contoso.com", appid=" entra-desktop ")
+    )
+    assert p1_unverified.scopes == cfg.default_scopes
     p2 = await provider.authenticate(
         _tok(preferred_username=123, upn="Dev@Contoso.com", azp="entra-web", appid="entra-desktop")
     )

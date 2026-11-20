@@ -122,9 +122,13 @@ class OidcRuntimeConfigResponse(StrictModel):
     issuer_url: str
     jwks_url: str
     oidc_audiences: list[str] = Field(default_factory=list)
+    oidc_allowed_client_ids: list[str] = Field(default_factory=list)
     oidc_allowed_emails: list[str] = Field(default_factory=list)
     oidc_allowed_domains: list[str] = Field(default_factory=list)
     oidc_admin_emails: list[str] = Field(default_factory=list)
+    oidc_admin_roles: list[str] = Field(default_factory=list)
+    oidc_admin_subjects: list[str] = Field(default_factory=list)
+    oidc_allow_guest_users: bool = False
     oidc_default_scopes: list[str] = Field(default_factory=list)
     oidc_require_email_verified: bool
     oidc_identity_claims: list[str] = Field(default_factory=list)
@@ -132,12 +136,16 @@ class OidcRuntimeConfigResponse(StrictModel):
 
 
 class UpdateOidcConfigRequest(StrictModel):
-    """Partial live update for OIDC audiences, allowlists, scopes, claims, and leeway."""
+    """Partial live update for OIDC audiences, client IDs, allowlists, roles, scopes, and leeway."""
 
     oidc_audiences: list[str] | None = None
+    oidc_allowed_client_ids: list[str] | None = None
     oidc_allowed_emails: list[str] | None = None
     oidc_allowed_domains: list[str] | None = None
     oidc_admin_emails: list[str] | None = None
+    oidc_admin_roles: list[str] | None = None
+    oidc_admin_subjects: list[str] | None = None
+    oidc_allow_guest_users: bool | None = None
     oidc_default_scopes: list[str] | None = None
     oidc_require_email_verified: bool | None = None
     oidc_identity_claims: list[str] | None = None
@@ -218,7 +226,7 @@ class UpdateGuardrailsPolicyRequest(StrictModel):
     refusal_text: str | None = Field(default=None, min_length=1)
     violation_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     fail_open: bool | None = None
-    timeout_seconds: float | None = Field(default=None, gt=0.0)
+    timeout_seconds: float | None = Field(default=None, gt=0.0, le=300.0)
 
 
 class UpdatesRuntimeConfigResponse(StrictModel):
@@ -231,7 +239,7 @@ class UpdatesRuntimeConfigResponse(StrictModel):
     backups_dir: str
     service_name: str
     health_url: str
-    health_timeout_seconds: float = Field(gt=0.0, le=600.0)
+    health_timeout_seconds: float = Field(gt=0.0, le=900.0)
     health_poll_interval_seconds: float = Field(gt=0.0, le=30.0)
     keep_releases: int = Field(ge=1, le=20)
     auto_rollback: bool
@@ -242,7 +250,7 @@ class UpdateUpdatesConfigRequest(StrictModel):
     """Partial live update for non-privileged self-update scheduling and rollback toggles."""
 
     enabled: bool | None = None
-    health_timeout_seconds: float | None = Field(default=None, gt=0.0, le=600.0)
+    health_timeout_seconds: float | None = Field(default=None, gt=0.0, le=900.0)
     health_poll_interval_seconds: float | None = Field(default=None, gt=0.0, le=30.0)
     keep_releases: int | None = Field(default=None, ge=1, le=20)
     auto_rollback: bool | None = None

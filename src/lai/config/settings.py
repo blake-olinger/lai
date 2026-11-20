@@ -65,9 +65,11 @@ class LaiSettings(BaseSettings):
     bin_dir: Path = Path("bin")
 
     max_upload_bytes: int = Field(default=262_144_000, ge=1)
+    max_json_body_bytes: int = Field(default=2_097_152, ge=1024)
     direct_file_budget_tokens: int = Field(default=12000, ge=256)
     map_window_tokens: int = Field(default=9000, ge=256)
     map_window_overlap_tokens: int = Field(default=300, ge=0)
+    map_max_windows: int = Field(default=32, ge=1, le=256)
     max_queued_jobs: int = Field(default=64, ge=1)
     max_projects_per_principal: int = Field(default=10, ge=1)
     max_storage_bytes_per_principal: int = Field(default=1_073_741_824, ge=1)
@@ -97,6 +99,7 @@ class LaiSettings(BaseSettings):
     oidc_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
     oidc_audience: str | None = None
     oidc_audiences: tuple[str, ...] = ()
+    oidc_allowed_client_ids: tuple[str, ...] = ()
     oidc_allowed_emails: tuple[str, ...] = ()
     oidc_allowed_domains: tuple[str, ...] = ()
     oidc_require_email_verified: bool = True
@@ -112,6 +115,9 @@ class LaiSettings(BaseSettings):
         "tools:safe",
     )
     oidc_admin_emails: tuple[str, ...] = ()
+    oidc_admin_roles: tuple[str, ...] = ()
+    oidc_admin_subjects: tuple[str, ...] = ()
+    oidc_allow_guest_users: bool = False
 
     default_model_profile: str = DEFAULT_MODEL_PROFILE_NAME
     custom_profiles: dict[str, ModelProfile] = Field(default_factory=dict)
