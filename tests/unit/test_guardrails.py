@@ -260,7 +260,12 @@ async def test_shieldgemma_provider_timeout_alert_errors_and_health(tmp_path: Pa
 
 
 async def test_pipeline_audits_all_directions_analytics_and_output_modes(tmp_path: Path) -> None:
-    """CompositeGuardrailPipeline audits ingress/egress/tool_output and records analytics."""
+    """Pipeline audits ingress/egress/tool_output, emits SECURITY_ALERT, and records analytics."""
+    sink = _MemorySink()
+    manager = AlertManager(sinks=(sink,), cooldown_seconds=0.0, log_dir=tmp_path / "alerts")
+    configure_observability(
+        LoggingConfig(log_dir=tmp_path / "alerts", enable_file_logs=True), manager
+    )
     spy_analytics = _SpyAnalyticsRepo()
     cfg = GuardrailConfig(
         fail_open=False,
@@ -268,38 +273,46 @@ async def test_pipeline_audits_all_directions_analytics_and_output_modes(tmp_pat
         output_mode=GuardrailOutputMode.AUDIT_ONLY,
     )
     regex = RegexPolicyGuardrailProvider(rules=(("BadOutput", r"UNSAFE_TEXT"),))
-    with CompositeGuardrailPipeline(
-        cfg, providers=[regex], analytics_repo=spy_analytics, log_dir=tmp_path
-    ) as pipeline:
-        assert isinstance(pipeline, GuardrailPipelinePort)
-        res_in = await pipeline.check_prompt("safe prompt token=mysecret99", request_id="req_1")
-        assert (res_in.verdict, res_in.direction) == (
-            GuardrailVerdict.ALLOW,
-            GuardrailDirection.INGRESS,
-        )
-        res_tool = await pipeline.check_prompt(
-            "safe tool output", direction=GuardrailDirection.TOOL_OUTPUT, request_id="req_2"
-        )
-        assert res_tool.direction is GuardrailDirection.TOOL_OUTPUT
+    try:
+        with CompositeGuardrailPipeline(
+            cfg, providers=[regex], analytics_repo=spy_analytics, log_dir=tmp_path
+        ) as pipeline:
+            assert isinstance(pipeline, GuardrailPipelinePort)
+            res_in = await pipeline.check_prompt("safe prompt token=mysecret99", request_id="req_1")
+            assert (res_in.verdict, res_in.direction) == (
+                GuardrailVerdict.ALLOW,
+                GuardrailDirection.INGRESS,
+            )
+            res_tool = await pipeline.check_prompt(
+                "safe tool output", direction=GuardrailDirection.TOOL_OUTPUT, request_id="req_2"
+            )
+            assert res_tool.direction is GuardrailDirection.TOOL_OUTPUT
 
-        # AUDIT_ONLY evaluates and audits BLOCK without raising even under HTTP_ERROR mode.
-        res_eg = await pipeline.check_response(
-            "q", "UNSAFE_TEXT email=dev@example.com", request_id="req_3"
-        )
-        assert (res_eg.verdict, res_eg.direction, res_eg.violated_policy) == (
-            GuardrailVerdict.BLOCK,
-            GuardrailDirection.EGRESS,
-            "BadOutput",
-        )
+            # AUDIT_ONLY evaluates, audits, and emits SECURITY_ALERT without raising.
+            res_eg = await pipeline.check_response(
+                "q", "UNSAFE_TEXT email=dev@example.com", request_id="req_3"
+            )
+            assert (res_eg.verdict, res_eg.direction, res_eg.violated_policy) == (
+                GuardrailVerdict.BLOCK,
+                GuardrailDirection.EGRESS,
+                "BadOutput",
+            )
 
-    # OFF mode returns passthrough ALLOW; failing analytics never breaks requests.
-    failing_analytics = _SpyAnalyticsRepo(fail_on_write=True)
-    cfg_off = GuardrailConfig(output_mode=GuardrailOutputMode.OFF)
-    with CompositeGuardrailPipeline(
-        cfg_off, providers=[regex], analytics_repo=failing_analytics, log_dir=tmp_path
-    ) as off_pipe:
-        res_off = await off_pipe.check_response("q", "UNSAFE_TEXT")
-        assert (res_off.verdict, res_off.provider) == (GuardrailVerdict.ALLOW, "allow-all")
+        # OFF mode returns passthrough ALLOW; failing analytics never breaks requests.
+        failing_analytics = _SpyAnalyticsRepo(fail_on_write=True)
+        cfg_off = GuardrailConfig(output_mode=GuardrailOutputMode.OFF)
+        with CompositeGuardrailPipeline(
+            cfg_off, providers=[regex], analytics_repo=failing_analytics, log_dir=tmp_path
+        ) as off_pipe:
+            res_off = await off_pipe.check_response("q", "UNSAFE_TEXT")
+            assert (res_off.verdict, res_off.provider) == (GuardrailVerdict.ALLOW, "allow-all")
+        await manager.flush()
+    finally:
+        manager.close()
+
+    sec_alerts = [e for e in manager.recent_alerts() if e.category is AlertCategory.SECURITY_ALERT]
+    assert len(sec_alerts) == 1
+    assert sec_alerts[0].component == "guardrails"
 
     audit_text = (tmp_path / "prompts_audit.jsonl").read_text(encoding="utf-8")
     assert "mysecret99" not in audit_text

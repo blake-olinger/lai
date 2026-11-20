@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -13,10 +14,12 @@ import respx
 from pydantic import ValidationError
 
 from lai.domain import (
+    AlertCategory,
     GuardrailBlockedError,
     GuardrailBlockMode,
     GuardrailConfig,
     GuardrailVerdict,
+    LoggingConfig,
     SafetyPrinciple,
 )
 from lai.domain.errors import InferenceBackendError, ValidationFailedError
@@ -33,7 +36,7 @@ from lai.guardrails import (
     ShieldGemmaCpuProvider,
     build_shieldgemma_server_args,
 )
-from lai.observability import bind_request_id
+from lai.observability import AlertManager, bind_request_id, configure_observability
 
 HTTP_OK = 200
 _VALID_SHA256 = "A" * 64
@@ -58,8 +61,8 @@ def test_guardrail_config_validation_sha256_revision_threads_and_thresholds() ->
         GuardrailConfig(violation_threshold=0.96, max_violation_threshold=0.95)
 
 
-def test_guardrail_runtime_lock_rules_and_pipeline_reconfigure(tmp_path: Path) -> None:
-    """Boot-only allow_runtime_disable and max_violation_threshold locks prevent runtime bypass."""
+async def test_guardrail_runtime_lock_rules_and_pipeline_reconfigure(tmp_path: Path) -> None:
+    """Boot-only allow_runtime_disable and max_violation_threshold locks emit SECURITY_ALERT."""
     boot_locked = GuardrailConfig(
         enabled=True,
         fail_open=False,
@@ -87,14 +90,31 @@ def test_guardrail_runtime_lock_rules_and_pipeline_reconfigure(tmp_path: Path) -
         {"max_violation_threshold": 0.95},
         {"violation_threshold": 0.91, "max_violation_threshold": 0.95},
     )
-    with CompositeGuardrailPipeline(
-        boot_locked, providers=[RegexPolicyGuardrailProvider()], log_dir=tmp_path
-    ) as pipeline:
-        for patch in forbidden_updates:
-            candidate = GuardrailConfig.model_validate({**boot_locked.model_dump(), **patch})
-            with pytest.raises(ValidationFailedError):
-                pipeline.reconfigure(candidate)
-        pipeline.reconfigure(allowed_upd)
+    manager = AlertManager(cooldown_seconds=0.0, log_dir=tmp_path / "alerts")
+    configure_observability(
+        LoggingConfig(log_dir=tmp_path / "alerts", enable_file_logs=True), manager
+    )
+    try:
+        with CompositeGuardrailPipeline(
+            boot_locked, providers=[RegexPolicyGuardrailProvider()], log_dir=tmp_path
+        ) as pipeline:
+            for patch in forbidden_updates:
+                candidate = GuardrailConfig.model_validate({**boot_locked.model_dump(), **patch})
+                with pytest.raises(ValidationFailedError):
+                    pipeline.reconfigure(candidate)
+            pipeline.reconfigure(allowed_upd)
+        await manager.flush()
+    finally:
+        manager.close()
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            handler.flush()
+            handler.close()
+        root.handlers.clear()
+
+    sec_alerts = [e for e in manager.recent_alerts() if e.category is AlertCategory.SECURITY_ALERT]
+    assert len(sec_alerts) == len(forbidden_updates)
+    assert all(e.component == "guardrails" for e in sec_alerts)
 
     # When booted with allow_runtime_disable=True, disabling/fail_open/OFF are permitted,
     # while boot max_violation_threshold still caps violation_threshold.

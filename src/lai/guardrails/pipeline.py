@@ -105,7 +105,7 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
         try:
             validate_guardrail_runtime_update(self._boot_config, config)
         except ValidationFailedError as exc:
-            self._log.warning(
+            self._log.error(
                 "guardrail_runtime_lock_rejected",
                 reason=exc.message,
                 field=exc.details.get("field", ""),

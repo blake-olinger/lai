@@ -157,7 +157,7 @@ def record_audit_and_log(
         **ctx.log_fields(),
     }
     if decision.verdict is GuardrailVerdict.BLOCK:
-        logger.warning(
+        logger.error(
             "guardrail_ruling",
             alert_category=AlertCategory.SECURITY_ALERT.value,
             **fields,
