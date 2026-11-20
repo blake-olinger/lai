@@ -299,6 +299,8 @@ Return ordered indexed chunks for file_id, optionally filtered by line range.
 | `file_id` | path | yes | string | - |
 | `start_line` | query | no | integer \| null | - |
 | `end_line` | query | no | integer \| null | - |
+| `limit` | query | no | integer | default=`200`; minimum=1; maximum=500 |
+| `offset` | query | no | integer | default=`0`; minimum=0 |
 
 **Responses**
 
@@ -866,6 +868,10 @@ Hot-swap OIDC authorization policy in place while preserving cached JWKS.
 | Field | Type | Required | Details |
 | --- | --- | --- | --- |
 | `oidc_admin_emails` | array[string] \| null | no | - |
+| `oidc_admin_roles` | array[string] \| null | no | - |
+| `oidc_admin_subjects` | array[string] \| null | no | - |
+| `oidc_allow_guest_users` | boolean \| null | no | - |
+| `oidc_allowed_client_ids` | array[string] \| null | no | - |
 | `oidc_allowed_domains` | array[string] \| null | no | - |
 | `oidc_allowed_emails` | array[string] \| null | no | - |
 | `oidc_audiences` | array[string] \| null | no | - |
@@ -1648,6 +1654,10 @@ Live OIDC authorization policy settings.
 | `issuer_url` | string | yes | - |
 | `jwks_url` | string | yes | - |
 | `oidc_admin_emails` | array[string] | no | - |
+| `oidc_admin_roles` | array[string] | no | - |
+| `oidc_admin_subjects` | array[string] | no | - |
+| `oidc_allow_guest_users` | boolean | no | default=`False` |
+| `oidc_allowed_client_ids` | array[string] | no | - |
 | `oidc_allowed_domains` | array[string] | no | - |
 | `oidc_allowed_emails` | array[string] | no | - |
 | `oidc_audiences` | array[string] | no | - |
@@ -2211,11 +2221,15 @@ Partial live update for limits, quotas, proxy trust, keepalive, and log level.
 <a id="schema-updateoidcconfigrequest"></a>
 ### `UpdateOidcConfigRequest`
 
-Partial live update for OIDC audiences, allowlists, scopes, claims, and leeway.
+Partial live update for OIDC audiences, client IDs, allowlists, roles, scopes, and leeway.
 
 | Field | Type | Required | Details |
 | --- | --- | --- | --- |
 | `oidc_admin_emails` | array[string] \| null | no | - |
+| `oidc_admin_roles` | array[string] \| null | no | - |
+| `oidc_admin_subjects` | array[string] \| null | no | - |
+| `oidc_allow_guest_users` | boolean \| null | no | - |
+| `oidc_allowed_client_ids` | array[string] \| null | no | - |
 | `oidc_allowed_domains` | array[string] \| null | no | - |
 | `oidc_allowed_emails` | array[string] \| null | no | - |
 | `oidc_audiences` | array[string] \| null | no | - |
@@ -2252,7 +2266,7 @@ Live self-update and rollback orchestration settings.
 | `enabled` | boolean | yes | - |
 | `github_repo` | string | yes | - |
 | `health_poll_interval_seconds` | number | yes | maximum=30.0; exclusiveMinimum=0.0 |
-| `health_timeout_seconds` | number | yes | maximum=600.0; exclusiveMinimum=0.0 |
+| `health_timeout_seconds` | number | yes | maximum=900.0; exclusiveMinimum=0.0 |
 | `health_url` | string | yes | - |
 | `keep_releases` | integer | yes | minimum=1.0; maximum=20.0 |
 | `releases_dir` | string | yes | - |

@@ -45,11 +45,13 @@ oidc_enabled: false
 oidc_issuer_url: "https://accounts.google.com"
 oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
 oidc_audience: null
-oidc_audiences: [] # Preferred multi-audience list (e.g. Web SPA + Desktop OAuth client IDs)
+oidc_audiences: [] # Expected JWT `aud` values (e.g. Entra API App ID or Google OAuth client ID)
+oidc_allowed_client_ids: [] # Optional calling client IDs (`azp`/`appid`) distinct from `aud` (Entra v2 SPA/Desktop)
 oidc_allowed_emails: []
 oidc_allowed_domains: []
 # Set to false for Microsoft Entra ID v2 tokens that omit `email_verified`
 oidc_require_email_verified: true
+oidc_allow_guest_users: false # Reject Entra B2B guest tokens (`acct != 0` or external `idp`)
 oidc_identity_claims:
   - "email"
   - "preferred_username"
@@ -63,7 +65,9 @@ oidc_default_scopes:
   - "chat:read"
   - "chat:write"
   - "tools:safe"
-oidc_admin_emails: []
+oidc_admin_emails: [] # Only grants ADMIN when `email_verified: true` or Entra `xms_edov: true`
+oidc_admin_roles: [] # Entra App Roles (`roles` claim) granting ADMIN (e.g. ["LAI.Admin"])
+oidc_admin_subjects: [] # Immutable `oid` (Entra) or `sub` identifiers granting ADMIN
 
 # Reverse-proxy client IP trust (enable only when traffic cannot bypass your proxy)
 trust_cloudflare_headers: false
@@ -105,8 +109,8 @@ guardrails:
   hf_filename: "shieldgemma-2b.Q4_K_M.gguf"
   hf_revision: "8755ece4b20dd84d7564131e385d9c205d03621a"
   sha256: "47b0c3f4ec0bf93659ab2fc92cf2041374ef78bf1cb5b8c790421f463e7b7979"
-  ctx_size: 4096
-  parallel_slots: 2
+  ctx_size: 8192
+  parallel_slots: 1
   timeout_seconds: 30.0
   violation_threshold: 0.80
   fail_open: false
@@ -163,7 +167,7 @@ updates:
   backups_dir: "/var/lib/lai/backups"
   service_name: "lai.service"
   health_url: "http://127.0.0.1:8400/v1/health"
-  health_timeout_seconds: 60.0
+  health_timeout_seconds: 300.0
   health_poll_interval_seconds: 1.0
   keep_releases: 3
   auto_rollback: true

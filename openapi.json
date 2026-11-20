@@ -2066,6 +2066,32 @@
             "title": "Oidc Admin Emails",
             "type": "array"
           },
+          "oidc_admin_roles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Admin Roles",
+            "type": "array"
+          },
+          "oidc_admin_subjects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Admin Subjects",
+            "type": "array"
+          },
+          "oidc_allow_guest_users": {
+            "default": false,
+            "title": "Oidc Allow Guest Users",
+            "type": "boolean"
+          },
+          "oidc_allowed_client_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Allowed Client Ids",
+            "type": "array"
+          },
           "oidc_allowed_domains": {
             "items": {
               "type": "string"
@@ -4138,6 +4164,7 @@
             "anyOf": [
               {
                 "exclusiveMinimum": 0.0,
+                "maximum": 300.0,
                 "type": "number"
               },
               {
@@ -4333,7 +4360,7 @@
       },
       "UpdateOidcConfigRequest": {
         "additionalProperties": false,
-        "description": "Partial live update for OIDC audiences, allowlists, scopes, claims, and leeway.",
+        "description": "Partial live update for OIDC audiences, client IDs, allowlists, roles, scopes, and leeway.",
         "properties": {
           "oidc_admin_emails": {
             "anyOf": [
@@ -4348,6 +4375,59 @@
               }
             ],
             "title": "Oidc Admin Emails"
+          },
+          "oidc_admin_roles": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Admin Roles"
+          },
+          "oidc_admin_subjects": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Admin Subjects"
+          },
+          "oidc_allow_guest_users": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Allow Guest Users"
+          },
+          "oidc_allowed_client_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Allowed Client Ids"
           },
           "oidc_allowed_domains": {
             "anyOf": [
@@ -4501,7 +4581,7 @@
             "anyOf": [
               {
                 "exclusiveMinimum": 0.0,
-                "maximum": 600.0,
+                "maximum": 900.0,
                 "type": "number"
               },
               {
@@ -4563,7 +4643,7 @@
           },
           "health_timeout_seconds": {
             "exclusiveMinimum": 0.0,
-            "maximum": 600.0,
+            "maximum": 900.0,
             "title": "Health Timeout Seconds",
             "type": "number"
           },
@@ -5271,6 +5351,29 @@
                 }
               ],
               "title": "End Line"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
             }
           }
         ],

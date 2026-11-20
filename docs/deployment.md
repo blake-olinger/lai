@@ -63,7 +63,7 @@ Provision FHS paths (`/opt/lai`, `/etc/lai`, `/var/lib/lai`, `/var/log/lai`), un
 service user, and hardened systemd units with the included Ubuntu installer:
 
 ```bash
-sudo bash deploy/systemd/install-ubuntu.sh
+sudo bash deploy/systemd/install-ubuntu.sh --version <RELEASE_VERSION>
 sudo cp deploy/cloudflare/config.test.example.yaml /etc/lai/config.yaml
 sudo chown root:lai /etc/lai/config.yaml
 sudo chmod 0640 /etc/lai/config.yaml
@@ -132,7 +132,7 @@ Provision an Azure GPU VM (Ubuntu 24.04 LTS with NVIDIA CUDA drivers) using the 
 Azure production overlay:
 
 ```bash
-sudo bash deploy/systemd/install-ubuntu.sh
+sudo bash deploy/systemd/install-ubuntu.sh --version <RELEASE_VERSION>
 sudo cp deploy/azure/config.azure-prod.example.yaml /etc/lai/config.yaml
 sudo cp deploy/azure/nginx-lai.conf.example /etc/nginx/sites-available/lai.conf
 sudo ln -sf /etc/nginx/sites-available/lai.conf /etc/nginx/sites-enabled/lai.conf
@@ -154,7 +154,8 @@ EOF
 
 1. Register an API application in **Microsoft Entra ID → App registrations** and note the
    **Directory (tenant) ID** and **Application (client) ID**.
-2. Expose an API scope for your web/desktop clients and configure v2.0 tokens (`requestedAccessTokenVersion: 2`).
+2. Expose an API scope for your web/desktop clients, configure v2.0 access tokens
+   (`requestedAccessTokenVersion: 2`), and define an App Role (e.g. `LAI.Admin`) for administrators.
 3. Configure `/etc/lai/config.yaml`:
 
 ```yaml
@@ -167,20 +168,30 @@ oidc_issuer_url: "https://login.microsoftonline.com/<TENANT_ID>/v2.0"
 oidc_jwks_url: "https://login.microsoftonline.com/<TENANT_ID>/discovery/v2.0/keys"
 oidc_audiences:
   - "<ENTRA_API_APP_CLIENT_ID>"
+oidc_allowed_client_ids:
+  - "<WEB_SPA_CLIENT_ID>"
+  - "<DESKTOP_APP_CLIENT_ID>"
 oidc_identity_claims:
   - "email"
   - "preferred_username"
   - "upn"
-# Entra ID v2 tokens frequently omit `email_verified`; tenant domain allowlist enforces membership.
+# Entra ID v2 tokens frequently omit `email_verified`; use `oidc_admin_roles` or
+# `oidc_admin_subjects` for admin elevation (unverified email never grants ADMIN).
 oidc_require_email_verified: false
+oidc_allow_guest_users: false
 oidc_allowed_domains:
   - "corp.example.com"
-oidc_admin_emails:
-  - "ai-admin@corp.example.com"
+oidc_admin_roles:
+  - "LAI.Admin"
+oidc_admin_subjects: []
+oidc_admin_emails: []
 ```
 
-LAI resolves the caller's email from the first non-empty claim in `oidc_identity_claims` and binds
-client app identity fail-closed via `azp` → `appid` → `aud` against `oidc_audiences`.
+LAI binds principal identity to `oidc:<normalized_issuer>:<oid_or_sub>` (stable across SPA and
+Desktop client apps via Entra `oid`), verifies token `aud` against `oidc_audiences` and OAuth
+caller `azp`/`appid` against `oidc_allowed_client_ids`, rejects Entra B2B guests unless
+`oidc_allow_guest_users: true`, and requires `oidc_admin_roles`, `oidc_admin_subjects`, or a
+verified email (`email_verified=true` / `xms_edov=true`) for `ApiScope.ADMIN`.
 
 ### Reverse Proxy Client IP Trust (`trusted_proxy_cidrs` & `proxy_ip_header`)
 
@@ -252,11 +263,13 @@ sudo /opt/lai/current/.venv/bin/lai upgrade check --config /etc/lai/config.yaml
 sudo /opt/lai/current/.venv/bin/lai upgrade apply --config /etc/lai/config.yaml --dry-run
 sudo /opt/lai/current/.venv/bin/lai upgrade apply --config /etc/lai/config.yaml --with-binaries
 
-# CI/CD air-gapped push deploy from a staged local wheel + explicit SHA-256
+# CI/CD air-gapped push deploy from a staged local wheel + locked hashed requirements
 sudo /opt/lai/current/.venv/bin/lai upgrade apply \
   --config /etc/lai/config.yaml \
   --wheel /tmp/lai-0.2.0-py3-none-any.whl \
-  --sha256 "<64-hex-sha256>"
+  --sha256 "<64-hex-wheel-sha256>" \
+  --requirements /tmp/requirements-lock.txt \
+  --requirements-sha256 "<64-hex-requirements-sha256>"
 
 # Roll back immediately to the previous slot (and optionally restore a pre-upgrade DB backup)
 sudo /opt/lai/current/.venv/bin/lai upgrade rollback \
@@ -311,7 +324,7 @@ and `top_policies`).
 | --- | --- | --- |
 | **Alerting** | `GET` / `PATCH /v1/system/alerting`, `POST /v1/system/alerting/test` | SMTP host/port/TLS/recipients/filters, webhook toggle/filters, cooldown, `alert_on_errors`, `alert_on_timeouts` |
 | **Analytics** | `GET /v1/system/analytics`, `GET` / `PATCH /v1/system/analytics/config` | `enabled`, `retention_days` (prunes expired buckets immediately) |
-| **OIDC / Auth** | `GET` / `PATCH /v1/system/config/oidc` | `oidc_audiences`, `oidc_allowed_emails`, `oidc_allowed_domains`, `oidc_admin_emails`, `oidc_default_scopes`, `oidc_require_email_verified`, `oidc_identity_claims`, `oidc_leeway_seconds` |
+| **OIDC / Auth** | `GET` / `PATCH /v1/system/config/oidc` | `oidc_audiences`, `oidc_allowed_client_ids`, `oidc_allowed_emails`, `oidc_allowed_domains`, `oidc_admin_emails`, `oidc_admin_roles`, `oidc_admin_subjects`, `oidc_allow_guest_users`, `oidc_default_scopes`, `oidc_require_email_verified`, `oidc_identity_claims`, `oidc_leeway_seconds` |
 | **CORS** | `GET` / `PATCH /v1/system/config/cors` | `cors_allowed_origins`, `cors_extra_allow_headers` |
 | **Limits & Proxy** | `GET` / `PATCH /v1/system/config/limits` | `rate_limit_rpm`, `ip_rate_limit_rpm`, quotas, queue bounds, `max_upload_bytes`, keepalives, `trust_cloudflare_headers`, `trusted_proxy_cidrs`, `proxy_ip_header`, `log_level` |
 | **Guardrails Policy** | `GET` / `PATCH /v1/system/config/guardrails` | `enabled`, `block_mode`, `output_mode`, `refusal_text`, `violation_threshold`, `fail_open`, `timeout_seconds` (enforcing boot locks!) |
