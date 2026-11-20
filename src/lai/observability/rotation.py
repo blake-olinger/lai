@@ -1,18 +1,31 @@
-"""24-hour UTC rotating file handlers and thread-safe stream writers."""
+"""24-hour UTC POSIX rotating file handlers and thread-safe stream writers."""
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import logging
 import logging.handlers
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from io import TextIOWrapper
     from types import TracebackType
+
+_LOG_FILE_MODE = 0o640
+
+
+def _apply_log_file_permissions(path: Path) -> None:
+    """Apply restrictive POSIX permissions (0o640) to a log file best-effort."""
+    if sys.platform == "win32":
+        return
+    with contextlib.suppress(OSError):
+        path.chmod(_LOG_FILE_MODE)
 
 
 def _gzip_namer(default_name: str) -> str:
@@ -31,6 +44,7 @@ def _gzip_rotator(source: str, dest: str) -> None:
         with source_path.open("rb") as src_file, gzip.open(tmp_path, "wb") as gz_file:
             shutil.copyfileobj(src_file, gz_file)
         tmp_path.replace(dest_path)
+        _apply_log_file_permissions(dest_path)
     except OSError:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -38,10 +52,16 @@ def _gzip_rotator(source: str, dest: str) -> None:
 
 
 class SafeTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
-    """TimedRotatingFileHandler resilient to transient Windows file locks."""
+    """POSIX TimedRotatingFileHandler applying 0o640 permissions and safe rollover recovery."""
+
+    def _open(self) -> TextIOWrapper:
+        """Open the active log file and apply 0o640 POSIX permissions best-effort."""
+        stream = super()._open()
+        _apply_log_file_permissions(Path(self.baseFilename))
+        return stream
 
     def doRollover(self) -> None:  # noqa: N802
-        """Perform rollover while recovering gracefully from transient PermissionError."""
+        """Perform UTC rollover while recovering gracefully from filesystem permission errors."""
         try:
             super().doRollover()
         except PermissionError:

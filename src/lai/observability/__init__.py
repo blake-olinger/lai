@@ -1,8 +1,9 @@
-"""24-hour rotating structured logging, stream writers, alerting, and scrubbing."""
+"""24-hour rotating structured logging, stream writers, integrity, alerting, and scrubbing."""
 
 from __future__ import annotations
 
 from lai.observability.alerts import AlertingLogHandler, AlertManager, WebhookAlertSink
+from lai.observability.integrity import compute_file_sha256, verify_file_sha256
 from lai.observability.logging import (
     bind_log_context,
     bind_request_id,
@@ -46,6 +47,7 @@ __all__ = [
     "bind_request_id",
     "build_alert_email",
     "build_alert_sinks",
+    "compute_file_sha256",
     "configure_observability",
     "create_daily_rotating_handler",
     "deliver_test_alert",
@@ -58,4 +60,5 @@ __all__ = [
     "scrub_sensitive_text",
     "set_request_id",
     "set_runtime_log_level",
+    "verify_file_sha256",
 ]
