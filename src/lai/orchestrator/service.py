@@ -8,9 +8,7 @@ from typing import TYPE_CHECKING
 from lai.domain.chat import (
     ContextMode,
     Message,
-    MessageRole,
     OrchestratorEvent,
-    TokenUsage,
     TurnCompletedEvent,
     TurnOutput,
 )
@@ -18,6 +16,7 @@ from lai.domain.errors import InferenceBackendError
 from lai.ingestion.detector import estimate_tokens
 from lai.observability.logging import bind_log_context, get_component_logger
 from lai.orchestrator._direct import DirectDeps, run_direct_stream
+from lai.orchestrator._egress import EgressContext, finalize_stream_with_egress
 from lai.orchestrator._helpers import build_trimmed_history, persist_turn_if_session
 from lai.orchestrator._resume import (
     ResumeDeps,
@@ -26,7 +25,6 @@ from lai.orchestrator._resume import (
 )
 from lai.orchestrator._retrieval import run_retrieval_stream
 from lai.orchestrator._retrieval_search import RetrievalDeps
-from lai.orchestrator._stream import TurnOutcome
 from lai.orchestrator._turn_prep import (
     PreparedTurnContext,
     TurnPrepDeps,
@@ -46,6 +44,7 @@ if TYPE_CHECKING:
     from lai.domain.chat import Session, TurnInput
     from lai.domain.inference import ModelProfile
     from lai.domain.tools import ToolApprovalRecord, ToolResult
+    from lai.orchestrator._stream import TurnOutcome
     from lai.ports.guardrails import GuardrailPipelinePort
     from lai.ports.inference import InferenceProviderPort
     from lai.ports.repositories import (
@@ -111,6 +110,7 @@ class TurnOrchestrator(OrchestratorPort):
             session_repo=session_repo,
             session_gate=session_gate,
             retrieval=self._retrieval_deps,
+            guardrail_pipeline=guardrail_pipeline,
             client_app_repo=client_app_repo,
             default_profile=model_profile,
         )
@@ -148,6 +148,7 @@ class TurnOrchestrator(OrchestratorPort):
                     self._guardrail_pipeline,
                     turn_input,
                     principal_id=principal.principal_id,
+                    session=session,
                 )
                 if blocked is not None:
                     async for event in handle_guardrail_block(
@@ -234,55 +235,39 @@ class TurnOrchestrator(OrchestratorPort):
             has_session=prep.session is not None,
         )
 
-        outcome: TurnOutcome | None = None
-        async for item in self._dispatch_mode(
-            prep=prep, turn_input=turn_input, principal=principal
-        ):
-            if isinstance(item, TurnOutcome):
-                outcome = item
-            else:
-                yield item
-
-        resolved = outcome or TurnOutcome(content="", thinking="", citations=(), usage=TokenUsage())
-        assistant_msg = Message(
+        egress_ctx = EgressContext(
+            settings=self._settings,
+            guardrail_pipeline=self._guardrail_pipeline,
+            user_prompt=turn_input.user_message,
             session_id=turn_input.session_id,
             project_id=turn_input.project_id,
-            role=MessageRole.ASSISTANT,
-            content=resolved.content,
-            thinking=resolved.thinking or None,
-            citations=resolved.citations,
-            tool_calls=(
-                (resolved.pending_tool_call,) if resolved.pending_tool_call is not None else ()
-            ),
-            usage=resolved.usage,
-        )
-        await persist_turn_if_session(
-            self._session_repo,
-            prep.session,
-            turn_input,
-            turn_input.user_message,
-            assistant_msg,
-            intermediate_messages=resolved.intermediate_messages,
+            principal_id=principal.principal_id,
         )
 
-        self._log.info(
-            "turn_completed",
-            context_mode=prep.context_mode.value,
-            prompt_tokens=resolved.usage.prompt_tokens,
-            completion_tokens=resolved.usage.completion_tokens,
-            citation_count=len(resolved.citations),
-        )
-        yield TurnCompletedEvent(
-            output=TurnOutput(
-                session_id=turn_input.session_id,
-                message=assistant_msg,
-                context_mode_used=prep.context_mode,
-                citations=resolved.citations,
-                usage=resolved.usage,
-                pending_approval_id=resolved.pending_approval_id,
-                pending_client_tool_call=resolved.pending_client_tool_call,
+        async def _persist(assistant_msg: Message, resolved: TurnOutcome) -> None:
+            await persist_turn_if_session(
+                self._session_repo,
+                prep.session,
+                turn_input,
+                turn_input.user_message,
+                assistant_msg,
+                intermediate_messages=resolved.intermediate_messages,
             )
-        )
+            self._log.info(
+                "turn_completed",
+                context_mode=prep.context_mode.value,
+                prompt_tokens=resolved.usage.prompt_tokens,
+                completion_tokens=resolved.usage.completion_tokens,
+                citation_count=len(assistant_msg.citations),
+            )
+
+        async for event in finalize_stream_with_egress(
+            stream=self._dispatch_mode(prep=prep, turn_input=turn_input, principal=principal),
+            ctx=egress_ctx,
+            context_mode=prep.context_mode,
+            persist_assistant=_persist,
+        ):
+            yield event
 
     async def _dispatch_mode(
         self,

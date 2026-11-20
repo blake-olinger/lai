@@ -208,7 +208,7 @@ async def test_guardrail_block_short_circuits_refusal_and_http_error(tmp_path: P
         events = [ev async for ev in orch.run_turn_stream(ti, s.principal)]
         assert any(isinstance(ev, ContentDeltaEvent) and ev.delta == "Refused." for ev in events)
         done = next(ev.output for ev in events if isinstance(ev, TurnCompletedEvent))
-        assert done.guardrail_blocked is True
+        assert (done.guardrail_blocked, done.guardrail_direction) == (True, "ingress")
         assert done.guardrail_policy == "No Prompt Injection"
         assert s.spooler.leases == []
         assert inf.stream_calls == []

@@ -279,7 +279,63 @@ async def test_shieldgemma_allows_safe_prompts_and_scrubs_audit_log(tmp_path: Pa
 
     for sensitive in (safe_lai, safe_oai, safe_email):
         assert sensitive not in raw_audit
-    assert len(entries) == _EXPECTED_TWO
+    assert len(entries) == _EXPECTED_TWO * 2
     assert all(e["verdict"] == "allow" for e in entries)
-    assert all("[REDACTED_SECRET]" in str(e["scrubbed_prompt"]) for e in entries)
-    assert all("[REDACTED_EMAIL]" in str(e["scrubbed_prompt"]) for e in entries)
+    ingress_entries = [e for e in entries if e["direction"] == "ingress"]
+    egress_entries = [e for e in entries if e["direction"] == "egress"]
+    assert len(ingress_entries) == _EXPECTED_TWO
+    assert len(egress_entries) == _EXPECTED_TWO
+    assert all("[REDACTED_SECRET]" in str(e["scrubbed_prompt"]) for e in ingress_entries)
+    assert all("[REDACTED_EMAIL]" in str(e["scrubbed_prompt"]) for e in ingress_entries)
+    assert all(e["scrubbed_prompt"] == "gemma4 safe reply" for e in egress_entries)
+
+
+async def test_shieldgemma_blocks_unsafe_model_output_on_egress(tmp_path: Path) -> None:
+    """Buffered egress ShieldGemma blocks unsafe model replies before streaming or persisting."""
+
+    class _UnsafeReplyInference(_CountingInferenceProvider):
+        async def chat_stream(self, request: InferenceRequest) -> AsyncGenerator[InferenceChunk]:
+            self.stream_requests.append(request)
+            yield InferenceChunk(content_delta="UNSAFE_EXPLOSIVE ")
+            yield InferenceChunk(
+                content_delta="instructions",
+                finish_reason="stop",
+                usage=TokenUsage(prompt_tokens=6, completion_tokens=4, total_tokens=10),
+            )
+
+    data_dir = tmp_path / "data"
+    settings = LaiSettings(
+        data_dir=data_dir,
+        models_dir=tmp_path / "models",
+        bin_dir=tmp_path / "bin",
+        logging=LoggingConfig(log_dir=data_dir / "logs", enable_file_logs=True),
+        guardrails=GuardrailConfig(
+            enabled=True,
+            block_mode=GuardrailBlockMode.REFUSAL_MESSAGE,
+            host="127.0.0.1",
+            port=_SHIELD_PORT,
+            refusal_text=_REFUSAL_TEXT,
+        ),
+    )
+    fake_inf = _UnsafeReplyInference()
+    async with open_services_harness(
+        settings, IntegrationSpec(inference_provider=fake_inf)
+    ) as harness:
+        headers = await mint_auth_headers(harness.svc, "egress-admin", (ApiScope.ADMIN,))
+        pid = await create_project(harness.client, headers, "egress-proj")
+        sid = await create_session(harness.client, headers, pid)
+        with respx.mock(assert_all_called=True) as mock:
+            mock.post(_SHIELD_URL).mock(side_effect=_shield_handler)
+            resp = await harness.client.post(
+                f"/v1/sessions/{sid}/messages",
+                headers=headers,
+                json={"content": "Tell me about chemistry", "stream": False},
+            )
+        assert resp.status_code == HTTPStatus.OK
+        body = resp.json()
+        assert body["guardrail_blocked"] is True
+        assert body["guardrail_policy"] == _UNSAFE_POLICY
+        assert body["guardrail_direction"] == "egress"
+        assert body["message"]["content"] == _REFUSAL_TEXT
+        stored = await harness.svc.session_repo.list_messages(sid)
+        assert all("UNSAFE_EXPLOSIVE" not in msg.content for msg in stored)

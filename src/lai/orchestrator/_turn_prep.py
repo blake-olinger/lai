@@ -16,7 +16,7 @@ from lai.domain.chat import (
     TurnOutput,
 )
 from lai.domain.errors import AuthorizationError, GuardrailBlockedError
-from lai.domain.guardrails import GuardrailBlockMode, GuardrailVerdict
+from lai.domain.guardrails import GuardrailBlockMode, GuardrailDirection, GuardrailVerdict
 from lai.observability.logging import get_component_logger, get_request_id
 from lai.orchestrator._helpers import (
     persist_turn_if_session,
@@ -76,13 +76,21 @@ async def scan_turn_guardrails(
     turn_input: TurnInput,
     *,
     principal_id: str,
+    session: Session | None = None,
 ) -> GuardrailDecision | None:
-    """Scan all non-empty extra caller prompts and user_message; return first BLOCK decision."""
-    prompts = [text for text in turn_input.extra_guardrail_prompts if text.strip()]
-    prompts.append(turn_input.user_message)
+    """Scan session/turn system prompts, extra prompts, and user_message; return first BLOCK."""
+    candidates: list[str] = []
+    if session is not None and session.system_prompt and session.system_prompt.strip():
+        candidates.append(session.system_prompt)
+    if turn_input.system_prompt and turn_input.system_prompt.strip():
+        candidates.append(turn_input.system_prompt)
+    candidates.extend(text for text in turn_input.extra_guardrail_prompts if text.strip())
+    candidates.append(turn_input.user_message)
+    prompts = list(dict.fromkeys(candidates))
     for prompt in prompts:
         decision = await guardrail_pipeline.check_prompt(
             prompt,
+            direction=GuardrailDirection.INGRESS,
             request_id=get_request_id(),
             session_id=turn_input.session_id,
             project_id=turn_input.project_id,
@@ -143,6 +151,7 @@ async def handle_guardrail_block(
             usage=TokenUsage(),
             guardrail_blocked=True,
             guardrail_policy=decision.violated_policy,
+            guardrail_direction=decision.direction.value,
         )
     )
 

@@ -14,9 +14,6 @@ from lai.domain.chat import (
     MessageRole,
     OrchestratorEvent,
     ProgressEvent,
-    TokenUsage,
-    TurnCompletedEvent,
-    TurnOutput,
 )
 from lai.domain.errors import AuthorizationError, NotFoundError
 from lai.domain.inference import InferenceMessage
@@ -24,13 +21,13 @@ from lai.domain.scheduler import JobPriority, LeaseRequest
 from lai.domain.tools import PermissionTier, ToolExecutionContext, ToolExecutionTarget
 from lai.ingestion.detector import estimate_tokens
 from lai.observability.logging import bind_log_context, get_component_logger, get_request_id
+from lai.orchestrator._egress import EgressContext, finalize_stream_with_egress
 from lai.orchestrator._helpers import (
     build_inference_tool_defs,
     build_trimmed_history,
     resolve_model_profile,
     resolve_target_files,
 )
-from lai.orchestrator._stream import TurnOutcome
 from lai.orchestrator._tool_loop import ToolLoopParams, run_tool_loop
 from lai.orchestrator.prompts import build_system_prompt
 
@@ -42,6 +39,8 @@ if TYPE_CHECKING:
     from lai.domain.inference import ModelProfile
     from lai.domain.tools import ToolApprovalRecord, ToolResult, ToolSpec
     from lai.orchestrator._retrieval_search import RetrievalDeps
+    from lai.orchestrator._stream import TurnOutcome
+    from lai.ports.guardrails import GuardrailPipelinePort
     from lai.ports.repositories import ClientAppRepositoryPort, SessionRepositoryPort
     from lai.ports.scheduler import SessionGatePort
 
@@ -56,6 +55,7 @@ class ResumeDeps:
     session_repo: SessionRepositoryPort
     session_gate: SessionGatePort
     retrieval: RetrievalDeps
+    guardrail_pipeline: GuardrailPipelinePort | None = None
     client_app_repo: ClientAppRepositoryPort | None = None
     default_profile: ModelProfile | None = None
 
@@ -249,8 +249,36 @@ async def run_client_tool_resume_stream(
                 stage="approval_resume",
                 message="Resuming turn after client tool execution.",
             )
-            outcome: TurnOutcome | None = None
-            async for item in run_tool_loop(
+            last_user_prompt = next(
+                (m.content for m in reversed(existing) if m.role is MessageRole.USER and m.content),
+                f"Tool result for {approval.tool_name}",
+            )
+            egress_ctx = EgressContext(
+                settings=deps.settings,
+                guardrail_pipeline=deps.guardrail_pipeline,
+                user_prompt=last_user_prompt,
+                session_id=session.id,
+                project_id=session.project_id,
+                principal_id=principal.principal_id,
+            )
+
+            async def _persist(assistant_msg: Message, resolved: TurnOutcome) -> None:
+                for inter_msg in resolved.intermediate_messages:
+                    await deps.session_repo.add_message(
+                        Message(
+                            session_id=session.id,
+                            project_id=session.project_id,
+                            role=inter_msg.role,
+                            content=inter_msg.content,
+                            tool_calls=inter_msg.tool_calls,
+                            tool_call_id=inter_msg.tool_call_id,
+                            tool_name=inter_msg.name,
+                            created_at=assistant_msg.created_at,
+                        )
+                    )
+                await deps.session_repo.add_message(assistant_msg)
+
+            loop_stream = run_tool_loop(
                 ToolLoopParams(
                     deps=deps.retrieval,
                     conversation=conversation,
@@ -265,53 +293,11 @@ async def run_client_tool_resume_stream(
                     target_files=target_files,
                     ranked_hits=(),
                 )
+            )
+            async for event in finalize_stream_with_egress(
+                stream=loop_stream,
+                ctx=egress_ctx,
+                context_mode=ContextMode.RETRIEVAL,
+                persist_assistant=_persist,
             ):
-                if isinstance(item, TurnOutcome):
-                    outcome = item
-                else:
-                    yield item
-
-            resolved = outcome or TurnOutcome(
-                content="",
-                thinking="",
-                citations=(),
-                usage=TokenUsage(),
-            )
-            assistant_msg = Message(
-                session_id=session.id,
-                project_id=session.project_id,
-                role=MessageRole.ASSISTANT,
-                content=resolved.content,
-                thinking=resolved.thinking or None,
-                citations=resolved.citations,
-                tool_calls=(
-                    (resolved.pending_tool_call,) if resolved.pending_tool_call is not None else ()
-                ),
-                usage=resolved.usage,
-            )
-            for inter_msg in resolved.intermediate_messages:
-                await deps.session_repo.add_message(
-                    Message(
-                        session_id=session.id,
-                        project_id=session.project_id,
-                        role=inter_msg.role,
-                        content=inter_msg.content,
-                        tool_calls=inter_msg.tool_calls,
-                        tool_call_id=inter_msg.tool_call_id,
-                        tool_name=inter_msg.name,
-                        created_at=assistant_msg.created_at,
-                    )
-                )
-            await deps.session_repo.add_message(assistant_msg)
-
-            yield TurnCompletedEvent(
-                output=TurnOutput(
-                    session_id=session.id,
-                    message=assistant_msg,
-                    context_mode_used=ContextMode.RETRIEVAL,
-                    citations=resolved.citations,
-                    usage=resolved.usage,
-                    pending_approval_id=resolved.pending_approval_id,
-                    pending_client_tool_call=resolved.pending_client_tool_call,
-                )
-            )
+                yield event
