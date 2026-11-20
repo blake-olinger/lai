@@ -95,6 +95,10 @@ class PromptAuditEntry(StrictModel):
     scrubbed_prompt: str
 
 
+_DEFAULT_SHIELDGEMMA_HF_REVISION = "8755ece4b20dd84d7564131e385d9c205d03621a"
+_DEFAULT_SHIELDGEMMA_SHA256 = "47b0c3f4ec0bf93659ab2fc92cf2041374ef78bf1cb5b8c790421f463e7b7979"
+
+
 class GuardrailConfig(StrictModel):
     """Configuration for ShieldGemma-2B ingress and egress guardrail evaluation."""
 
@@ -110,8 +114,8 @@ class GuardrailConfig(StrictModel):
     hf_repo: str = "QuantFactory/shieldgemma-2b-GGUF"
     fallback_hf_repo: str = "mradermacher/shieldgemma-2b-GGUF"
     hf_filename: str = "shieldgemma-2b.Q4_K_M.gguf"
-    hf_revision: str | None = None
-    sha256: str | None = None
+    hf_revision: str | None = _DEFAULT_SHIELDGEMMA_HF_REVISION
+    sha256: str | None = _DEFAULT_SHIELDGEMMA_SHA256
     cpu_threads: int = Field(default_factory=_default_cpu_threads, ge=1)
     ctx_size: int = Field(default=4096, ge=512)
     parallel_slots: int = Field(default=2, ge=1)

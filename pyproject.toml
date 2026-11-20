@@ -17,7 +17,6 @@ keywords = [
     "local-ai",
     "fastapi",
     "llama-cpp",
-    "ollama",
     "guardrails",
     "rag",
     "oidc",
@@ -28,7 +27,6 @@ classifiers = [
     "Environment :: Console",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
-    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
@@ -222,7 +220,7 @@ layers = [
     "lai.cli",
     "lai.api",
     "lai.orchestrator",
-    "lai.scheduler | lai.tools | lai.guardrails | lai.inference | lai.ingestion | lai.db | lai.security | lai.config",
+    "lai.scheduler | lai.tools | lai.guardrails | lai.inference | lai.ingestion | lai.db | lai.security | lai.config | lai.updates",
     "lai.observability",
     "lai.ports",
     "lai.domain",
@@ -240,6 +238,7 @@ modules = [
     "lai.tools",
     "lai.scheduler",
     "lai.config",
+    "lai.updates",
 ]
 
 [[tool.importlinter.contracts]]

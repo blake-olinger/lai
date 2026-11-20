@@ -16,6 +16,7 @@ MutationTier = Literal["critical", "full"]
 CRITICAL_MUTATION_TARGETS: tuple[str, ...] = (
     # 12 core algorithmic, security, scheduling, and guardrail modules
     "src/lai/observability/alerts.py",
+    "src/lai/observability/integrity.py",
     "src/lai/observability/scrubber.py",
     "src/lai/security/keys.py",
     "src/lai/security/scopes.py",
@@ -26,8 +27,9 @@ CRITICAL_MUTATION_TARGETS: tuple[str, ...] = (
     "src/lai/scheduler/session_gate.py",
     "src/lai/domain/rrf.py",
     "src/lai/orchestrator/classifier.py",
+    "src/lai/orchestrator/_egress.py",
     "src/lai/orchestrator/windower.py",
-    # High-risk domain, security, guardrail, tool dispatch, and API modules
+    # High-risk domain, security, guardrail, tool dispatch, updates, and API modules
     "src/lai/domain/auth.py",
     "src/lai/security/cloudflare.py",
     "src/lai/security/oidc_provider.py",
@@ -44,6 +46,8 @@ CRITICAL_MUTATION_TARGETS: tuple[str, ...] = (
     "src/lai/api/_tenancy.py",
     "src/lai/api/_client_auth.py",
     "src/lai/config/_validators.py",
+    "src/lai/updates/sources.py",
+    "src/lai/updates/coordinator.py",
 )
 
 FULL_MUTATION_TARGETS: tuple[str, ...] = (
@@ -63,11 +67,13 @@ FULL_MUTATION_TARGETS: tuple[str, ...] = (
     "src/lai/orchestrator/_helpers.py",
     "src/lai/orchestrator/_resume.py",
     "src/lai/orchestrator/aggregator.py",
+    "src/lai/db/backup.py",
     "src/lai/db/project_repo.py",
     "src/lai/db/tool_repo.py",
     "src/lai/db/client_app_repo.py",
     "src/lai/db/session_repo.py",
     "src/lai/db/file_repo.py",
+    "src/lai/updates/slot_manager.py",
 )
 
 MUTATION_TIERS: dict[MutationTier, tuple[str, ...]] = {
