@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import httpx
 
-from lai.domain.errors import InferenceBackendError
 from lai.domain.guardrails import (
     GuardrailConfig,
     GuardrailDecision,
@@ -15,14 +14,26 @@ from lai.domain.guardrails import (
     GuardrailVerdict,
 )
 from lai.domain.inference import BackendHealth
-from lai.domain.observability import AlertCategory
+from lai.guardrails._chunking import (
+    bisect_text,
+    clip_prompt_context,
+    compute_slot_text_budget,
+    estimate_conservative_tokens,
+    split_overlapping_windows,
+)
+from lai.guardrails._shieldgemma_http import (
+    build_completion_payload,
+    is_context_size_error,
+    parse_completion_response,
+    parse_health_response,
+    raise_http_error,
+    raise_timeout_error,
+)
 from lai.guardrails.prompts import (
     DEFAULT_SAFETY_PRINCIPLES,
     OUTPUT_SAFETY_PRINCIPLES,
     build_shieldgemma_prompt,
     build_shieldgemma_response_prompt,
-    compute_yes_probability,
-    parse_shieldgemma_verdict,
 )
 from lai.observability.logging import get_component_logger
 from lai.observability.scrubber import fingerprint_prompt, scrub_sensitive_text
@@ -33,31 +44,9 @@ if TYPE_CHECKING:
 
     from lai.domain.guardrails import SafetyPrinciple
 
-_HTTP_OK = 200
 _MS_PER_SECOND = 1000.0
-_N_PREDICT = 4
-_N_PROBS = 5
-_STOP_TOKENS: tuple[str, ...] = ("\n", "<end_of_turn>")
-_HEALTHY_STATUSES: frozenset[str] = frozenset({"ok", "ready", "healthy"})
-
-
-def _parse_json_object(response: httpx.Response) -> dict[str, object] | None:
-    """Decode an HTTP response body into a string-keyed dict if valid JSON object."""
-    try:
-        parsed: object = response.json()
-    except ValueError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    raw_map = cast("dict[object, object]", parsed)
-    return {str(key): value for key, value in raw_map.items()}
-
-
-def _non_negative_int(value: object) -> int:
-    """Coerce integer counts from backend health JSON safely."""
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return 0
+_MAX_BISECTION_DEPTH = 4
+_MIN_EGRESS_BUDGET = 256
 
 
 class ShieldGemmaCpuProvider(GuardrailProviderPort):
@@ -96,22 +85,32 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
         self._config = config
 
     async def evaluate(self, prompt: str) -> GuardrailDecision:
-        """Evaluate prompt sequentially across ingress principles, short-circuiting on violation."""
+        """Evaluate prompt across sliding windows and ingress principles."""
+        budget = compute_slot_text_budget(self._config.ctx_size, self._config.parallel_slots)
+        windows = split_overlapping_windows(prompt, max_tokens=budget)
         return await self._run_with_client(
             subject_text=prompt,
+            windows=windows,
             principles=self._principles,
             direction=GuardrailDirection.INGRESS,
-            prompt_builder=lambda principle: build_shieldgemma_prompt(prompt, principle),
+            prompt_builder=build_shieldgemma_prompt,
         )
 
     async def evaluate_response(self, prompt: str, response: str) -> GuardrailDecision:
-        """Evaluate model response sequentially across output principles."""
+        """Evaluate model response across sliding windows and output principles."""
+        budget = compute_slot_text_budget(self._config.ctx_size, self._config.parallel_slots)
+        prompt_budget = max(_MIN_EGRESS_BUDGET, budget // 3)
+        clipped_prompt = clip_prompt_context(prompt, max_tokens=prompt_budget)
+        prompt_tokens = estimate_conservative_tokens(clipped_prompt)
+        response_budget = max(_MIN_EGRESS_BUDGET, budget - prompt_tokens)
+        windows = split_overlapping_windows(response, max_tokens=response_budget)
         return await self._run_with_client(
             subject_text=response,
+            windows=windows,
             principles=self._output_principles,
             direction=GuardrailDirection.EGRESS,
-            prompt_builder=lambda principle: build_shieldgemma_response_prompt(
-                prompt, response, principle
+            prompt_builder=lambda chunk, principle: build_shieldgemma_response_prompt(
+                clipped_prompt, chunk, principle
             ),
         )
 
@@ -126,28 +125,30 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
         self,
         *,
         subject_text: str,
+        windows: Sequence[str],
         principles: tuple[SafetyPrinciple, ...],
         direction: GuardrailDirection,
-        prompt_builder: Callable[[SafetyPrinciple], str],
+        prompt_builder: Callable[[str, SafetyPrinciple], str],
     ) -> GuardrailDecision:
         if self._client is not None:
-            return await self._evaluate_principles(
-                self._client, subject_text, principles, direction, prompt_builder
+            return await self._evaluate_windows(
+                self._client, subject_text, windows, principles, direction, prompt_builder
             )
         async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
-            return await self._evaluate_principles(
-                client, subject_text, principles, direction, prompt_builder
+            return await self._evaluate_windows(
+                client, subject_text, windows, principles, direction, prompt_builder
             )
 
-    async def _evaluate_principles(
+    async def _evaluate_windows(  # noqa: PLR0913, PLR0917
         self,
         client: httpx.AsyncClient,
         subject_text: str,
+        windows: Sequence[str],
         principles: tuple[SafetyPrinciple, ...],
         direction: GuardrailDirection,
-        prompt_builder: Callable[[SafetyPrinciple], str],
+        prompt_builder: Callable[[str, SafetyPrinciple], str],
     ) -> GuardrailDecision:
-        """Run sequential principle checks using an active httpx.AsyncClient."""
+        """Run sequential window x principle checks, short-circuiting on first BLOCK."""
         started = time.perf_counter()
         text_sha256 = fingerprint_prompt(subject_text)
         text_chars = len(subject_text)
@@ -158,30 +159,32 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
         max_yes_prob: float | None = None
         noun = "Response" if direction is GuardrailDirection.EGRESS else "Prompt"
 
-        for principle in principles:
-            violated, raw_output, yes_prob = await self._evaluate_principle(
-                client=client,
-                rendered_prompt=prompt_builder(principle),
-                principle=principle,
-                prompt_sha256=text_sha256,
-            )
-            last_raw_output = raw_output
-            if yes_prob is not None:
-                max_yes_prob = yes_prob if max_yes_prob is None else max(max_yes_prob, yes_prob)
-            if violated:
-                return GuardrailDecision(
-                    verdict=GuardrailVerdict.BLOCK,
-                    provider=self.name,
-                    direction=direction,
-                    violated_policy=principle.name,
-                    violation_score=yes_prob,
-                    reason=f"{noun} violated safety principle '{principle.name}'.",
-                    raw_output=raw_output,
-                    latency_ms=(time.perf_counter() - started) * _MS_PER_SECOND,
+        for window in windows:
+            for principle in principles:
+                violated, raw_output, yes_prob = await self._evaluate_chunk(
+                    client=client,
+                    chunk_text=window,
+                    principle=principle,
+                    prompt_builder=prompt_builder,
                     prompt_sha256=text_sha256,
-                    prompt_chars=text_chars,
-                    scrubbed_prompt=scrubbed,
                 )
+                last_raw_output = raw_output
+                if yes_prob is not None:
+                    max_yes_prob = yes_prob if max_yes_prob is None else max(max_yes_prob, yes_prob)
+                if violated:
+                    return GuardrailDecision(
+                        verdict=GuardrailVerdict.BLOCK,
+                        provider=self.name,
+                        direction=direction,
+                        violated_policy=principle.name,
+                        violation_score=yes_prob,
+                        reason=f"{noun} violated safety principle '{principle.name}'.",
+                        raw_output=raw_output,
+                        latency_ms=(time.perf_counter() - started) * _MS_PER_SECOND,
+                        prompt_sha256=text_sha256,
+                        prompt_chars=text_chars,
+                        scrubbed_prompt=scrubbed,
+                    )
 
         return GuardrailDecision(
             verdict=GuardrailVerdict.ALLOW,
@@ -195,94 +198,108 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
             scrubbed_prompt=scrubbed,
         )
 
-    async def _evaluate_principle(
+    async def _evaluate_chunk(  # noqa: PLR0913
         self,
         *,
         client: httpx.AsyncClient,
-        rendered_prompt: str,
+        chunk_text: str,
         principle: SafetyPrinciple,
+        prompt_builder: Callable[[str, SafetyPrinciple], str],
         prompt_sha256: str,
+        depth: int = 0,
     ) -> tuple[bool, str, float | None]:
-        """Execute a single ShieldGemma /completion classification call with n_probs."""
-        payload = {
-            "prompt": rendered_prompt,
-            "n_predict": _N_PREDICT,
-            "n_probs": _N_PROBS,
-            "temperature": 0.0,
-            "stop": list(_STOP_TOKENS),
-        }
+        """Execute ShieldGemma /completion with recursive bisection on HTTP 400 ctx overflow."""
+        payload = build_completion_payload(prompt_builder(chunk_text, principle))
         try:
             response = await client.post(f"{self.base_url}/completion", json=payload)
             response.raise_for_status()
         except httpx.TimeoutException as exc:
-            self._log.error(
-                "shieldgemma_request_timeout",
-                provider=self.name,
-                principle=principle.name,
+            raise raise_timeout_error(
+                exc,
+                provider_name=self.name,
+                principle_name=principle.name,
                 timeout_seconds=self._config.timeout_seconds,
                 prompt_sha256=prompt_sha256,
-                alert_category=AlertCategory.TIMEOUT.value,
-                exception_type=type(exc).__name__,
-            )
-            msg = f"ShieldGemma guardrail request timed out after {self._config.timeout_seconds}s"
-            raise InferenceBackendError(
-                msg,
-                details={"provider": self.name, "principle": principle.name},
+                log=self._log,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            if depth < _MAX_BISECTION_DEPTH and is_context_size_error(exc.response):
+                halves = bisect_text(chunk_text)
+                if halves is not None:
+                    self._log.warning(
+                        "shieldgemma_context_overflow_bisect",
+                        provider=self.name,
+                        principle=principle.name,
+                        chunk_chars=len(chunk_text),
+                        depth=depth,
+                        prompt_sha256=prompt_sha256,
+                    )
+                    return await self._evaluate_bisected(
+                        client=client,
+                        halves=halves,
+                        principle=principle,
+                        prompt_builder=prompt_builder,
+                        prompt_sha256=prompt_sha256,
+                        depth=depth + 1,
+                    )
+            raise raise_http_error(
+                exc,
+                provider_name=self.name,
+                principle_name=principle.name,
+                prompt_sha256=prompt_sha256,
+                log=self._log,
             ) from exc
         except httpx.HTTPError as exc:
-            self._log.error(
-                "shieldgemma_http_error",
-                provider=self.name,
-                principle=principle.name,
-                error=str(exc),
+            raise raise_http_error(
+                exc,
+                provider_name=self.name,
+                principle_name=principle.name,
                 prompt_sha256=prompt_sha256,
-            )
-            msg = f"ShieldGemma guardrail request failed: {exc}"
-            raise InferenceBackendError(
-                msg,
-                details={"provider": self.name, "principle": principle.name},
+                log=self._log,
             ) from exc
 
-        return self._parse_completion_response(response, principle, prompt_sha256)
-
-    def _parse_completion_response(
-        self,
-        response: httpx.Response,
-        principle: SafetyPrinciple,
-        prompt_sha256: str,
-    ) -> tuple[bool, str, float | None]:
-        """Calibrate violation via completion_probabilities or strict Yes/No fallback."""
-        data = _parse_json_object(response)
-        raw_content = data.get("content") if data is not None else None
-        if not isinstance(raw_content, str):
-            msg = "ShieldGemma response missing string 'content' field."
-            raise InferenceBackendError(
-                msg,
-                details={"provider": self.name, "principle": principle.name},
-            )
-
-        yes_prob = compute_yes_probability(
-            data.get("completion_probabilities") if data is not None else None
+        return parse_completion_response(
+            response,
+            provider_name=self.name,
+            principle_name=principle.name,
+            violation_threshold=self._config.violation_threshold,
+            prompt_sha256=prompt_sha256,
+            log=self._log,
         )
-        if yes_prob is not None:
-            return yes_prob >= self._config.violation_threshold, raw_content, yes_prob
 
-        try:
-            violated = parse_shieldgemma_verdict(raw_content)
-        except ValueError as exc:
-            self._log.error(
-                "shieldgemma_ambiguous_verdict",
-                provider=self.name,
-                principle=principle.name,
-                raw_output=raw_content,
-                prompt_sha256=prompt_sha256,
-            )
-            msg = f"Ambiguous ShieldGemma verdict for '{principle.name}': {raw_content!r}"
-            raise InferenceBackendError(
-                msg,
-                details={"provider": self.name, "principle": principle.name},
-            ) from exc
-        return violated, raw_content, None
+    async def _evaluate_bisected(  # noqa: PLR0913
+        self,
+        *,
+        client: httpx.AsyncClient,
+        halves: tuple[str, str],
+        principle: SafetyPrinciple,
+        prompt_builder: Callable[[str, SafetyPrinciple], str],
+        prompt_sha256: str,
+        depth: int,
+    ) -> tuple[bool, str, float | None]:
+        """Evaluate left and right bisected chunks, short-circuiting on violation."""
+        left_violated, left_raw, left_prob = await self._evaluate_chunk(
+            client=client,
+            chunk_text=halves[0],
+            principle=principle,
+            prompt_builder=prompt_builder,
+            prompt_sha256=prompt_sha256,
+            depth=depth,
+        )
+        if left_violated:
+            return True, left_raw, left_prob
+        right_violated, right_raw, right_prob = await self._evaluate_chunk(
+            client=client,
+            chunk_text=halves[1],
+            principle=principle,
+            prompt_builder=prompt_builder,
+            prompt_sha256=prompt_sha256,
+            depth=depth,
+        )
+        combined_prob: float | None = right_prob
+        if left_prob is not None:
+            combined_prob = left_prob if right_prob is None else max(left_prob, right_prob)
+        return right_violated, right_raw, combined_prob
 
     async def _health_with_client(self, client: httpx.AsyncClient) -> BackendHealth:
         """Execute GET /health and map HTTP/transport outcomes to BackendHealth."""
@@ -309,33 +326,8 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
             )
 
         elapsed_ms = (time.perf_counter() - started) * _MS_PER_SECOND
-        payload = _parse_json_object(response) or {}
-        if response.status_code != _HTTP_OK:
-            error_obj = payload.get("error")
-            error_msg = (
-                str(error_obj)
-                if error_obj is not None
-                else (response.text.strip() or f"HTTP {response.status_code}")
-            )
-            return BackendHealth(
-                healthy=False,
-                status=f"http_{response.status_code}",
-                model_loaded=self._config.hf_filename,
-                latency_ms=elapsed_ms,
-                error=error_msg,
-            )
-
-        status_val = str(payload.get("status", "ok"))
-        slots_idle = _non_negative_int(payload.get("slots_idle"))
-        slots_processing = _non_negative_int(payload.get("slots_processing"))
-        slots_total = _non_negative_int(payload.get("slots_total")) or (
-            slots_idle + slots_processing
-        )
-        return BackendHealth(
-            healthy=status_val.lower() in _HEALTHY_STATUSES,
-            status=status_val,
+        return parse_health_response(
+            response,
             model_loaded=self._config.hf_filename,
-            slots_total=slots_total,
-            slots_idle=slots_idle,
-            latency_ms=elapsed_ms,
+            elapsed_ms=elapsed_ms,
         )

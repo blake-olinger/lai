@@ -75,17 +75,19 @@ async def test_guardrail_runtime_lock_rules_and_pipeline_reconfigure(tmp_path: P
     allowed_upd = boot_locked.model_copy(
         update={
             "block_mode": GuardrailBlockMode.HTTP_ERROR,
-            "output_mode": GuardrailOutputMode.AUDIT_ONLY,
             "violation_threshold": 0.85,
         }
     )
     validate_guardrail_runtime_update(boot_locked, allowed_upd)
 
-    # Disabling, enabling fail_open, turning output_mode OFF, unlocking, or raising cap all fail.
+    # Disabling, enabling fail_open, downgrading output_mode, unlocking, raising cap, or
+    # lowering timeout below 5s all fail while allow_runtime_disable is False.
     forbidden_updates = (
         {"enabled": False},
         {"fail_open": True},
+        {"output_mode": GuardrailOutputMode.AUDIT_ONLY},
         {"output_mode": GuardrailOutputMode.OFF},
+        {"timeout_seconds": 0.5},
         {"allow_runtime_disable": True},
         {"max_violation_threshold": 0.95},
         {"violation_threshold": 0.91, "max_violation_threshold": 0.95},
@@ -229,7 +231,7 @@ async def test_regex_rule_objects_unconfigured_and_buffered_egress_http_error(
 
 async def test_passthrough_regex_and_server_args() -> None:
     """AllowAll, RegexPolicy (ingress + egress), and server args match contracts."""
-    cfg = GuardrailConfig(host="127.0.0.1", port=8082, cpu_threads=12, ctx_size=4096)
+    cfg = GuardrailConfig(host="127.0.0.1", port=8082, cpu_threads=12, ctx_size=8192)
     assert build_shieldgemma_server_args(cfg, Path(cfg.hf_filename)) == [
         "--model",
         "shieldgemma-2b.Q4_K_M.gguf",
@@ -242,9 +244,9 @@ async def test_passthrough_regex_and_server_args() -> None:
         "--threads",
         "12",
         "--ctx-size",
-        "4096",
+        "8192",
         "--parallel",
-        "2",
+        "1",
         "--no-mmap",
     ]
 

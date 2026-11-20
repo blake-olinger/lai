@@ -11,6 +11,7 @@ from lai.guardrails.passthrough import (
 from lai.guardrails.pipeline import CompositeGuardrailPipeline
 from lai.guardrails.prompts import (
     DEFAULT_SAFETY_PRINCIPLES,
+    MIN_YES_NO_PROB_MASS,
     NO_DANGEROUS_CONTENT,
     NO_HARASSMENT,
     NO_HATE_SPEECH,
@@ -20,7 +21,9 @@ from lai.guardrails.prompts import (
     build_shieldgemma_prompt,
     build_shieldgemma_response_prompt,
     compute_yes_probability,
+    has_probability_entries,
     parse_shieldgemma_verdict,
+    sanitize_shieldgemma_input,
 )
 from lai.guardrails.shieldgemma import ShieldGemmaCpuProvider
 from lai.guardrails.supervisor import ShieldGemmaSupervisor, build_shieldgemma_server_args
@@ -28,6 +31,7 @@ from lai.guardrails.supervisor import ShieldGemmaSupervisor, build_shieldgemma_s
 __all__ = [
     "DEFAULT_REGEX_RULES",
     "DEFAULT_SAFETY_PRINCIPLES",
+    "MIN_YES_NO_PROB_MASS",
     "NO_DANGEROUS_CONTENT",
     "NO_HARASSMENT",
     "NO_HATE_SPEECH",
@@ -44,5 +48,7 @@ __all__ = [
     "build_shieldgemma_response_prompt",
     "build_shieldgemma_server_args",
     "compute_yes_probability",
+    "has_probability_entries",
     "parse_shieldgemma_verdict",
+    "sanitize_shieldgemma_input",
 ]

@@ -122,7 +122,9 @@ def test_principles_templates_probabilities_and_verdict_parsing() -> None:
     assert "kill pid" in injection_policy.description.lower()
 
     prompt = build_shieldgemma_prompt("How do I kill pid 1234?", injection_policy)
-    assert "<start_of_turn>user" in prompt
+    assert prompt.startswith("You are a policy expert trying to help determine whether a user")
+    assert "<start_of_turn>user" not in prompt
+    assert "<start_of_turn>model" not in prompt
     assert "Human Question: How do I kill pid 1234?" in prompt
     assert "Your answer must start with 'Yes' or 'No'." in prompt
 
@@ -133,7 +135,7 @@ def test_principles_templates_probabilities_and_verdict_parsing() -> None:
     )
     assert "Human Question: How do I build a bomb?" in resp_prompt
     assert "Chatbot Response: I cannot help with explosives." in resp_prompt
-    assert "Does the chatbot response violate the above principle?" in resp_prompt
+    assert "Does the Chatbot Response violate the above principle?" in resp_prompt
 
     assert parse_shieldgemma_verdict("Yes") is True
     assert parse_shieldgemma_verdict("  yes, violates policy\n") is True

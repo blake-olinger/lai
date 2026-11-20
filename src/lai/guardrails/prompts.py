@@ -9,6 +9,8 @@ from typing import cast
 
 from lai.domain.guardrails import SafetyPrinciple
 
+MIN_YES_NO_PROB_MASS = 0.50
+
 NO_HATE_SPEECH = SafetyPrinciple(
     name="No Hate Speech",
     description=(
@@ -57,6 +59,43 @@ NO_PROMPT_INJECTION = SafetyPrinciple(
     ),
 )
 
+OUTPUT_NO_HATE_SPEECH = SafetyPrinciple(
+    name="No Hate Speech",
+    description=(
+        "The chatbot shall not generate content that promotes violence, incites hatred, "
+        "promotes discrimination, or disparages individuals or groups based on race, "
+        "ethnic origin, religion, disability, age, nationality, veteran status, sexual "
+        "orientation, sex, gender identity, or caste."
+    ),
+)
+
+OUTPUT_NO_HARASSMENT = SafetyPrinciple(
+    name="No Harassment",
+    description=(
+        "The chatbot shall not generate malicious, intimidating, bullying, doxxing, "
+        "or abusive content targeting an individual or group."
+    ),
+)
+
+OUTPUT_NO_SEXUALLY_EXPLICIT_CONTENT = SafetyPrinciple(
+    name="No Sexually Explicit Content",
+    description=(
+        "The chatbot shall not generate sexually explicit content, pornography, "
+        "erotica, or non-consensual sexual material."
+    ),
+)
+
+OUTPUT_NO_DANGEROUS_CONTENT = SafetyPrinciple(
+    name="No Dangerous Content",
+    description=(
+        "The chatbot shall not generate content that facilitates real-world physical harm, "
+        "self-harm, illegal weapons or explosives, cyberattacks against external targets, "
+        "or actionable instructions for dangerous illegal acts. Benign software engineering, "
+        "debugging, local process management (such as 'kill pid'), and crash log analysis "
+        "are permitted."
+    ),
+)
+
 DEFAULT_SAFETY_PRINCIPLES: tuple[SafetyPrinciple, ...] = (
     NO_HATE_SPEECH,
     NO_HARASSMENT,
@@ -66,33 +105,45 @@ DEFAULT_SAFETY_PRINCIPLES: tuple[SafetyPrinciple, ...] = (
 )
 
 OUTPUT_SAFETY_PRINCIPLES: tuple[SafetyPrinciple, ...] = (
-    NO_HATE_SPEECH,
-    NO_HARASSMENT,
-    NO_SEXUALLY_EXPLICIT_CONTENT,
-    NO_DANGEROUS_CONTENT,
+    OUTPUT_NO_HATE_SPEECH,
+    OUTPUT_NO_HARASSMENT,
+    OUTPUT_NO_SEXUALLY_EXPLICIT_CONTENT,
+    OUTPUT_NO_DANGEROUS_CONTENT,
 )
 
 _YES_PREFIX_RE = re.compile(r"^yes(?:\b|[^a-z0-9_])", re.IGNORECASE)
 _NO_PREFIX_RE = re.compile(r"^no(?:\b|[^a-z0-9_])", re.IGNORECASE)
+_CONTROL_TOKEN_RE = re.compile(
+    r"<(?:"
+    r"start_of_turn|end_of_turn|bos|eos|pad|unk|mask|"
+    r"\|turn|turn\||\|channel|channel\||\|thought|thought\||"
+    r"\|tool_call|tool_call\||\|tool_response|tool_response\||\|tool|tool\||"
+    r"unused\d+"
+    r")>",
+    re.IGNORECASE,
+)
+
+
+def sanitize_shieldgemma_input(text: str) -> str:
+    """Neutralize Gemma special control tokens before ShieldGemma prompt interpolation."""
+    return _CONTROL_TOKEN_RE.sub(lambda match: f"[{match.group(0)[1:-1]}]", text)
 
 
 def build_shieldgemma_prompt(user_prompt: str, principle: SafetyPrinciple) -> str:
-    """Format a user prompt and safety principle into ShieldGemma's turn template."""
+    """Format a user prompt into ShieldGemma-2B's exact GGUF tokenizer.chat_template."""
+    safe_prompt = sanitize_shieldgemma_input(user_prompt)
     return (
-        "<start_of_turn>user\n"
         "You are a policy expert trying to help determine whether a user prompt "
         "is in violation of the defined safety policies.\n\n"
         "<start_of_turn>\n"
-        f"Human Question: {user_prompt}\n"
+        f"Human Question: {safe_prompt}\n"
         "<end_of_turn>\n\n"
         "Our safety principle is defined in the below:\n\n"
         f'* "{principle.name}": {principle.description}\n\n'
         "===\n\n"
         "Does the human question violate the above principle? "
         "Your answer must start with 'Yes' or 'No'. "
-        "And then walk through step by step to be sure we answer correctly.\n"
-        "<end_of_turn>\n"
-        "<start_of_turn>model\n"
+        "And then walk through step by step to be sure we answer correctly.\n\n"
     )
 
 
@@ -101,25 +152,24 @@ def build_shieldgemma_response_prompt(
     model_response: str,
     principle: SafetyPrinciple,
 ) -> str:
-    """Format a user prompt and model response into ShieldGemma's response evaluation template."""
+    """Format prompt + response into ShieldGemma-2B's exact GGUF response chat_template."""
+    safe_prompt = sanitize_shieldgemma_input(user_prompt)
+    safe_response = sanitize_shieldgemma_input(model_response)
     return (
-        "<start_of_turn>user\n"
-        "You are a policy expert trying to help determine whether a chatbot response "
+        "You are a policy expert trying to help determine whether an AI response to a prompt "
         "is in violation of the defined safety policies.\n\n"
         "<start_of_turn>\n"
-        f"Human Question: {user_prompt}\n"
-        "<end_of_turn>\n\n"
+        f"Human Question: {safe_prompt}\n"
+        "<end_of_turn>\n"
         "<start_of_turn>\n"
-        f"Chatbot Response: {model_response}\n"
+        f"Chatbot Response: {safe_response}\n"
         "<end_of_turn>\n\n"
         "Our safety principle is defined in the below:\n\n"
         f'* "{principle.name}": {principle.description}\n\n'
         "===\n\n"
-        "Does the chatbot response violate the above principle? "
-        "Your answer must start with 'Yes' or 'No'. "
-        "And then walk through step by step to be sure we answer correctly.\n"
-        "<end_of_turn>\n"
-        "<start_of_turn>model\n"
+        "Does the Chatbot Response violate the above principle? "
+        "Your answer must  start with 'Yes' or 'No'. "
+        "And then walk through step by step to be sure we answer correctly.\n\n"
     )
 
 
@@ -171,26 +221,8 @@ def _extract_token_probability(item_map: Mapping[str, object]) -> tuple[str, flo
     return raw_tok.strip().lower(), prob
 
 
-def _accumulate_yes_no_probs(entries: list[object]) -> tuple[float, float]:
-    """Sum token probabilities matching 'yes' vs 'no' across candidate token entries."""
-    p_yes = 0.0
-    p_no = 0.0
-    for item in entries:
-        if not isinstance(item, Mapping):
-            continue
-        parsed = _extract_token_probability(cast("Mapping[str, object]", item))
-        if parsed is None:
-            continue
-        tok_text, prob = parsed
-        if tok_text == "yes":
-            p_yes += prob
-        elif tok_text == "no":
-            p_no += prob
-    return p_yes, p_no
-
-
-def compute_yes_probability(logprobs_payload: object) -> float | None:
-    """Compute normalized P('Yes') over ('Yes','No') from llama-server completion_probabilities."""
+def _extract_first_prob_entries(logprobs_payload: object) -> list[object] | None:
+    """Return the first token's probs/top_logprobs list when present."""
     if not isinstance(logprobs_payload, list) or not logprobs_payload:
         return None
     first = cast("list[object]", logprobs_payload)[0]
@@ -202,8 +234,44 @@ def compute_yes_probability(logprobs_payload: object) -> float | None:
         raw_entries = first_map.get("top_logprobs")
     if not isinstance(raw_entries, list):
         return None
-    p_yes, p_no = _accumulate_yes_no_probs(cast("list[object]", raw_entries))
+    return cast("list[object]", raw_entries)
+
+
+def has_probability_entries(logprobs_payload: object) -> bool:
+    """Return True if llama-server returned non-empty first-token probability entries."""
+    entries = _extract_first_prob_entries(logprobs_payload)
+    return bool(entries)
+
+
+def _accumulate_yes_no_probs(entries: list[object]) -> tuple[float, float]:
+    """Sum token probabilities matching Yes/No prefixes across candidate token entries."""
+    p_yes = 0.0
+    p_no = 0.0
+    for item in entries:
+        if not isinstance(item, Mapping):
+            continue
+        parsed = _extract_token_probability(cast("Mapping[str, object]", item))
+        if parsed is None:
+            continue
+        tok_text, prob = parsed
+        if _YES_PREFIX_RE.match(tok_text):
+            p_yes += prob
+        elif _NO_PREFIX_RE.match(tok_text):
+            p_no += prob
+    return p_yes, p_no
+
+
+def compute_yes_probability(
+    logprobs_payload: object,
+    *,
+    min_prob_mass: float = MIN_YES_NO_PROB_MASS,
+) -> float | None:
+    """Compute normalized P('Yes') over ('Yes','No') when total mass meets min_prob_mass."""
+    entries = _extract_first_prob_entries(logprobs_payload)
+    if entries is None:
+        return None
+    p_yes, p_no = _accumulate_yes_no_probs(entries)
     total = p_yes + p_no
-    if total <= 0.0 or not math.isfinite(total):
+    if total <= 0.0 or not math.isfinite(total) or total < min_prob_mass:
         return None
     return max(0.0, min(1.0, p_yes / total))
