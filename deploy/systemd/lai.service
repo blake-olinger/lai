@@ -1,0 +1,39 @@
+[Unit]
+Description=Local AI Platform (LAI) Inference and API Server
+Documentation=https://blake-olinger.github.io/lai/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lai
+Group=lai
+WorkingDirectory=/var/lib/lai
+EnvironmentFile=-/etc/lai/lai.env
+ExecStart=/opt/lai/current/.venv/bin/lai serve --config /etc/lai/config.yaml
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=30s
+
+# Filesystem and process hardening (keep GPU /dev/nvidia* accessible; no PrivateDevices=yes)
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/lai /var/log/lai
+PrivateTmp=yes
+NoNewPrivileges=yes
+UMask=0077
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+
+# Standard journald logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lai
+
+[Install]
+WantedBy=multi-user.target

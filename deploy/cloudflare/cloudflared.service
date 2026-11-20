@@ -1,0 +1,52 @@
+[Unit]
+Description=Cloudflare Named Tunnel Connector for LAI (Token-Only, Least-Privilege)
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+After=network-online.target lai.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cloudflared
+Group=cloudflared
+
+# Token-only remote-managed tunnel: NEVER store cert.pem on the host and NEVER pass
+# --token on the command line (argv is readable via /proc/<pid>/cmdline).
+#
+# Option A (default): Store `TUNNEL_TOKEN=<token>` in root:cloudflared 0600/0640 file:
+#   sudo install -d -m 0750 -o root -g cloudflared /etc/cloudflared
+#   sudo install -m 0600 -o cloudflared -g cloudflared /dev/null /etc/cloudflared/tunnel.env
+EnvironmentFile=/etc/cloudflared/tunnel.env
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run
+
+# Option B (systemd-creds encrypted credential alternative):
+# Replace EnvironmentFile + ExecStart above with:
+#   LoadCredentialEncrypted=tunnel_token:/etc/credstore.encrypted/cloudflared.token
+#   ExecStart=/bin/sh -c 'export TUNNEL_TOKEN="$(cat "${CREDENTIALS_DIRECTORY}/tunnel_token")"; exec /usr/bin/cloudflared --no-autoupdate tunnel run'
+
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=15s
+
+# Strict systemd sandboxing
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloudflared
+
+[Install]
+WantedBy=multi-user.target

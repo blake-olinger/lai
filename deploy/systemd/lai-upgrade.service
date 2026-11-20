@@ -1,0 +1,28 @@
+[Unit]
+Description=Local AI Platform (LAI) Atomic Release Upgrade
+Documentation=https://blake-olinger.github.io/lai/
+After=network-online.target lai.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root to manage immutable release slots under /opt/lai/releases,
+# atomically flip /opt/lai/current, and restart lai.service on verified upgrades.
+# Safe no-op unless `updates.enabled: true` is configured in /etc/lai/config.yaml.
+WorkingDirectory=/var/lib/lai
+EnvironmentFile=-/etc/lai/lai.env
+ExecStart=/opt/lai/current/.venv/bin/lai upgrade apply --config /etc/lai/config.yaml --if-enabled
+TimeoutStartSec=600s
+
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/lai /var/lib/lai /var/log/lai
+PrivateTmp=yes
+UMask=0077
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lai-upgrade

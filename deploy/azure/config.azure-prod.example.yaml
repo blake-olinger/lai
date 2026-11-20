@@ -1,0 +1,152 @@
+# LAI Production Ubuntu VM Configuration Overlay (Azure + Nginx + Microsoft Entra ID)
+# Install at: /etc/lai/config.yaml (chmod 0640, chown root:lai)
+# Store secrets in /etc/lai/lai.env (chmod 0640, chown root:lai):
+#   LAI_LOGGING__ALERT_SMTP__PASSWORD=...
+#   LAI_LOGGING__ALERT_WEBHOOK_URL=...
+
+host: "127.0.0.1"
+port: 8400
+llama_host: "127.0.0.1"
+llama_port: 8081
+
+# Ubuntu FHS paths provisioned by deploy/systemd/install-ubuntu.sh
+data_dir: "/var/lib/lai/data"
+models_dir: "/var/lib/lai/models"
+bin_dir: "/var/lib/lai/bin"
+
+# Nginx reverse proxy supports 250 MiB uploads (matches client_max_body_size 250M)
+max_upload_bytes: 262144000
+direct_file_budget_tokens: 12000
+map_window_tokens: 9000
+map_window_overlap_tokens: 300
+max_queued_jobs: 64
+keepalive_interval_seconds: 10.0
+json_keepalive_threshold_seconds: 20.0
+rate_limit_rpm: 120
+ip_rate_limit_rpm: 240
+
+max_projects_per_principal: 20
+max_storage_bytes_per_principal: 2147483648
+max_queued_jobs_per_principal: 4
+
+cors_allowed_origins:
+  - "https://ai.corp.example.com"
+
+auth_providers:
+  - "api_key"
+  - "oidc"
+
+# Microsoft Entra ID (Azure AD) v2.0 OIDC JWT authentication
+# Replace <TENANT_ID> and <ENTRA_API_APP_CLIENT_ID> with your Entra App Registration values.
+oidc_enabled: true
+oidc_issuer_url: "https://login.microsoftonline.com/<TENANT_ID>/v2.0"
+oidc_jwks_url: "https://login.microsoftonline.com/<TENANT_ID>/discovery/v2.0/keys"
+oidc_audiences:
+  - "<ENTRA_API_APP_CLIENT_ID>"
+oidc_identity_claims:
+  - "email"
+  - "preferred_username"
+  - "upn"
+# Entra ID v2 access/ID tokens frequently omit `email_verified`; domain allowlist enforces tenant membership.
+oidc_require_email_verified: false
+oidc_allowed_domains:
+  - "corp.example.com"
+oidc_admin_emails:
+  - "ai-admin@corp.example.com"
+oidc_leeway_seconds: 30.0
+oidc_default_scopes:
+  - "projects:read"
+  - "projects:write"
+  - "files:read"
+  - "files:write"
+  - "chat:read"
+  - "chat:write"
+  - "tools:safe"
+
+# Reverse proxy IP trust: trust local Nginx (and optionally Azure Application Gateway subnet CIDR)
+trust_cloudflare_headers: false
+trusted_proxy_cidrs:
+  - "127.0.0.1/32"
+  - "::1/128"
+  # - "10.0.1.0/24" # Uncomment if fronting with Azure Application Gateway in VNet subnet
+
+cf_access_enabled: false
+
+default_model_profile: "gemma4-26b-a4b"
+custom_profiles: {}
+
+# Fail-closed GGUF allowlist and SHA-256 startup verification
+model_integrity:
+  strict_allowlist: true
+  verify_sha256_on_startup: true
+  allowed_hf_repos:
+    - "unsloth/gemma-4-26B-A4B-it-GGUF"
+    - "QuantFactory/shieldgemma-2b-GGUF"
+  approved_model_sha256s: []
+
+# Boot-locked ingress + buffered egress ShieldGemma-2B guardrails (cannot be disabled via hot-swap API)
+guardrails:
+  enabled: true
+  output_mode: "buffered"
+  allow_runtime_disable: false
+  max_violation_threshold: 0.95
+  block_mode: "refusal_message"
+  refusal_text: "I cannot fulfill this request because the content was flagged by the safety guardrail policy."
+  host: "127.0.0.1"
+  port: 8082
+  hf_repo: "QuantFactory/shieldgemma-2b-GGUF"
+  fallback_hf_repo: "mradermacher/shieldgemma-2b-GGUF"
+  hf_filename: "shieldgemma-2b.Q4_K_M.gguf"
+  ctx_size: 4096
+  parallel_slots: 2
+  timeout_seconds: 30.0
+  violation_threshold: 0.80
+  fail_open: false
+  max_logged_prompt_chars: 2000
+
+logging:
+  log_dir: "/var/log/lai"
+  level: "INFO"
+  json_console: true
+  enable_file_logs: true
+  rotation_when: "midnight"
+  rotation_interval: 1
+  retention_days: 30
+  error_retention_days: 90
+  compress_rotated: true
+  alert_cooldown_seconds: 60.0
+  alert_on_timeouts: true
+  alert_on_errors: true
+  alert_smtp:
+    enabled: false
+    host: "smtp.office365.com"
+    port: 587
+    tls_mode: "starttls"
+    username: "lai-alerts@corp.example.com"
+    password: null # Set via LAI_LOGGING__ALERT_SMTP__PASSWORD in /etc/lai/lai.env
+    from_address: "lai-alerts@corp.example.com"
+    to_addresses:
+      - "ai-ops@corp.example.com"
+    use_admin_emails_fallback: true
+    subject_prefix: "[LAI Prod Alert]"
+    timeout_seconds: 10.0
+    min_severity: "error"
+
+analytics:
+  enabled: true
+  retention_days: 180
+
+# Production upgrades default to explicit operator/CI triggers (or opt-in maintenance window)
+updates:
+  enabled: false
+  github_repo: "blake-olinger/lai"
+  releases_dir: "/opt/lai/releases"
+  current_symlink: "/opt/lai/current"
+  backups_dir: "/var/lib/lai/backups"
+  service_name: "lai.service"
+  health_url: "http://127.0.0.1:8400/v1/health"
+  health_timeout_seconds: 60.0
+  health_poll_interval_seconds: 1.0
+  keep_releases: 3
+  auto_rollback: true
+  allow_prerelease: false

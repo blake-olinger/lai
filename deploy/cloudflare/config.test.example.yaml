@@ -1,0 +1,129 @@
+# LAI Ubuntu Test Host Configuration Overlay (Cloudflare Named Tunnel Edge)
+# Install at: /etc/lai/config.yaml (chmod 0640, chown root:lai)
+# Secrets belong in /etc/lai/lai.env (chmod 0640, chown root:lai), never in YAML.
+
+host: "127.0.0.1"
+port: 8400
+llama_host: "127.0.0.1"
+llama_port: 8081
+
+# Ubuntu FHS paths provisioned by deploy/systemd/install-ubuntu.sh
+data_dir: "/var/lib/lai/data"
+models_dir: "/var/lib/lai/models"
+bin_dir: "/var/lib/lai/bin"
+
+# Cloudflare Tunnel enforces a 100 MiB per-request body limit on Free/Pro plans.
+max_upload_bytes: 104857600
+direct_file_budget_tokens: 12000
+map_window_tokens: 9000
+map_window_overlap_tokens: 300
+max_queued_jobs: 64
+keepalive_interval_seconds: 10.0
+json_keepalive_threshold_seconds: 20.0
+rate_limit_rpm: 120
+ip_rate_limit_rpm: 240
+
+max_projects_per_principal: 10
+max_storage_bytes_per_principal: 1073741824
+max_queued_jobs_per_principal: 4
+
+cors_allowed_origins:
+  - "https://ai-test.example.com"
+
+auth_providers:
+  - "api_key"
+  - "oidc"
+
+# Google OIDC (or swap for corporate IdP) for test-host browser/desktop clients
+oidc_enabled: true
+oidc_issuer_url: "https://accounts.google.com"
+oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
+oidc_audiences:
+  - "<REPLACE_WITH_GOOGLE_OAUTH_CLIENT_ID>"
+oidc_allowed_emails:
+  - "tester@example.com"
+oidc_admin_emails:
+  - "tester@example.com"
+oidc_leeway_seconds: 30.0
+oidc_default_scopes:
+  - "projects:read"
+  - "projects:write"
+  - "files:read"
+  - "files:write"
+  - "chat:read"
+  - "chat:write"
+  - "tools:safe"
+
+# Trust Cloudflare CF-Connecting-IP ONLY because cloudflared forwards locally to 127.0.0.1:8400
+trust_cloudflare_headers: true
+trusted_proxy_cidrs:
+  - "127.0.0.1/32"
+  - "::1/128"
+
+# Optional Cloudflare Access JWT verification at the tunnel edge
+cf_access_enabled: false
+cf_access_team_domain: null
+cf_access_aud: null
+
+default_model_profile: "gemma4-26b-a4b"
+custom_profiles: {}
+
+model_integrity:
+  strict_allowlist: true
+  verify_sha256_on_startup: true
+  allowed_hf_repos:
+    - "unsloth/gemma-4-26B-A4B-it-GGUF"
+    - "QuantFactory/shieldgemma-2b-GGUF"
+  approved_model_sha256s: []
+
+guardrails:
+  enabled: true
+  output_mode: "buffered"
+  allow_runtime_disable: false
+  max_violation_threshold: 0.95
+  block_mode: "refusal_message"
+  refusal_text: "I cannot fulfill this request because the content was flagged by the safety guardrail policy."
+  host: "127.0.0.1"
+  port: 8082
+  hf_repo: "QuantFactory/shieldgemma-2b-GGUF"
+  fallback_hf_repo: "mradermacher/shieldgemma-2b-GGUF"
+  hf_filename: "shieldgemma-2b.Q4_K_M.gguf"
+  ctx_size: 4096
+  parallel_slots: 2
+  timeout_seconds: 30.0
+  violation_threshold: 0.80
+  fail_open: false
+  max_logged_prompt_chars: 2000
+
+logging:
+  log_dir: "/var/log/lai"
+  level: "INFO"
+  json_console: true
+  enable_file_logs: true
+  rotation_when: "midnight"
+  rotation_interval: 1
+  retention_days: 14
+  error_retention_days: 30
+  compress_rotated: true
+  alert_cooldown_seconds: 60.0
+  alert_on_timeouts: true
+  alert_on_errors: true
+
+analytics:
+  enabled: true
+  retention_days: 90
+
+# Opt-in atomic wheel upgrades (set enabled: true only when lai-upgrade.timer is desired)
+updates:
+  enabled: false
+  github_repo: "blake-olinger/lai"
+  releases_dir: "/opt/lai/releases"
+  current_symlink: "/opt/lai/current"
+  backups_dir: "/var/lib/lai/backups"
+  service_name: "lai.service"
+  health_url: "http://127.0.0.1:8400/v1/health"
+  health_timeout_seconds: 60.0
+  health_poll_interval_seconds: 1.0
+  keep_releases: 3
+  auto_rollback: true
+  allow_prerelease: false
