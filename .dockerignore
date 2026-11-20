@@ -1,0 +1,8 @@
+**
+!mise.toml
+!.python-version
+!pyproject.toml
+!uv.lock
+!.github/tools/pip-audit/pyproject.toml
+!.github/tools/pip-audit/uv.lock
+!docker/ci.Dockerfile
