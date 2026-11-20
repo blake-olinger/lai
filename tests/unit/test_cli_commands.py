@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import runpy
 import shutil
+import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -20,9 +22,6 @@ from lai.domain.auth import ApiScope
 from lai.domain.base import utc_now
 from lai.domain.observability import LoggingConfig
 from lai.security import generate_api_key
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def test_cli_init_idempotent_and_force_overwrite(tmp_path: Path) -> None:
@@ -211,21 +210,25 @@ def test_resolve_llama_executable_all_branches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cover direct binary, nested rglob binary, PATH lookup, and missing fallback."""
-    import sys  # noqa: PLC0415
+    """Cover current symlink, direct binary, nested rglob binary, PATH lookup, and fallback."""
+    binary_name = "llama-server"
 
-    binary_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+    bin_current = tmp_path / "b0"
+    current_exe = bin_current / "llama" / "current" / binary_name
+    current_exe.parent.mkdir(parents=True)
+    current_exe.write_bytes(b"ELF")
+    assert resolve_llama_executable(bin_current) == current_exe
 
     bin_direct = tmp_path / "b1"
     direct_exe = bin_direct / "llama" / binary_name
     direct_exe.parent.mkdir(parents=True)
-    direct_exe.write_bytes(b"MZ")
+    direct_exe.write_bytes(b"ELF")
     assert resolve_llama_executable(bin_direct) == direct_exe
 
     bin_nested = tmp_path / "b2"
     nested_exe = bin_nested / "llama" / "nested" / binary_name
     nested_exe.parent.mkdir(parents=True)
-    nested_exe.write_bytes(b"MZ")
+    nested_exe.write_bytes(b"ELF")
     assert resolve_llama_executable(bin_nested) == nested_exe
 
     bin_path = tmp_path / "b3"
@@ -243,33 +246,44 @@ def test_resolve_llama_executable_all_branches(
         return None
 
     monkeypatch.setattr(shutil, "which", _which_none)
-    assert resolve_llama_executable(bin_missing) == bin_missing / "llama" / binary_name
+    assert resolve_llama_executable(bin_missing) == bin_missing / "llama" / "current" / binary_name
 
 
-def test_cli_version_flag_and_tunnel_platform_credentials_default() -> None:
-    """Verify --version/-V prints package version and tunnel creds expand home on Windows."""
+def test_cli_version_flag_and_tunnel_credentials_absolute_path() -> None:
+    """Verify --version/-V prints package version and tunnel creds use absolute Path.home()."""
     runner = CliRunner()
     for flag in ("--version", "-V"):
         res = runner.invoke(cli_app, [flag])
         assert res.exit_code == 0, res.output
         assert res.output.strip() == f"lai {__version__}"
 
-    win_cfg = yaml.safe_load(
-        render_cloudflared_config(
-            tunnel="t-win",
-            hostname="ai.example.com",
-            origin_url="http://127.0.0.1:8400",
-            platform_name="win32",
-        )
-    )
-    assert win_cfg["credentials-file"] == str(Path.home() / ".cloudflared" / "t-win.json")
-
     linux_cfg = yaml.safe_load(
         render_cloudflared_config(
             tunnel="t-lin",
             hostname="ai.example.com",
             origin_url="http://127.0.0.1:8400",
-            platform_name="linux",
         )
     )
-    assert linux_cfg["credentials-file"] == "~/.cloudflared/t-lin.json"
+    assert linux_cfg["credentials-file"] == str(Path.home() / ".cloudflared" / "t-lin.json")
+    assert not str(linux_cfg["credentials-file"]).startswith("~")
+
+
+def test_cli_main_module_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Executing `python -m lai.cli` invokes Typer main() and exits cleanly on --help."""
+    original = list(sys.argv)
+    monkeypatch.delitem(sys.modules, "lai.cli.__main__", raising=False)
+    monkeypatch.setattr(sys, "argv", ["lai", "--help"])
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            runpy.run_module("lai.cli", run_name="__main__")
+    finally:
+        sys.argv[:] = original
+    assert exc_info.value.code == 0
+    assert "Local AI platform CLI" in capsys.readouterr().out
+
+    import lai.cli.__main__ as cli_main_mod  # noqa: PLC0415
+
+    assert callable(getattr(cli_main_mod, "main", None))

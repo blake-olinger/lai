@@ -190,7 +190,7 @@ def _extract_xff_client_ip(header_value: str, networks: tuple[_IpNetwork, ...]) 
     return str(parsed_hops[0])
 
 
-def _resolve_client_ip(
+def resolve_client_ip(
     credentials: RequestCredentials,
     *,
     trust_cf_header: bool,
@@ -235,7 +235,7 @@ async def get_current_principal(
     trust_cf_header = (
         services.settings.trust_cloudflare_headers or services.settings.cf_access_enabled
     )
-    client_ip = _resolve_client_ip(
+    client_ip = resolve_client_ip(
         credentials,
         trust_cf_header=trust_cf_header,
         trusted_proxy_cidrs=services.settings.trusted_proxy_cidrs,

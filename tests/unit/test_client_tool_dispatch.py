@@ -113,6 +113,10 @@ class _SubstringBlocker(GuardrailProviderPort):
             scrubbed_prompt=prompt,
         )
 
+    async def evaluate_response(self, prompt: str, response: str) -> GuardrailDecision:
+        del prompt
+        return await self.evaluate(response)
+
 
 @pytest.fixture(autouse=True)
 def _cleanup_logging() -> Generator[None]:

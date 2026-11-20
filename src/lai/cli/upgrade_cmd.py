@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -68,6 +69,17 @@ def _init_upgrade_observability(settings: LaiSettings) -> AlertManager:
     return configure_observability(log_cfg, fallback_admin_emails=settings.oidc_admin_emails)
 
 
+async def _shutdown_upgrade_observability(alert_manager: AlertManager) -> None:
+    """Flush AlertManager and cleanly detach root log handlers before CLI exit."""
+    await alert_manager.flush()
+    alert_manager.close()
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        handler.flush()
+        handler.close()
+    root.handlers.clear()
+
+
 def build_upgrade_coordinator(
     settings: LaiSettings,
     *,
@@ -111,8 +123,7 @@ async def _run_check_async(
         coordinator = build_upgrade_coordinator(settings, github_token=github_token)
         return await coordinator.check(PACKAGE_VERSION)
     finally:
-        await alert_manager.flush()
-        alert_manager.close()
+        await _shutdown_upgrade_observability(alert_manager)
 
 
 async def _run_apply_async(  # noqa: PLR0913
@@ -159,8 +170,7 @@ async def _run_apply_async(  # noqa: PLR0913
         )
         return result, binary_path
     finally:
-        await alert_manager.flush()
-        alert_manager.close()
+        await _shutdown_upgrade_observability(alert_manager)
 
 
 async def _run_rollback_async(
@@ -179,8 +189,7 @@ async def _run_rollback_async(
             backup_path=backup,
         )
     finally:
-        await alert_manager.flush()
-        alert_manager.close()
+        await _shutdown_upgrade_observability(alert_manager)
 
 
 @upgrade_app.command("check")

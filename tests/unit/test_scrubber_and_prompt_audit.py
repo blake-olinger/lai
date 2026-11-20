@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import TYPE_CHECKING
 
 import httpx
@@ -22,7 +23,6 @@ from lai.domain.chat import ContextMode, Message, MessageRole, TokenUsage, TurnO
 from lai.guardrails import (
     AllowAllGuardrailProvider,
     CompositeGuardrailPipeline,
-    OllamaShieldGemmaProvider,
     RegexPolicyGuardrailProvider,
     ShieldGemmaCpuProvider,
     ShieldGemmaSupervisor,
@@ -65,7 +65,7 @@ async def test_guardrail_domain_settings_and_port_contracts(tmp_path: Path) -> N
     assert cfg.enabled is True
     assert cfg.block_mode is GuardrailBlockMode.REFUSAL_MESSAGE
     assert cfg.port == GUARDRAIL_PORT
-    assert cfg.cpu_threads == GUARDRAIL_THREADS
+    assert cfg.cpu_threads == min(os.cpu_count() or 4, GUARDRAIL_THREADS)
     assert cfg.ctx_size == GUARDRAIL_CTX
     assert cfg.parallel_slots == GUARDRAIL_SLOTS
     assert cfg.fail_open is False
@@ -102,10 +102,6 @@ async def test_guardrail_domain_settings_and_port_contracts(tmp_path: Path) -> N
 
     async with httpx.AsyncClient() as http_client:
         shield_cpu = ShieldGemmaCpuProvider(cfg, client=http_client)
-        ollama_guard = OllamaShieldGemmaProvider(
-            cfg.model_copy(update={"backend": "ollama"}),
-            client=http_client,
-        )
         supervisor = ShieldGemmaSupervisor(
             tmp_path / "llama-server",
             tmp_path / "shieldgemma.gguf",
@@ -113,7 +109,6 @@ async def test_guardrail_domain_settings_and_port_contracts(tmp_path: Path) -> N
             http_client=http_client,
         )
         assert isinstance(shield_cpu, GuardrailProviderPort)
-        assert isinstance(ollama_guard, GuardrailProviderPort)
         assert isinstance(supervisor, GuardrailSupervisorPort)
 
     with CompositeGuardrailPipeline(

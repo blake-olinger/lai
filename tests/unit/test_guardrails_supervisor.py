@@ -124,7 +124,9 @@ async def test_supervisor_verifies_model_sha256_before_spawn_and_alerts(
             verify_sha256=True,
         )
         with pytest.raises(InferenceBackendError, match="no expected digest"):
-            await sup_missing_digest.ensure_running(GuardrailConfig(host="127.0.0.1", port=18084))
+            await sup_missing_digest.ensure_running(
+                GuardrailConfig(host="127.0.0.1", port=18084, sha256=None)
+            )
 
         sup_ok = _make_supervisor(
             tmp_path,

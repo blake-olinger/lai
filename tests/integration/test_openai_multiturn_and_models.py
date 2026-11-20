@@ -112,13 +112,17 @@ async def _open_env(
     block_mode: GuardrailBlockMode = GuardrailBlockMode.REFUSAL_MESSAGE,
 ) -> AsyncGenerator[_Env]:
     data_dir = tmp_path / "data"
-    custom = di.ModelProfile(name="custom-local-test", hf_repo="ex/c", hf_filename="c.gguf")
+    custom_sha = "b" * 64
+    custom = di.ModelProfile(
+        name="custom-local-test", hf_repo="ex/c", hf_filename="c.gguf", sha256=custom_sha
+    )
     settings = LaiSettings(
         data_dir=data_dir,
         models_dir=tmp_path / "models",
         bin_dir=tmp_path / "bin",
         default_model_profile=default_model,
         custom_profiles={"custom-local-test": custom},
+        model_integrity=di.ModelIntegrityConfig(approved_model_sha256s=(custom_sha,)),
         direct_file_budget_tokens=256,
         map_window_tokens=256,
         map_window_overlap_tokens=16,

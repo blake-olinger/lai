@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import runpy
 import sys
 from typing import TYPE_CHECKING
 
@@ -56,7 +55,7 @@ class _RecordingDownloader:
         force: bool = False,
     ) -> Path:
         self.binary_calls.append((tag, cuda_version, force))
-        return self._bin_dir / "llama" / "llama-server.exe"
+        return self._bin_dir / "llama" / "current" / "llama-server"
 
     async def download_model(
         self,
@@ -71,6 +70,17 @@ class _RecordingDownloader:
         filename = str(profile_or_config.hf_filename)
         self.model_calls.append((filename, force, token))
         return self._models_dir / filename
+
+
+class _RecordingEmbedder:
+    """Offline FastEmbed stub recording warmup queries."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    async def embed_query(self, query: str) -> list[float]:
+        self.queries.append(query)
+        return [0.1, 0.2]
 
 
 class _RecordingInferenceSupervisor(InferenceSupervisorPort):
@@ -104,7 +114,7 @@ class _RecordingGuardrailSupervisor(ShieldGemmaSupervisor):
 
     def __init__(self, tmp_path: Path, events: list[str]) -> None:
         super().__init__(
-            executable_path=tmp_path / "llama-server.exe",
+            executable_path=tmp_path / "llama-server",
             model_path=tmp_path / "shieldgemma.gguf",
             log_dir=tmp_path / "logs",
         )
@@ -114,7 +124,7 @@ class _RecordingGuardrailSupervisor(ShieldGemmaSupervisor):
     async def ensure_running(self, config: GuardrailConfig) -> BackendHealth:
         self.started_configs.append(config)
         self._events.append("start:shield")
-        return BackendHealth(healthy=True, status="ok", model_loaded=config.ollama_model)
+        return BackendHealth(healthy=True, status="ok", model_loaded=config.hf_filename)
 
     async def stop(self) -> None:
         self._events.append("stop:shield")
@@ -151,13 +161,20 @@ def test_cli_models_setup_default_flags_and_skip_binaries(
     """Verify `lai models setup` forwards flags cleanly across default and skip modes."""
     cfg_path = _write_cli_config(tmp_path)
     captured: list[_RecordingDownloader] = []
+    embedders: list[_RecordingEmbedder] = []
 
     def _fake_build(settings: LaiSettings) -> _RecordingDownloader:
         stub = _RecordingDownloader(settings.models_dir, settings.bin_dir)
         captured.append(stub)
         return stub
 
+    def _fake_embedder(_settings: LaiSettings) -> _RecordingEmbedder:
+        emb = _RecordingEmbedder()
+        embedders.append(emb)
+        return emb
+
     monkeypatch.setattr(models_cmd, "build_downloader", _fake_build)
+    monkeypatch.setattr(models_cmd, "build_embedder", _fake_embedder)
     runner = CliRunner()
 
     res_default = runner.invoke(cli_app, ["models", "setup", "--config", str(cfg_path)])
@@ -167,19 +184,28 @@ def test_cli_models_setup_default_flags_and_skip_binaries(
         ("gemma-4-26B-A4B-it-UD-IQ4_XS.gguf", False, None),
         ("shieldgemma-2b.Q4_K_M.gguf", False, None),
     ]
-    assert "llama_server:" in res_default.output
-    assert "primary_model:" in res_default.output
-    assert "guardrail_model:" in res_default.output
+    assert embedders[0].queries == ["warmup"]
+    for label in ("llama_server:", "primary_model:", "guardrail_model:", "embeddings_cache:"):
+        assert label in res_default.output
 
-    flags = ["--tag", "b9897", "--cuda-version", "12.4", "--hf-token", "hf_tok_123"]
-    res_flags = runner.invoke(
-        cli_app,
-        ["models", "setup", "--config", str(cfg_path), *flags, "--skip-guardrail", "--force"],
-    )
+    flags = [
+        "--tag",
+        "b12552",
+        "--cuda-version",
+        "12.8",
+        "--hf-token",
+        "hf_tok_123",
+        "--skip-guardrail",
+        "--skip-embeddings",
+        "--force",
+    ]
+    res_flags = runner.invoke(cli_app, ["models", "setup", "--config", str(cfg_path), *flags])
     assert res_flags.exit_code == 0, res_flags.output
-    assert captured[1].binary_calls == [("b9897", "12.4", True)]
+    assert captured[1].binary_calls == [("b12552", "12.8", True)]
     assert captured[1].model_calls == [("gemma-4-26B-A4B-it-UD-IQ4_XS.gguf", True, "hf_tok_123")]
     assert "guardrail_model:" not in res_flags.output
+    assert "embeddings_cache:" not in res_flags.output
+    assert len(embedders) == 1
 
     res_skip_bin = runner.invoke(
         cli_app, ["models", "setup", "--config", str(cfg_path), "--skip-binaries"]
@@ -187,6 +213,7 @@ def test_cli_models_setup_default_flags_and_skip_binaries(
     assert res_skip_bin.exit_code == 0, res_skip_bin.output
     assert captured[2].binary_calls == []
     assert len(captured[2].model_calls) == EXPECTED_TWO_MODELS
+    assert len(embedders) == EXPECTED_TWO_MODELS
 
 
 def test_cli_models_setup_failure_exits_nonzero(
@@ -207,34 +234,34 @@ def test_cli_models_setup_failure_exits_nonzero(
 
 def test_cli_serve_build_supervisors_llamacpp(tmp_path: Path) -> None:
     """Verify build_supervisors wires LlamaCppSupervisor and optional ShieldGemmaSupervisor."""
-    llama_dir = tmp_path / "bin" / "llama"
+    llama_dir = tmp_path / "bin" / "llama" / "current"
     llama_dir.mkdir(parents=True)
-    exe_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
-    (llama_dir / exe_name).write_bytes(b"MZ")
+    (llama_dir / "llama-server").write_bytes(b"ELF")
 
     sup_on, guard_on = serve_cmd.build_supervisors(
         LaiSettings(
             data_dir=tmp_path / "data",
             models_dir=tmp_path / "models",
             bin_dir=tmp_path / "bin",
-            inference_backend="llamacpp",
             guardrails=GuardrailConfig(enabled=True),
         )
     )
-    assert isinstance(sup_on, LlamaCppSupervisor)
-    assert isinstance(guard_on, ShieldGemmaSupervisor)
-
     sup_off, guard_off = serve_cmd.build_supervisors(
         LaiSettings(
             data_dir=tmp_path / "data",
             models_dir=tmp_path / "models",
             bin_dir=tmp_path / "bin",
-            inference_backend="llamacpp",
             guardrails=GuardrailConfig(enabled=False),
         )
     )
-    assert isinstance(sup_off, LlamaCppSupervisor)
-    assert guard_off is None
+    assert (
+        isinstance(sup_on, LlamaCppSupervisor),
+        isinstance(guard_on, ShieldGemmaSupervisor),
+    ) == (
+        True,
+        True,
+    )
+    assert (isinstance(sup_off, LlamaCppSupervisor), guard_off) == (True, None)
 
 
 def test_cli_serve_runs_lifecycle_and_forwards_overrides(
@@ -283,23 +310,21 @@ def test_cli_serve_runs_lifecycle_and_forwards_overrides(
         str(EXPECTED_PORT),
         "--profile",
         "gemma4-26b-a4b",
-        "--backend",
-        "llamacpp",
     ]
     res = CliRunner().invoke(cli_app, serve_args)
     assert res.exit_code == 0, res.output
     assert events == ["start:llama", "start:shield", "uvicorn:serve", "stop:shield", "stop:llama"]
     assert llama_rec.started_profiles == [GEMMA4_26B_A4B_PROFILE]
-    assert seen_settings[0].host == "127.0.0.2"
-    assert seen_settings[0].port == EXPECTED_PORT
+    assert (seen_settings[0].host, seen_settings[0].port) == ("127.0.0.2", EXPECTED_PORT)
     assert seen_settings[0].default_model_profile == "gemma4-26b-a4b"
-    assert seen_settings[0].inference_backend == "llamacpp"
     assert seen_config_paths == [cfg_path]
     assert shield_rec.started_configs == [seen_settings[0].guardrails]
-    assert configs[0].app is fake_app
-    assert configs[0].host == "127.0.0.2"
-    assert configs[0].port == EXPECTED_PORT
-    assert configs[0].log_config is None
+    assert (configs[0].app, configs[0].host, configs[0].port, configs[0].log_config) == (
+        fake_app,
+        "127.0.0.2",
+        EXPECTED_PORT,
+        None,
+    )
 
 
 def test_cli_serve_startup_failure_stops_started_supervisor(
@@ -321,22 +346,3 @@ def test_cli_serve_startup_failure_stops_started_supervisor(
     assert res_fail.exit_code == 1
     assert "Server startup failed" in res_fail.output
     assert events == ["start:llama", "stop:llama"]
-
-
-def test_cli_main_module_entrypoint(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Executing `python -m lai.cli` invokes Typer main() and exits cleanly on --help."""
-    monkeypatch.delitem(sys.modules, "lai.cli.__main__", raising=False)
-    monkeypatch.setattr(sys, "argv", ["lai", "--help"])
-    with pytest.raises(SystemExit) as exc_info:
-        runpy.run_module("lai.cli", run_name="__main__")
-    assert exc_info.value.code == 0
-    captured = capsys.readouterr()
-    assert "Local AI platform CLI" in captured.out
-
-    import lai.cli.__main__ as cli_main_mod  # noqa: PLC0415
-
-    main_fn: object = getattr(cli_main_mod, "main", None)
-    assert callable(main_fn)

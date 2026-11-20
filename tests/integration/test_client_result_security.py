@@ -72,6 +72,10 @@ class _InjectionGuardrail(GuardrailProviderPort):
             scrubbed_prompt=prompt,
         )
 
+    async def evaluate_response(self, prompt: str, response: str) -> GuardrailDecision:
+        del prompt
+        return await self.evaluate(response)
+
 
 class _ReadLeaseInference(InferenceProviderPort):
     def __init__(self) -> None:

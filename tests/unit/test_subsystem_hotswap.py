@@ -26,7 +26,6 @@ from lai.domain.guardrails import (
 from lai.domain.scheduler import JobPriority, LeaseRequest
 from lai.guardrails import (
     CompositeGuardrailPipeline,
-    OllamaShieldGemmaProvider,
     ShieldGemmaCpuProvider,
 )
 from lai.ingestion import LocalBlobStore
@@ -62,6 +61,10 @@ class _AlwaysBlockProvider(GuardrailProviderPort):
             prompt_chars=len(prompt),
             scrubbed_prompt=prompt,
         )
+
+    async def evaluate_response(self, prompt: str, response: str) -> GuardrailDecision:
+        del prompt
+        return await self.evaluate(response)
 
 
 async def test_oidc_provider_reconfigure_preserves_jwks_cache() -> None:
@@ -187,23 +190,28 @@ async def test_guardrail_providers_and_dynamic_cors_reconfigure(tmp_path: Path) 
         with pytest.raises(GuardrailBlockedError, match="Custom block"):
             await pipeline.check_prompt("test")
 
-        pipeline.reconfigure(cfg_err.model_copy(update={"enabled": False}))
-        assert (await pipeline.check_prompt("test")).verdict is GuardrailVerdict.ALLOW
+        # Boot-locked allow_runtime_disable=False rejects disabling guardrails live
+        with pytest.raises(ValidationFailedError, match="allow_runtime_disable"):
+            pipeline.reconfigure(cfg_err.model_copy(update={"enabled": False}))
     finally:
         pipeline.close()
 
-    sg = ShieldGemmaCpuProvider(GuardrailConfig(port=18082, timeout_seconds=5.0))
-    sg.reconfigure(GuardrailConfig(port=18082, timeout_seconds=12.0))
-    assert sg.base_url == "http://127.0.0.1:18082"
+    unlock_cfg = GuardrailConfig(enabled=True, allow_runtime_disable=True)
+    with CompositeGuardrailPipeline(unlock_cfg, providers=[stub], log_dir=tmp_path) as unlocked:
+        unlocked.reconfigure(unlock_cfg.model_copy(update={"enabled": False}))
+        assert (await unlocked.check_prompt("test")).verdict is GuardrailVerdict.ALLOW
 
-    og = OllamaShieldGemmaProvider(GuardrailConfig(backend="ollama", violation_threshold=0.90))
-    og.reconfigure(GuardrailConfig(backend="ollama", violation_threshold=0.40))
-    lp = [{"top_logprobs": [{"token": "Yes", "logprob": -0.5}, {"token": "No", "logprob": -0.9}]}]
+    sg = ShieldGemmaCpuProvider(
+        GuardrailConfig(port=18082, timeout_seconds=5.0, violation_threshold=0.90)
+    )
+    sg.reconfigure(GuardrailConfig(port=18082, timeout_seconds=12.0, violation_threshold=0.40))
+    assert sg.base_url == "http://127.0.0.1:18082"
+    probs = [{"probs": [{"tok_str": "Yes", "prob": 0.65}, {"tok_str": "No", "prob": 0.35}]}]
     with respx.mock(assert_all_called=True) as mock:
-        mock.post("http://127.0.0.1:11434/api/generate").respond(
-            200, json={"response": "Yes", "logprobs": lp}
+        mock.post("http://127.0.0.1:18082/completion").respond(
+            200, json={"content": "Yes", "probs": probs}
         )
-        assert (await og.evaluate("hello")).verdict is GuardrailVerdict.BLOCK
+        assert (await sg.evaluate("hello")).verdict is GuardrailVerdict.BLOCK
 
     async def _echo_app(scope: Scope, receive: Receive, send: Send) -> None:
         del scope, receive

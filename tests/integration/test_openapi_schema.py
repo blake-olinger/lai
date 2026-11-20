@@ -89,6 +89,7 @@ def test_openapi_json_and_markdown_match_app_and_export_check(
         "/v1/system/config/cors",
         "/v1/system/config/limits",
         "/v1/system/config/guardrails",
+        "/v1/system/config/updates",
         "/v1/system/config/reload",
         "/v1/projects",
         "/v1/files",
@@ -113,15 +114,15 @@ def test_openapi_json_and_markdown_match_app_and_export_check(
         assert "workspace_root" not in props
 
 
-def test_github_workflows_and_dependabot_parse_with_expected_triggers_and_jobs() -> None:
-    """Validate CI, docs, security, release workflows, SHA pinning, and dependabot config."""
+def test_github_workflows_and_renovate_parse_with_expected_triggers_and_jobs() -> None:
+    """Validate CI, docs, security, release workflows, SHA pinning, and Renovate config."""
     workflows_dir = REPO_ROOT / ".github" / "workflows"
     expected_workflows = {"ci.yml", "docs.yml", "release.yml", "security.yml"}
     assert {p.name for p in workflows_dir.glob("*.yml")} == expected_workflows
 
     ci = _load_yaml_mapping(workflows_dir / "ci.yml")
     assert ci.get("permissions") == {"contents": "read"}
-    assert {"push", "pull_request"}.issubset(_get_triggers(ci))
+    assert {"push", "pull_request", "schedule"}.issubset(_get_triggers(ci))
     assert "verify" in cast("dict[str, object]", ci["jobs"])
     _assert_all_uses_sha_pinned(ci, "ci.yml")
 
@@ -154,10 +155,13 @@ def test_github_workflows_and_dependabot_parse_with_expected_triggers_and_jobs()
     assert deploy_env.get("name") == "github-pages"
     _assert_all_uses_sha_pinned(docs, "docs.yml")
 
-    dependabot = _load_yaml_mapping(REPO_ROOT / ".github" / "dependabot.yml")
-    updates = cast("list[dict[str, object]]", dependabot["updates"])
-    ecosystems = {entry["package-ecosystem"] for entry in updates}
-    assert ecosystems == {"uv", "github-actions"}
+    assert not (REPO_ROOT / ".github" / "dependabot.yml").exists()
+    renovate = cast(
+        "dict[str, object]", json.loads((REPO_ROOT / "renovate.json").read_text("utf-8"))
+    )
+    assert renovate.get("minimumReleaseAge") == "7 days"
+    for key in ("pep621", "mise", "dockerfile", "github-actions", "customManagers"):
+        assert key in renovate
 
 
 def _load_toml_mapping(path: Path) -> dict[str, object]:
@@ -166,7 +170,7 @@ def _load_toml_mapping(path: Path) -> dict[str, object]:
 
 
 def test_supply_chain_cooldown_and_locked_pip_audit_configuration() -> None:
-    """Validate 7-day release cooldowns and isolated, hash-locked pip-audit CI config."""
+    """Validate 7-day release cooldowns, Renovate managers, and isolated pip-audit in mise.toml."""
     audit_project_dir = REPO_ROOT / ".github" / "tools" / "pip-audit"
     for project_dir in (REPO_ROOT, audit_project_dir):
         pyproject = _load_toml_mapping(project_dir / "pyproject.toml")
@@ -182,20 +186,21 @@ def test_supply_chain_cooldown_and_locked_pip_audit_configuration() -> None:
     sec_jobs = cast("dict[str, dict[str, object]]", security["jobs"])
     sec_steps = cast("list[dict[str, object]]", sec_jobs["security"].get("steps", []))
     run_blocks = "\n".join(str(step.get("run", "")) for step in sec_steps)
-    assert "uv tool run pip-audit" not in run_blocks
-    assert "--no-hashes" not in run_blocks
-    assert "--project .github/tools/pip-audit --locked --isolated" in run_blocks
-    assert "python -m pip_audit --disable-pip" in run_blocks
+    assert "mise run security" in run_blocks
 
-    dependabot = _load_yaml_mapping(REPO_ROOT / ".github" / "dependabot.yml")
-    updates = cast("list[dict[str, object]]", dependabot["updates"])
-    uv_dirs = {
-        str(entry["directory"]) for entry in updates if entry.get("package-ecosystem") == "uv"
-    }
-    assert uv_dirs == {"/", "/.github/tools/pip-audit"}
-    for entry in updates:
-        cooldown = cast("dict[str, object]", entry.get("cooldown"))
-        assert isinstance(cooldown, dict)
-        default_days = cooldown.get("default-days")
-        assert isinstance(default_days, int)
-        assert default_days >= 7
+    mise_cfg = _load_toml_mapping(REPO_ROOT / "mise.toml")
+    tasks = cast("dict[str, dict[str, object]]", mise_cfg["tasks"])
+    audit_run = str(tasks["audit"]["run"])
+    assert "uv tool run pip-audit" not in audit_run
+    assert "--no-hashes" not in audit_run
+    assert "--project .github/tools/pip-audit --locked --isolated" in audit_run
+    assert "python -m pip_audit --disable-pip" in audit_run
+
+    renovate = cast(
+        "dict[str, object]", json.loads((REPO_ROOT / "renovate.json").read_text("utf-8"))
+    )
+    pep621 = cast("dict[str, object]", renovate["pep621"])
+    patterns = cast("list[str]", pep621["managerFilePatterns"])
+    assert any("pyproject" in p for p in patterns)
+    assert any("pip-audit" in p for p in patterns)
+    assert renovate.get("minimumReleaseAge") == "7 days"

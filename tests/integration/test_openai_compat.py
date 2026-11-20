@@ -17,6 +17,7 @@ from lai.domain.inference import (
     InferenceChunk,
     InferenceRequest,
     InferenceResponse,
+    ModelIntegrityConfig,
     ModelProfile,
 )
 from lai.domain.observability import LoggingConfig
@@ -91,10 +92,12 @@ class _OpenAiEnv:
 @asynccontextmanager
 async def _open_oai_env(tmp_path: Path) -> AsyncGenerator[_OpenAiEnv]:
     data_dir = tmp_path / "data"
+    custom_sha = "a" * 64
     custom_profile = ModelProfile(
         name="custom-local-test",
         hf_repo="example/custom",
         hf_filename="custom.gguf",
+        sha256=custom_sha,
     )
     settings = LaiSettings(
         data_dir=data_dir,
@@ -104,6 +107,7 @@ async def _open_oai_env(tmp_path: Path) -> AsyncGenerator[_OpenAiEnv]:
         map_window_tokens=256,
         map_window_overlap_tokens=16,
         custom_profiles={"custom-local-test": custom_profile},
+        model_integrity=ModelIntegrityConfig(approved_model_sha256s=(custom_sha,)),
         logging=LoggingConfig(log_dir=data_dir / "logs", enable_file_logs=False),
         guardrails=GuardrailConfig(enabled=False),
     )

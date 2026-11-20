@@ -254,15 +254,11 @@ async def test_ports_are_runtime_checkable_protocols(tmp_path: Path) -> None:
         )
 
         llama_provider = inference.LlamaCppProvider(client=http_client)
-        openai_provider = inference.OpenAICompatProvider(
-            "http://127.0.0.1:11434", client=http_client
-        )
         llama_supervisor = inference.LlamaCppSupervisor(
             executable_path=tmp_path / "llama-server",
             models_dir=tmp_path / "models",
             log_dir=tmp_path / "logs",
         )
-        ollama_supervisor = inference.OllamaSupervisor(log_dir=tmp_path / "logs")
 
         search_plugin = tools.SearchFilesPlugin(
             file_repo, embedder=fastembed, vector_store=vector_store
@@ -313,9 +309,7 @@ async def test_ports_are_runtime_checkable_protocols(tmp_path: Path) -> None:
                 (vector_store, VectorStorePort),
                 (pipeline, IngestionPipelinePort),
                 (llama_provider, InferenceProviderPort),
-                (openai_provider, InferenceProviderPort),
                 (llama_supervisor, InferenceSupervisorPort),
-                (ollama_supervisor, InferenceSupervisorPort),
                 (search_plugin, ToolPluginPort),
                 (read_plugin, ToolPluginPort),
                 (overview_plugin, ToolPluginPort),

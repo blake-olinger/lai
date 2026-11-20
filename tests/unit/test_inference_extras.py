@@ -287,7 +287,7 @@ async def test_downloader_gguf_revision_sha256_cache_and_fallback(tmp_path: Path
         await dl.download_model(tampered)
     assert not (tmp_path / "models" / "bad.gguf").exists()
 
-    shield = GuardrailConfig()
+    shield = GuardrailConfig(sha256=good_sha)
     assert (await dl.download_model(shield)).name == shield.hf_filename
     assert (shield.fallback_hf_repo, shield.hf_filename, False, None, None) in calls
     for upd in (
