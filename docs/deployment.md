@@ -1,76 +1,158 @@
 # Deployment & Operations Guide
 
-This guide walks through configuring LAI for remote production access using **Google Cloud OIDC**
-and a **Cloudflare Named Tunnel**.
+LAI targets **Ubuntu 24.04 LTS (x86_64)** with pure `llama.cpp` GPU inference (Gemma 4 on `:8081`),
+CPU-only ShieldGemma-2B ingress/egress guardrails (`:8082`), and CPU FastEmbed ONNX retrieval.
+This guide covers all three environments:
+
+1. **Dev (WSL2 Ubuntu)** — local development and identical containerized CI verification.
+2. **Test (Headless Ubuntu + Cloudflare Named Tunnel)** — systemd-supervised server exposed over HTTPS.
+3. **Prod (Azure Ubuntu VM + Nginx / Application Gateway + Microsoft Entra ID)** — FHS enterprise deployment.
 
 ---
 
-## Host & Runtime Prerequisites
+## Runtime Prerequisites
 
-- **Python 3.13** (`>=3.13,<3.14`) and **[`uv`](https://docs.astral.sh/uv/)**
-- **GPU inference runtime**:
-  - **Windows & Linux x64 + NVIDIA GPU (`llamacpp`)**: `uv run python -m lai.cli models setup`
-    downloads official CUDA `llama.cpp` binaries (`.zip` on Windows, `.tar.gz` on Linux) and GGUF
-    models automatically.
-  - **Ollama or other platforms (`ollama`)**: Install Ollama and run
-    `uv run python -m lai.cli models setup --backend ollama`, or install `llama-server` on `PATH`
-    and run `uv run python -m lai.cli models setup --skip-binaries`.
-- **Single-process server**: Always run LAI as a **single worker process** (`lai serve` runs a
-  single Uvicorn worker). The GPU inference spooler, per-session serialization gate, and rate
-  limiters operate in-process.
-- **NTP time synchronization**: Ensure the host clock is synchronized via NTP. LAI applies a
-  configurable `oidc_leeway_seconds` clock-skew tolerance (default `30.0` seconds) when validating
-  Google ID token `exp` / `nbf` claims.
+- **OS & Architecture**: Ubuntu 24.04 LTS x86_64 (or WSL2 Ubuntu for development).
+- **NVIDIA GPU & CUDA drivers**: `lai models setup` auto-detects driver CUDA capability via
+  `nvidia-smi` and installs SHA-256-verified Linux x64 `llama.cpp` CUDA `13.5` or `12.8` binaries
+  into `bin/llama/releases/<tag>` with an atomic `bin/llama/current` symlink.
+- **Single-process server**: Always run LAI as a **single Uvicorn worker** (`lai serve`). The GPU
+  inference spooler, per-session serialization gate, and rate limiters operate in-process.
+- **NTP time synchronization**: Keep the host clock synced via `systemd-timesyncd` or `chrony`
+  (LAI enforces `oidc_leeway_seconds`, default `30.0s`, on JWT `exp`/`nbf` claims).
+- **Private storage permissions**: `lai init`, SQLite, and the local blob store enforce POSIX
+  `0700` on `data/`, `blobs/`, `lancedb/`, and `backups/`, and `0600` on `config.yaml` and `lai.db`.
 
 ---
 
-## Google Cloud OIDC Setup
+## 1. Dev Environment (WSL2 Ubuntu)
 
-LAI verifies Google-signed RS256/ES256 ID tokens directly against Google's public JWKS endpoint
-(`https://www.googleapis.com/oauth2/v3/certs`). LAI never needs or stores a Google OAuth client
-secret.
+Use [`mise`](https://mise.jdx.dev/) (`mise.toml` is the single source of truth for Python 3.13,
+`uv`, and `gitleaks`) together with native Docker inside WSL2 Ubuntu so local checks match CI
+byte-for-byte.
 
-### 1. Configure the Google Auth Platform / OAuth Consent Screen
+```bash
+# Bootstrap toolchain, locked Python environment, and container-backed git hooks
+mise trust && mise install
+mise run setup
+mise run hooks   # sets git config core.hooksPath .githooks
 
-1. Open [Google Cloud Console](https://console.cloud.google.com/) and select or create a project.
-2. Navigate to **Google Auth Platform** (or **APIs & Services → OAuth consent screen**).
-3. Configure **Branding** (app name, support email, authorized domains) and **Audience**:
-   - **Internal** (Google Workspace organizations): restricts sign-in to users in your Workspace
-     domain automatically.
-   - **External** (personal accounts or mixed users): start in **Testing** mode and add explicit
-     **Test users** (up to 100), or publish to **In production** once ready. Only basic OIDC scopes
-     (`openid`, `email`, `profile`) are needed, which do not require restricted-scope verification.
-4. Under **Data Access / Scopes**, ensure `openid`, `email`, and `profile` are enabled (LAI
-   requires verified `email` and `email_verified: true` claims).
+# Build the shared Ubuntu 24.04 validation container (cached across runs)
+bash scripts/run-in-container.sh --build-only
 
-### 2. Create OAuth 2.0 Client IDs
+# Run fast pre-commit checks or the full CI + security + coverage + mutation suite
+bash scripts/run-in-container.sh pre-commit
+bash scripts/run-in-container.sh pre-push
+```
 
-Create a separate Client ID for each client application type under **Clients → Create client** (or
-**APIs & Services → Credentials → Create Credentials → OAuth client ID**):
+Run LAI locally in WSL2 with GPU passthrough:
 
-#### Browser SPA (Web Application)
+```bash
+cp config/config.example.yaml config/config.yaml
+uv run lai init --config config/config.yaml
+uv run lai keys create --config config/config.yaml --name "dev-admin" --admin
+uv run lai models setup --config config/config.yaml
+uv run lai serve --config config/config.yaml
+```
 
-- **Application type**: **Web application**
-- **Authorized JavaScript origins**: Add your exact SPA origin(s), e.g. `https://app.example.com`
-  (and `http://localhost:5173` during local development — remove localhost in production).
-- **Authorized redirect URIs**: Add your callback URI if using a redirect flow, or leave empty if
-  using Google Identity Services (GIS) popup/One Tap ID tokens directly.
-- Copy the **Client ID** (`<id>.apps.googleusercontent.com`). Do **not** embed any client secret in
-  your SPA bundle; use Google Identity Services (`accounts.google.com/gsi/client`) to obtain a
-  signed Google **ID token** (`credential`) and send it to LAI as
-  `Authorization: Bearer <id_token>`.
+---
 
-#### Desktop / Native Client (Electron, CLI, Desktop App)
+## 2. Test Environment (Headless Ubuntu + Cloudflare Named Tunnel)
 
-- **Application type**: **Desktop app**
-- Use standard loopback OAuth 2.0 Authorization Code + PKCE (`http://127.0.0.1:<port>`) with
-  `scope=openid email profile` (plus `access_type=offline` if refreshing tokens) to obtain a Google
-  ID token (`id_token`).
-- Copy the **Client ID** (`<id>.apps.googleusercontent.com`). *(Note: Google still displays a
-  non-confidential client secret for Installed/Desktop apps during Google's `/token` exchange per
-  Google's installed-app spec, but LAI never requests, accepts, or stores that secret.)*
+Provision FHS paths (`/opt/lai`, `/etc/lai`, `/var/lib/lai`, `/var/log/lai`), unprivileged `lai`
+service user, and hardened systemd units with the included Ubuntu installer:
 
-### 3. Configure OIDC in `config/config.yaml`
+```bash
+sudo bash deploy/systemd/install-ubuntu.sh
+sudo cp deploy/cloudflare/config.test.example.yaml /etc/lai/config.yaml
+sudo chown root:lai /etc/lai/config.yaml
+sudo chmod 0640 /etc/lai/config.yaml
+```
+
+### Google Cloud OIDC Setup (Test Host)
+
+LAI verifies Google RS256/ES256 ID tokens directly against Google's JWKS endpoint
+(`https://www.googleapis.com/oauth2/v3/certs`) without storing any OAuth client secret:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), configure **Google Auth Platform**
+   with scopes `openid`, `email`, and `profile`.
+2. Create an OAuth 2.0 **Web application** Client ID (for browser SPAs) and/or **Desktop app**
+   Client ID (for native clients using Authorization Code + PKCE).
+3. Populate `oidc_audiences`, `oidc_allowed_emails` or corporate `oidc_allowed_domains`, and
+   `oidc_admin_emails` in `/etc/lai/config.yaml` (consumer domains like `gmail.com` are rejected in
+   `oidc_allowed_domains`; list explicit addresses in `oidc_allowed_emails`).
+
+### Cloudflare Named Tunnel Setup
+
+**Option A — Token-managed systemd service (recommended for headless hosts):**
+
+```bash
+sudo cp deploy/cloudflare/cloudflared.service /etc/systemd/system/cloudflared.service
+sudo install -m 0600 -o root -g root /dev/null /etc/lai/cloudflared.env
+echo 'TUNNEL_TOKEN=<YOUR_CLOUDFLARE_TUNNEL_TOKEN>' | sudo tee /etc/lai/cloudflared.env >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now lai.service cloudflared.service
+```
+
+**Option B — Local credentials file via `lai tunnel render-config`:**
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create lai-test
+cloudflared tunnel route dns lai-test ai-test.example.com
+/opt/lai/current/.venv/bin/lai tunnel render-config \
+  --config /etc/lai/config.yaml \
+  --tunnel "<TUNNEL_UUID>" \
+  --hostname "ai-test.example.com" \
+  --output /etc/lai/cloudflared.yaml
+```
+
+`lai tunnel render-config` writes an absolute credentials path (never literal `~`) and applies
+`chmod 0600` to the rendered file.
+
+Key Cloudflare settings in `/etc/lai/config.yaml`:
+
+- `trust_cloudflare_headers: true` and `trusted_proxy_cidrs: ["127.0.0.1/32", "::1/128"]` (only
+  when `cloudflared` forwards exclusively over loopback).
+- `cf_access_enabled: false` for public SPA/desktop OIDC clients (so Cloudflare Access redirects do
+  not intercept CORS preflights), or `true` with `cf_access_team_domain` + `cf_access_aud` for Zero
+  Trust Access.
+- `max_upload_bytes: 104857600` (matches Cloudflare Free/Pro 100 MB body cap). LAI's SSE keepalives
+  (`keepalive_interval_seconds: 10.0`) and JSON heartbeats (`json_keepalive_threshold_seconds: 20.0`)
+  prevent Cloudflare `HTTP 524` idle timeouts.
+
+---
+
+## 3. Prod Environment (Azure Ubuntu VM + Nginx / Application Gateway + Entra ID)
+
+Provision an Azure GPU VM (Ubuntu 24.04 LTS with NVIDIA CUDA drivers) using the FHS installer and
+Azure production overlay:
+
+```bash
+sudo bash deploy/systemd/install-ubuntu.sh
+sudo cp deploy/azure/config.azure-prod.example.yaml /etc/lai/config.yaml
+sudo cp deploy/azure/nginx-lai.conf.example /etc/nginx/sites-available/lai.conf
+sudo ln -sf /etc/nginx/sites-available/lai.conf /etc/nginx/sites-enabled/lai.conf
+sudo chown root:lai /etc/lai/config.yaml
+sudo chmod 0640 /etc/lai/config.yaml
+```
+
+Store all secrets exclusively in `/etc/lai/lai.env` (`0640`, `root:lai`):
+
+```bash
+sudo install -m 0640 -o root -g lai /dev/null /etc/lai/lai.env
+cat <<'EOF' | sudo tee /etc/lai/lai.env >/dev/null
+LAI_LOGGING__ALERT_SMTP__PASSWORD=<smtp-password>
+LAI_LOGGING__ALERT_WEBHOOK_URL=<optional-webhook-url>
+EOF
+```
+
+### Microsoft Entra ID (Azure AD) v2.0 OIDC Configuration
+
+1. Register an API application in **Microsoft Entra ID → App registrations** and note the
+   **Directory (tenant) ID** and **Application (client) ID**.
+2. Expose an API scope for your web/desktop clients and configure v2.0 tokens (`requestedAccessTokenVersion: 2`).
+3. Configure `/etc/lai/config.yaml`:
 
 ```yaml
 auth_providers:
@@ -78,302 +160,198 @@ auth_providers:
   - "oidc"
 
 oidc_enabled: true
-oidc_issuer_url: "https://accounts.google.com"
-oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
-
-# List every Google OAuth Client ID permitted to call LAI
+oidc_issuer_url: "https://login.microsoftonline.com/<TENANT_ID>/v2.0"
+oidc_jwks_url: "https://login.microsoftonline.com/<TENANT_ID>/discovery/v2.0/keys"
 oidc_audiences:
-  - "1234567890-webapp.apps.googleusercontent.com"
-  - "1234567890-desktop.apps.googleusercontent.com"
-
-# Explicit allowlist (at least one of oidc_allowed_emails or oidc_allowed_domains is required)
-# Public consumer domains (gmail.com, yahoo.com, outlook.com, etc.) are rejected in oidc_allowed_domains.
-oidc_allowed_emails:
-  - "alice@gmail.com"
+  - "<ENTRA_API_APP_CLIENT_ID>"
+oidc_identity_claims:
+  - "email"
+  - "preferred_username"
+  - "upn"
+# Entra ID v2 tokens frequently omit `email_verified`; tenant domain allowlist enforces membership.
+oidc_require_email_verified: false
 oidc_allowed_domains:
-  - "yourcompany.com"
-oidc_leeway_seconds: 30.0
-
-# Emails promoted to full admin scope
+  - "corp.example.com"
 oidc_admin_emails:
-  - "owner@yourcompany.com"
+  - "ai-admin@corp.example.com"
 ```
 
-> **Token lifetime:** Google ID tokens expire after 1 hour. Clients should silently refresh ID
-> tokens before expiry and retry on `401 Unauthorized`.
+LAI resolves the caller's email from the first non-empty claim in `oidc_identity_claims` and binds
+client app identity fail-closed via `azp` → `appid` → `aud` against `oidc_audiences`.
 
-If a client application uses **client-side tools**, also register its OAuth Client ID with
-`lai apps create` (see [Client App & Project Lifecycle](client-apps-and-projects.md)).
+### Reverse Proxy Client IP Trust (`trusted_proxy_cidrs` & `proxy_ip_header`)
 
----
-
-## Cloudflare Named Tunnel Setup
-
-A Cloudflare Named Tunnel exposes `http://127.0.0.1:8400` over HTTPS at your custom hostname
-without opening any inbound firewall ports on your machine or router.
-
-### 1. Prerequisites in Cloudflare
-
-- A domain managed on Cloudflare DNS (active zone).
-- [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
-  installed on the same host running LAI (recommended so traffic arrives at LAI over loopback).
-
-### 2. Authenticate, Create the Tunnel, and Bind DNS
-
-```powershell
-# Opens a browser window to authorize cloudflared for your domain zone
-cloudflared tunnel login
-
-# Create a named tunnel and note the returned <TUNNEL_UUID>
-cloudflared tunnel create lai-local
-
-# Create a proxied CNAME record pointing your API hostname to the tunnel
-cloudflared tunnel route dns lai-local ai.example.com
-```
-
-Verify in the Cloudflare Dashboard under **DNS → Records** that a proxied (`Orange Cloud`) `CNAME`
-exists for `ai.example.com` targeting `<TUNNEL_UUID>.cfargotunnel.com`.
-
-### 3. Render `deploy/cloudflared/config.yml`
-
-```powershell
-uv run python -m lai.cli tunnel render-config `
-  --tunnel "<TUNNEL_UUID>" `
-  --hostname "ai.example.com" `
-  --output deploy/cloudflared/config.yml
-```
-
-On Windows, `lai tunnel render-config` resolves your home directory (`%USERPROFILE%\.cloudflared\<TUNNEL_UUID>.json`)
-automatically so `cloudflared` does not need to expand `~`; pass `--credentials-file` to override
-the path explicitly. `deploy/cloudflared/config.yml` is gitignored so your tunnel UUID and local
-paths are never committed.
-
-### 4. Choose Cloudflare Access Mode (`cf_access_enabled`)
-
-| Deployment Type | Recommended `cf_access_enabled` | Why |
-| --- | --- | --- |
-| Public Browser SPA / Desktop App using Google OIDC bearer tokens | `false` | Avoids Cloudflare Access login redirects breaking browser CORS preflight (`OPTIONS`) and `Authorization: Bearer` calls. LAI validates Google OIDC directly. |
-| Private internal / machine-to-machine deployment behind Cloudflare Zero Trust Access | `true` | Adds an extra Cloudflare Access edge check requiring a valid `Cf-Access-Jwt-Assertion` (`cf_access_team_domain` + `cf_access_aud`) or Service Token (`cf_access_client_id` + `cf_access_client_secret`). |
-
-> If you previously configured a Cloudflare Zero Trust Access Application covering `ai.example.com`
-> (or a wildcard `*.example.com`) and are running a public SPA with `cf_access_enabled: false`,
-> make sure `ai.example.com` is excluded or has a bypass policy so Access does not intercept CORS
-> preflights.
-
-### 5. Configure Tunnel Trust & CORS in `config/config.yaml`
+Configure reverse-proxy trust explicitly so per-IP rate limiting tracks real clients without
+allowing header spoofing:
 
 ```yaml
-host: "127.0.0.1"
-port: 8400
-
-# Exact browser origins allowed to call the API (no "*", no trailing "/")
-cors_allowed_origins:
-  - "https://app.example.com"
-# Optional additional custom request headers beyond core/LAI/OpenAI JS SDK defaults
-cors_extra_allow_headers: []
-
-# Trust CF-Connecting-IP for per-IP rate limiting (only honored from loopback 127.0.0.1 / ::1)
-trust_cloudflare_headers: true
-
-# Keep false for browser SPA / desktop Google OIDC deployments
-cf_access_enabled: false
+trust_cloudflare_headers: false
+trusted_proxy_cidrs:
+  - "127.0.0.1/32"
+  - "::1/128"
+  - "10.0.1.0/24" # Optional Azure Application Gateway VNet subnet
+proxy_ip_header: "x-forwarded-for" # or "x-azure-clientip" when fronted directly by Azure App Gateway
 ```
 
-> **Browser SDK & CORS diagnostics:** LAI allows standard OpenAI JS/TS SDK (`X-Stainless-*`)
-> browser headers by default. If a browser client sends an unlisted custom header, add it to
-> `cors_extra_allow_headers` (exact ASCII header names, no `*`). Rejected CORS preflights are
-> logged in `data/logs/lai.jsonl` as `cors_preflight_rejected` with the offending origin, method,
-> and requested headers.
+- When `proxy_ip_header: "x-forwarded-for"`, LAI walks the hop chain from **right to left** and
+  selects the rightmost IP not inside `trusted_proxy_cidrs` (defeating forged left-side headers and
+  failing closed to the socket peer IP on malformed entries).
+- Ensure `deploy/azure/nginx-lai.conf.example` keeps `proxy_buffering off;` and `X-Accel-Buffering: no`
+  so SSE streams flush immediately.
 
-> **Loopback requirement:** LAI only honors `CF-Connecting-IP` when `trust_cloudflare_headers: true`
-> **and** the TCP connection arrives from `127.0.0.1` or `::1`. Run `cloudflared` on the same host
-> as LAI so per-IP rate limiting tracks real client IPs instead of a shared proxy IP.
+Initialize storage, download verified models/binaries, and enable services:
 
-### 6. Cloudflare Network Limits & Streaming Notes
-
-- **100 MB request body limit:** Cloudflare Free and Pro plans reject individual HTTP requests
-  larger than 100 MB (`HTTP 413`). Keep remote file uploads under 100 MB per request (or lower
-  `max_upload_bytes` to `104857600` in `config/config.yaml` to match).
-- **Origin timeout (`HTTP 524`):** Cloudflare closes idle origin connections after 100 seconds. LAI
-  automatically sends SSE keepalive frames (every `keepalive_interval_seconds`, default `10s`) and
-  chunked whitespace heartbeats for slow non-streaming JSON turns (after
-  `json_keepalive_threshold_seconds`, default `20s`) to keep tunnel connections alive.
-- **SSL/TLS mode:** In Cloudflare Dashboard (**SSL/TLS → Overview**), set encryption mode to
-  **Full** or **Full (strict)** and enable **Always Use HTTPS** so browser clients never downgrade
-  to plaintext HTTP.
-
-### 7. Launch LAI and the Tunnel
-
-Run in two terminals:
-
-```powershell
-# Terminal 1: Start LAI (inference backend, CPU guardrail, FastAPI on 127.0.0.1:8400)
-uv run python -m lai.cli serve --config config/config.yaml
-
-# Terminal 2: Start Cloudflare Named Tunnel
-cloudflared tunnel --config deploy/cloudflared/config.yml run
-```
-
-Or on Windows, launch and supervise both together with `scripts/start-lai.ps1`:
-
-```powershell
-.\scripts\start-lai.ps1 `
-  -ConfigPath config\config.yaml `
-  -CloudflaredConfig deploy\cloudflared\config.yml
+```bash
+sudo -u lai /opt/lai/current/.venv/bin/lai init --config /etc/lai/config.yaml
+sudo -u lai /opt/lai/current/.venv/bin/lai models setup --config /etc/lai/config.yaml
+sudo nginx -t && sudo systemctl reload nginx
+sudo systemctl enable --now lai.service
 ```
 
 ---
 
-## Operational Alerting (SMTP Email & Webhooks)
+## Model Supply-Chain Integrity & Guardrail Hardening
 
-LAI automatically captures `CRITICAL` failures, timeouts, crashes, storage/security errors, and
-(by default) plain `ERROR`-level events with cooldown deduplication. All outbound alert targets are
-fully configurable with zero hardcoded hosts or recipients.
+- **Boot-Only Model Allowlist (`model_integrity`)**:
+  - `strict_allowlist: true` (default) keeps built-in pinned Gemma 4 and ShieldGemma-2B profiles
+    working out of the box while rejecting any `custom_profiles` entry lacking a pinned `sha256`,
+    not listed in `approved_model_sha256s`, or referencing an `hf_repo` outside `allowed_hf_repos`
+    (when non-empty).
+  - `verify_sha256_on_startup: true` (default) verifies both the primary GGUF and ShieldGemma GGUF
+    with streaming 1 MiB constant-time SHA-256 comparison before spawning `llama-server`, logging a
+    `SECURITY_ALERT` and refusing to start on any tamper or corruption.
+  - `llama.cpp` release tarballs are verified against pinned digests in `src/lai/inference/manifest.py`
+    with Tar-Slip and symlink-escape protection.
+- **Bidirectional Boot-Locked Guardrails**:
+  - Ingress scans `POST /v1/sessions` `system_prompt`, per-turn `system_prompt`, prior turns, and
+    user prompts (`direction=ingress`); client tool outputs are scanned as `direction=tool_output`.
+  - Egress (`output_mode: "buffered"` default) buffers thinking and content deltas, evaluates them
+    with ShieldGemma-2B `n_probs` calibration before streaming or persisting, and emits
+    `X-LAI-Guardrail-Direction: egress` on refusal.
+  - `allow_runtime_disable: false` and `max_violation_threshold: 0.95` are **boot-only locks**:
+    neither `PATCH /v1/system/config/guardrails`, scoped reloads, nor tampered SQLite rows can
+    disable guardrails, enable `fail_open`, set `output_mode: "off"`, or raise `violation_threshold`
+    above `max_violation_threshold` (attempts return `422` and emit `AlertCategory.SECURITY_ALERT`).
 
-### 1. Configure Outbound SMTP Email Alerts
+---
 
-Enable SMTP alerting in `config/config.yaml` and pass the SMTP password strictly via environment
-variable (`LAI_LOGGING__ALERT_SMTP__PASSWORD`) so credentials are never committed to disk:
+## Atomic Self-Upgrades & Rollback (`lai upgrade`)
 
-```yaml
-logging:
-  alert_cooldown_seconds: 60.0
-  alert_on_timeouts: true
-  alert_on_errors: true
-  alert_smtp:
-    enabled: true
-    host: "smtp.example.com"
-    port: 587
-    tls_mode: "starttls"        # "starttls", "ssl", or "none"
-    username: "alerts@example.com"
-    from_address: "alerts@example.com"
-    to_addresses:
-      - "oncall@example.com"
-    use_admin_emails_fallback: true
-    subject_prefix: "[LAI Alert]"
-    min_severity: "error"       # "error" or "critical"
-    categories: []              # empty = all categories
+LAI supports verified, zero-guesswork wheel slot upgrades under `/opt/lai/releases/v<version>` with
+an atomic `/opt/lai/current` symlink swap, WAL-safe online SQLite backup (`PRAGMA integrity_check`
++ POSIX `uid`/`gid` preservation), systemd restart, health verification, and automatic rollback.
+
+```bash
+# Check GitHub Releases for a newer verified wheel (reads SHA256SUMS.txt)
+sudo /opt/lai/current/.venv/bin/lai upgrade check --config /etc/lai/config.yaml
+
+# Dry-run or apply latest verified release (optionally refreshing pinned llama.cpp binaries)
+sudo /opt/lai/current/.venv/bin/lai upgrade apply --config /etc/lai/config.yaml --dry-run
+sudo /opt/lai/current/.venv/bin/lai upgrade apply --config /etc/lai/config.yaml --with-binaries
+
+# CI/CD air-gapped push deploy from a staged local wheel + explicit SHA-256
+sudo /opt/lai/current/.venv/bin/lai upgrade apply \
+  --config /etc/lai/config.yaml \
+  --wheel /tmp/lai-0.2.0-py3-none-any.whl \
+  --sha256 "<64-hex-sha256>"
+
+# Roll back immediately to the previous slot (and optionally restore a pre-upgrade DB backup)
+sudo /opt/lai/current/.venv/bin/lai upgrade rollback \
+  --config /etc/lai/config.yaml \
+  --backup /var/lib/lai/backups/pre-v0.2.0-<timestamp>.db
 ```
 
-```powershell
-# Set SMTP password via environment variable before launching `lai serve`
-$env:LAI_LOGGING__ALERT_SMTP__PASSWORD = "<app-password-or-smtp-token>"
+### Opt-In Scheduled Upgrades (`lai-upgrade.timer`)
+
+`deploy/systemd/lai-upgrade.service` runs `lai upgrade apply --config /etc/lai/config.yaml --if-enabled`,
+which merges any persisted runtime overrides from SQLite before evaluating `updates.enabled` and
+routes upgrade/checksum/health failures through `AlertManager` (SMTP/webhook/file alerts):
+
+```bash
+# Enable weekly scheduled checks (remains a safe no-op while updates.enabled is false)
+sudo systemctl enable --now lai-upgrade.timer
 ```
 
-- If `to_addresses` is left empty and `use_admin_emails_fallback: true`, LAI delivers email alerts
-  to all addresses in `oidc_admin_emails`.
-- Startup and live updates validate fail-closed: enabling SMTP requires a valid host,
-  `from_address`, and at least one effective recipient.
-- Optional webhook notifications (`logging.alert_webhook_url`, or `LAI_LOGGING__ALERT_WEBHOOK_URL`)
-  remain supported alongside SMTP, each with independent `min_severity` and `categories` filters.
+### Dependency Automation (Renovate)
 
-### 2. Test Alert Delivery Before Go-Live
+[`renovate.json`](../renovate.json) keeps Python dependencies, `.github/tools/pip-audit`,
+`mise.toml`, `docker/ci.Dockerfile`, GitHub Actions, Scalar CDN, `ggml-org/llama.cpp`, and `mise`
+fresh with a mandatory **7-day release cooldown** (`minimumReleaseAge: "7 days"`). Checksum-coupled
+custom pins disable automerge so operators review SHA-256 digests explicitly.
 
-Send a synthetic test alert through all configured sinks and inspect per-sink delivery status:
+---
 
-```powershell
-curl.exe -X POST https://ai.example.com/v1/system/alerting/test `
-  -H "Authorization: Bearer $env:LAI_ADMIN_KEY" `
-  -H "Content-Type: application/json" `
+## Operational Alerting, Analytics & Live Configuration Hot-Swapping
+
+### Outbound SMTP & Webhook Alerts
+
+Configure `logging.alert_smtp` in `/etc/lai/config.yaml` and supply `LAI_LOGGING__ALERT_SMTP__PASSWORD`
+via `/etc/lai/lai.env`. Verify end-to-end delivery with:
+
+```bash
+curl -fsS -X POST https://ai.corp.example.com/v1/system/alerting/test \
+  -H "Authorization: Bearer ${LAI_ADMIN_KEY}" \
+  -H "Content-Type: application/json" \
   -d '{"message":"Pre-flight SMTP verification"}'
 ```
 
----
+### Usage & Guardrail Efficacy Analytics
 
-## Usage Analytics & Live Configuration Hot-Swapping
-
-### Endpoint & Token Usage Analytics
-
-LAI aggregates privacy-preserving UTC hourly rollups in SQLite (opaque principal IDs and OAuth
-client IDs only — never raw prompts, emails, or IP addresses) with automatic retention pruning
-(`analytics.retention_days`, default `90` days).
-
-```powershell
-# Query trailing 24-hour (or up to 2160-hour / 90-day) usage summary
-curl.exe "https://ai.example.com/v1/system/analytics?window_hours=24" `
-  -H "Authorization: Bearer $env:LAI_ADMIN_KEY"
-```
+`GET /v1/system/analytics?window_hours=24` returns privacy-preserving hourly rollups for endpoints,
+opaque principals/client apps, tokens, and **guardrail efficacy** (`guardrails.total_evaluations`,
+`total_blocked`, `block_rate`, `fail_closed_count`, `by_direction` across `ingress`/`egress`/`tool_output`,
+and `top_policies`).
 
 ### Zero-Restart Isolated Configuration Hot-Swapping
-
-Administrators (`admin` scope) can inspect and update operational settings live without restarting
-LAI or disrupting active requests, OIDC JWKS caches, or rate-limit buckets. Non-secret live edits
-persist in SQLite across restarts, while secrets (`LAI_LOGGING__ALERT_SMTP__PASSWORD`,
-`LAI_LOGGING__ALERT_WEBHOOK_URL`) stay strictly in YAML/environment variables and are never
-returned by `GET` endpoints.
 
 | Subsystem | Admin Endpoints | Live Editable Settings |
 | --- | --- | --- |
 | **Alerting** | `GET` / `PATCH /v1/system/alerting`, `POST /v1/system/alerting/test` | SMTP host/port/TLS/recipients/filters, webhook toggle/filters, cooldown, `alert_on_errors`, `alert_on_timeouts` |
 | **Analytics** | `GET /v1/system/analytics`, `GET` / `PATCH /v1/system/analytics/config` | `enabled`, `retention_days` (prunes expired buckets immediately) |
-| **OIDC / Auth** | `GET` / `PATCH /v1/system/config/oidc` | `oidc_audiences`, `oidc_allowed_emails`, `oidc_allowed_domains`, `oidc_admin_emails`, `oidc_default_scopes`, `oidc_leeway_seconds` |
+| **OIDC / Auth** | `GET` / `PATCH /v1/system/config/oidc` | `oidc_audiences`, `oidc_allowed_emails`, `oidc_allowed_domains`, `oidc_admin_emails`, `oidc_default_scopes`, `oidc_require_email_verified`, `oidc_identity_claims`, `oidc_leeway_seconds` |
 | **CORS** | `GET` / `PATCH /v1/system/config/cors` | `cors_allowed_origins`, `cors_extra_allow_headers` |
-| **Limits & Logging** | `GET` / `PATCH /v1/system/config/limits` | `rate_limit_rpm`, `ip_rate_limit_rpm`, per-principal quotas, queue bounds, `max_upload_bytes`, keepalive timings, `trust_cloudflare_headers`, `log_level` |
-| **Guardrails Policy** | `GET` / `PATCH /v1/system/config/guardrails` | `enabled`, `block_mode`, `refusal_text`, `violation_threshold`, `fail_open`, `timeout_seconds` |
+| **Limits & Proxy** | `GET` / `PATCH /v1/system/config/limits` | `rate_limit_rpm`, `ip_rate_limit_rpm`, quotas, queue bounds, `max_upload_bytes`, keepalives, `trust_cloudflare_headers`, `trusted_proxy_cidrs`, `proxy_ip_header`, `log_level` |
+| **Guardrails Policy** | `GET` / `PATCH /v1/system/config/guardrails` | `enabled`, `block_mode`, `output_mode`, `refusal_text`, `violation_threshold`, `fail_open`, `timeout_seconds` (enforcing boot locks!) |
+| **Updates Policy** | `GET` / `PATCH /v1/system/config/updates` | `enabled`, `keep_releases`, `auto_rollback`, `allow_prerelease`, `health_timeout_seconds`, `health_poll_interval_seconds` |
 
-To pull updated values from `config/config.yaml` and `LAI_*` environment variables for **only**
-specific section(s) (clearing their persisted runtime overrides without touching unrelated sections):
+Reload specific sections from YAML/env (clearing only their SQLite overrides):
 
-```powershell
-curl.exe -X POST https://ai.example.com/v1/system/config/reload `
-  -H "Authorization: Bearer $env:LAI_ADMIN_KEY" `
-  -H "Content-Type: application/json" `
-  -d '{"sections":["alerting","cors"]}'
+```bash
+curl -fsS -X POST https://ai.corp.example.com/v1/system/config/reload \
+  -H "Authorization: Bearer ${LAI_ADMIN_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"sections":["alerting","cors","updates"]}'
 ```
 
 ---
 
-## Production Configuration Checklist
+## Production Security Checklist & Post-Deployment Verification
 
-Before opening traffic, verify these settings in `config/config.yaml`:
+- [ ] `host: "127.0.0.1"` (never bind `0.0.0.0` directly behind Nginx or Cloudflare Tunnel)
+- [ ] `model_integrity.strict_allowlist: true` and `model_integrity.verify_sha256_on_startup: true`
+- [ ] `guardrails.enabled: true`, `guardrails.output_mode: "buffered"`, `guardrails.fail_open: false`,
+  `guardrails.allow_runtime_disable: false`
+- [ ] `oidc_enabled: true` with explicit `oidc_audiences` and corporate `oidc_allowed_domains` / `oidc_allowed_emails`
+- [ ] `cors_allowed_origins` lists only exact production `https://` origins
+- [ ] `trusted_proxy_cidrs` and `proxy_ip_header` (or `trust_cloudflare_headers`) match your exact proxy hops
+- [ ] Secrets stored strictly in `/etc/lai/lai.env` (`chmod 0640`, `root:lai`), never committed to YAML
+- [ ] Outbound SMTP/webhook alerts verified via `POST /v1/system/alerting/test`
 
-- [ ] `host: "127.0.0.1"` (do not bind `0.0.0.0` when serving through a local Cloudflare Tunnel)
-- [ ] `guardrails.enabled: true` and `guardrails.fail_open: false`
-- [ ] `oidc_enabled: true`, `auth_providers: ["api_key", "oidc"]`, explicit `oidc_audiences`, and
-  explicit `oidc_allowed_emails` / corporate `oidc_allowed_domains`
-- [ ] `cors_allowed_origins` lists only production `https://` origins (no `localhost`, no `*`)
-- [ ] `trust_cloudflare_headers: true` (with `cloudflared` running on loopback)
-- [ ] `cf_access_enabled: false` (for SPA/desktop OIDC) or `true` with team domain + AUD / service
-  token credentials (for Zero Trust Access)
-- [ ] Quotas & rate limits reviewed (`max_projects_per_principal`,
-  `max_storage_bytes_per_principal`, `max_queued_jobs_per_principal`, `rate_limit_rpm`,
-  `ip_rate_limit_rpm`)
-- [ ] `logging.enable_file_logs: true`, `logging.alert_on_errors: true`, and outbound SMTP email
-  alerting (`logging.alert_smtp` + `LAI_LOGGING__ALERT_SMTP__PASSWORD`) or webhook configured and
-  verified via `POST /v1/system/alerting/test`
-- [ ] `analytics.enabled: true` and `analytics.retention_days` reviewed
+```bash
+# 1. Public liveness probe & runtime docs disabled (expect 200, then 404)
+curl -i https://ai.corp.example.com/v1/health
+curl -i https://ai.corp.example.com/docs
 
----
-
-## Post-Deployment Verification
-
-```powershell
-# 1. Public liveness probe over HTTPS
-curl.exe -i https://ai.example.com/v1/health
-
-# 2. Confirm runtime API docs are disabled (expect 404)
-curl.exe -i https://ai.example.com/docs
-
-# 3. Verify CORS preflight for your SPA origin (expect 200 + Access-Control-Allow-Origin)
-curl.exe -i -X OPTIONS https://ai.example.com/v1/projects `
-  -H "Origin: https://app.example.com" `
-  -H "Access-Control-Request-Method: POST" `
+# 2. Verify CORS preflight and unauthenticated rejection (expect 200, then 401)
+curl -i -X OPTIONS https://ai.corp.example.com/v1/projects \
+  -H "Origin: https://app.corp.example.com" \
+  -H "Access-Control-Request-Method: POST" \
   -H "Access-Control-Request-Headers: Authorization, Content-Type"
+curl -i https://ai.corp.example.com/v1/projects
 
-# 4. Verify unauthenticated requests are rejected (expect 401)
-curl.exe -i https://ai.example.com/v1/projects
-
-# 5. Verify admin health telemetry (GPU, inference backend, guardrail backend)
-curl.exe -i https://ai.example.com/v1/system/status `
-  -H "Authorization: Bearer $env:LAI_ADMIN_KEY"
-
-# 6. Verify outbound SMTP/webhook alert delivery
-curl.exe -i -X POST https://ai.example.com/v1/system/alerting/test `
-  -H "Authorization: Bearer $env:LAI_ADMIN_KEY" `
-  -H "Content-Type: application/json" `
-  -d '{"message":"Post-deploy alert test"}'
-
-# 7. Verify endpoint usage analytics collection
-curl.exe -i "https://ai.example.com/v1/system/analytics?window_hours=1" `
-  -H "Authorization: Bearer $env:LAI_ADMIN_KEY"
+# 3. Verify GPU, llama-server, ShieldGemma, alerting, and guardrail analytics
+curl -fsS https://ai.corp.example.com/v1/system/status \
+  -H "Authorization: Bearer ${LAI_ADMIN_KEY}"
+curl -fsS "https://ai.corp.example.com/v1/system/analytics?window_hours=1" \
+  -H "Authorization: Bearer ${LAI_ADMIN_KEY}"
 ```

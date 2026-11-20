@@ -398,6 +398,9 @@
             "title": "Generated At",
             "type": "string"
           },
+          "guardrails": {
+            "$ref": "#/components/schemas/GuardrailAnalyticsSummary"
+          },
           "hourly": {
             "items": {
               "$ref": "#/components/schemas/HourlyUsageBucket"
@@ -1420,8 +1423,73 @@
         "title": "GpuStatusDTO",
         "type": "object"
       },
+      "GuardrailAnalyticsSummary": {
+        "additionalProperties": false,
+        "description": "Windowed guardrail efficacy summary embedded in AnalyticsReport.",
+        "properties": {
+          "avg_latency_ms": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Avg Latency Ms",
+            "type": "number"
+          },
+          "block_rate": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Block Rate",
+            "type": "number"
+          },
+          "by_direction": {
+            "items": {
+              "$ref": "#/components/schemas/GuardrailDirectionSummary"
+            },
+            "title": "By Direction",
+            "type": "array"
+          },
+          "fail_closed_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Fail Closed Count",
+            "type": "integer"
+          },
+          "max_latency_ms": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Max Latency Ms",
+            "type": "number"
+          },
+          "top_policies": {
+            "items": {
+              "$ref": "#/components/schemas/GuardrailPolicyCount"
+            },
+            "title": "Top Policies",
+            "type": "array"
+          },
+          "total_allowed": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Total Allowed",
+            "type": "integer"
+          },
+          "total_blocked": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Total Blocked",
+            "type": "integer"
+          },
+          "total_evaluations": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Total Evaluations",
+            "type": "integer"
+          }
+        },
+        "title": "GuardrailAnalyticsSummary",
+        "type": "object"
+      },
       "GuardrailBlockMode": {
-        "description": "Response mode when a prompt is blocked by the guardrail policy.",
+        "description": "Response mode when a prompt or output is blocked by the guardrail policy.",
         "enum": [
           "refusal_message",
           "http_error"
@@ -1429,17 +1497,116 @@
         "title": "GuardrailBlockMode",
         "type": "string"
       },
+      "GuardrailDirection": {
+        "description": "Direction of text inspected by the guardrail pipeline.",
+        "enum": [
+          "ingress",
+          "egress",
+          "tool_output"
+        ],
+        "title": "GuardrailDirection",
+        "type": "string"
+      },
+      "GuardrailDirectionSummary": {
+        "additionalProperties": false,
+        "description": "Aggregated guardrail evaluation volume, block rate, and latency per direction.",
+        "properties": {
+          "allowed": {
+            "minimum": 0.0,
+            "title": "Allowed",
+            "type": "integer"
+          },
+          "avg_latency_ms": {
+            "minimum": 0.0,
+            "title": "Avg Latency Ms",
+            "type": "number"
+          },
+          "block_rate": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Block Rate",
+            "type": "number"
+          },
+          "blocked": {
+            "minimum": 0.0,
+            "title": "Blocked",
+            "type": "integer"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/GuardrailDirection"
+          },
+          "evaluations": {
+            "minimum": 0.0,
+            "title": "Evaluations",
+            "type": "integer"
+          },
+          "fail_closed": {
+            "minimum": 0.0,
+            "title": "Fail Closed",
+            "type": "integer"
+          },
+          "max_latency_ms": {
+            "minimum": 0.0,
+            "title": "Max Latency Ms",
+            "type": "number"
+          }
+        },
+        "required": [
+          "direction",
+          "evaluations",
+          "allowed",
+          "blocked",
+          "block_rate",
+          "fail_closed",
+          "avg_latency_ms",
+          "max_latency_ms"
+        ],
+        "title": "GuardrailDirectionSummary",
+        "type": "object"
+      },
+      "GuardrailOutputMode": {
+        "description": "Enforcement mode for ShieldGemma model response egress scanning.",
+        "enum": [
+          "buffered",
+          "audit_only",
+          "off"
+        ],
+        "title": "GuardrailOutputMode",
+        "type": "string"
+      },
+      "GuardrailPolicyCount": {
+        "additionalProperties": false,
+        "description": "Aggregated block count per violated safety policy and direction.",
+        "properties": {
+          "block_count": {
+            "minimum": 0.0,
+            "title": "Block Count",
+            "type": "integer"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/GuardrailDirection"
+          },
+          "policy": {
+            "minLength": 1,
+            "title": "Policy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "direction",
+          "policy",
+          "block_count"
+        ],
+        "title": "GuardrailPolicyCount",
+        "type": "object"
+      },
       "GuardrailsPolicyConfigResponse": {
         "additionalProperties": false,
-        "description": "Live pre-flight guardrail enforcement policy.",
+        "description": "Live ingress and egress ShieldGemma guardrail enforcement policy.",
         "properties": {
-          "backend": {
-            "enum": [
-              "llamacpp",
-              "ollama"
-            ],
-            "title": "Backend",
-            "type": "string"
+          "allow_runtime_disable": {
+            "title": "Allow Runtime Disable",
+            "type": "boolean"
           },
           "block_mode": {
             "$ref": "#/components/schemas/GuardrailBlockMode"
@@ -1452,6 +1619,15 @@
             "title": "Fail Open",
             "type": "boolean"
           },
+          "max_violation_threshold": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Max Violation Threshold",
+            "type": "number"
+          },
+          "output_mode": {
+            "$ref": "#/components/schemas/GuardrailOutputMode"
+          },
           "refusal_text": {
             "title": "Refusal Text",
             "type": "string"
@@ -1462,19 +1638,21 @@
             "type": "number"
           },
           "violation_threshold": {
-            "exclusiveMaximum": 1.0,
-            "exclusiveMinimum": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
             "title": "Violation Threshold",
             "type": "number"
           }
         },
         "required": [
           "enabled",
-          "backend",
           "block_mode",
+          "output_mode",
           "refusal_text",
           "violation_threshold",
           "fail_open",
+          "allow_runtime_disable",
+          "max_violation_threshold",
           "timeout_seconds"
         ],
         "title": "GuardrailsPolicyConfigResponse",
@@ -1585,7 +1763,7 @@
       },
       "LimitsRuntimeConfigResponse": {
         "additionalProperties": false,
-        "description": "Live rate limits, per-principal quotas, upload limits, keepalive, and log level.",
+        "description": "Live rate limits, per-principal quotas, proxy trust, upload limits, keepalive, and logs.",
         "properties": {
           "ip_rate_limit_rpm": {
             "minimum": 1.0,
@@ -1631,6 +1809,15 @@
             "title": "Max Upload Bytes",
             "type": "integer"
           },
+          "proxy_ip_header": {
+            "enum": [
+              "cf-connecting-ip",
+              "x-forwarded-for",
+              "x-azure-clientip"
+            ],
+            "title": "Proxy Ip Header",
+            "type": "string"
+          },
           "rate_limit_rpm": {
             "minimum": 1.0,
             "title": "Rate Limit Rpm",
@@ -1639,6 +1826,13 @@
           "trust_cloudflare_headers": {
             "title": "Trust Cloudflare Headers",
             "type": "boolean"
+          },
+          "trusted_proxy_cidrs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Trusted Proxy Cidrs",
+            "type": "array"
           }
         },
         "required": [
@@ -1652,6 +1846,7 @@
           "keepalive_interval_seconds",
           "json_keepalive_threshold_seconds",
           "trust_cloudflare_headers",
+          "proxy_ip_header",
           "log_level"
         ],
         "title": "LimitsRuntimeConfigResponse",
@@ -1899,17 +2094,29 @@
             "title": "Oidc Default Scopes",
             "type": "array"
           },
+          "oidc_identity_claims": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Oidc Identity Claims",
+            "type": "array"
+          },
           "oidc_leeway_seconds": {
             "maximum": 300.0,
             "minimum": 0.0,
             "title": "Oidc Leeway Seconds",
             "type": "number"
+          },
+          "oidc_require_email_verified": {
+            "title": "Oidc Require Email Verified",
+            "type": "boolean"
           }
         },
         "required": [
           "enabled",
           "issuer_url",
           "jwks_url",
+          "oidc_require_email_verified",
           "oidc_leeway_seconds"
         ],
         "title": "OidcRuntimeConfigResponse",
@@ -2562,7 +2769,8 @@
                 "oidc",
                 "cors",
                 "limits",
-                "guardrails"
+                "guardrails",
+                "updates"
               ],
               "type": "string"
             },
@@ -2600,7 +2808,8 @@
                 "oidc",
                 "cors",
                 "limits",
-                "guardrails"
+                "guardrails",
+                "updates"
               ],
               "type": "string"
             },
@@ -2615,7 +2824,8 @@
                 "oidc",
                 "cors",
                 "limits",
-                "guardrails"
+                "guardrails",
+                "updates"
               ],
               "type": "string"
             },
@@ -3440,6 +3650,17 @@
             "title": "Guardrail Blocked",
             "type": "boolean"
           },
+          "guardrail_direction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guardrail Direction"
+          },
           "guardrail_policy": {
             "anyOf": [
               {
@@ -3891,6 +4112,16 @@
             ],
             "title": "Fail Open"
           },
+          "output_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GuardrailOutputMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "refusal_text": {
             "anyOf": [
               {
@@ -3918,8 +4149,8 @@
           "violation_threshold": {
             "anyOf": [
               {
-                "exclusiveMaximum": 1.0,
-                "exclusiveMinimum": 0.0,
+                "maximum": 1.0,
+                "minimum": 0.0,
                 "type": "number"
               },
               {
@@ -3934,7 +4165,7 @@
       },
       "UpdateLimitsConfigRequest": {
         "additionalProperties": false,
-        "description": "Partial live update for rate limits, quotas, queue bounds, keepalive, and log level.",
+        "description": "Partial live update for limits, quotas, proxy trust, keepalive, and log level.",
         "properties": {
           "ip_rate_limit_rpm": {
             "anyOf": [
@@ -4043,6 +4274,22 @@
             ],
             "title": "Max Upload Bytes"
           },
+          "proxy_ip_header": {
+            "anyOf": [
+              {
+                "enum": [
+                  "cf-connecting-ip",
+                  "x-forwarded-for",
+                  "x-azure-clientip"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Ip Header"
+          },
           "rate_limit_rpm": {
             "anyOf": [
               {
@@ -4065,6 +4312,20 @@
               }
             ],
             "title": "Trust Cloudflare Headers"
+          },
+          "trusted_proxy_cidrs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trusted Proxy Cidrs"
           }
         },
         "title": "UpdateLimitsConfigRequest",
@@ -4072,7 +4333,7 @@
       },
       "UpdateOidcConfigRequest": {
         "additionalProperties": false,
-        "description": "Partial live update for OIDC audiences, allowlists, scopes, and clock leeway.",
+        "description": "Partial live update for OIDC audiences, allowlists, scopes, claims, and leeway.",
         "properties": {
           "oidc_admin_emails": {
             "anyOf": [
@@ -4144,6 +4405,20 @@
             ],
             "title": "Oidc Default Scopes"
           },
+          "oidc_identity_claims": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Identity Claims"
+          },
           "oidc_leeway_seconds": {
             "anyOf": [
               {
@@ -4156,9 +4431,176 @@
               }
             ],
             "title": "Oidc Leeway Seconds"
+          },
+          "oidc_require_email_verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Require Email Verified"
           }
         },
         "title": "UpdateOidcConfigRequest",
+        "type": "object"
+      },
+      "UpdateUpdatesConfigRequest": {
+        "additionalProperties": false,
+        "description": "Partial live update for non-privileged self-update scheduling and rollback toggles.",
+        "properties": {
+          "allow_prerelease": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Prerelease"
+          },
+          "auto_rollback": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Rollback"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "health_poll_interval_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 30.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health Poll Interval Seconds"
+          },
+          "health_timeout_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 600.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health Timeout Seconds"
+          },
+          "keep_releases": {
+            "anyOf": [
+              {
+                "maximum": 20.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keep Releases"
+          }
+        },
+        "title": "UpdateUpdatesConfigRequest",
+        "type": "object"
+      },
+      "UpdatesRuntimeConfigResponse": {
+        "additionalProperties": false,
+        "description": "Live self-update and rollback orchestration settings.",
+        "properties": {
+          "allow_prerelease": {
+            "title": "Allow Prerelease",
+            "type": "boolean"
+          },
+          "auto_rollback": {
+            "title": "Auto Rollback",
+            "type": "boolean"
+          },
+          "backups_dir": {
+            "title": "Backups Dir",
+            "type": "string"
+          },
+          "current_symlink": {
+            "title": "Current Symlink",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "github_repo": {
+            "title": "Github Repo",
+            "type": "string"
+          },
+          "health_poll_interval_seconds": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 30.0,
+            "title": "Health Poll Interval Seconds",
+            "type": "number"
+          },
+          "health_timeout_seconds": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 600.0,
+            "title": "Health Timeout Seconds",
+            "type": "number"
+          },
+          "health_url": {
+            "title": "Health Url",
+            "type": "string"
+          },
+          "keep_releases": {
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Keep Releases",
+            "type": "integer"
+          },
+          "releases_dir": {
+            "title": "Releases Dir",
+            "type": "string"
+          },
+          "service_name": {
+            "title": "Service Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "github_repo",
+          "releases_dir",
+          "current_symlink",
+          "backups_dir",
+          "service_name",
+          "health_url",
+          "health_timeout_seconds",
+          "health_poll_interval_seconds",
+          "keep_releases",
+          "auto_rollback",
+          "allow_prerelease"
+        ],
+        "title": "UpdatesRuntimeConfigResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -5879,6 +6321,68 @@
           }
         },
         "summary": "Reload Scoped Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system/config/updates": {
+      "get": {
+        "description": "Return live self-update scheduling and rollback configuration.",
+        "operationId": "get_updates_runtime_config_v1_system_config_updates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatesRuntimeConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Updates Runtime Config",
+        "tags": [
+          "system"
+        ]
+      },
+      "patch": {
+        "description": "Hot-swap non-privileged self-update scheduling and rollback toggles.",
+        "operationId": "patch_updates_runtime_config_v1_system_config_updates_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUpdatesConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatesRuntimeConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Updates Runtime Config",
         "tags": [
           "system"
         ]

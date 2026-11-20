@@ -1,14 +1,12 @@
-# Local AI Platform (LAI) Example Configuration
-# Copy to config/config.yaml or set LAI_CONFIG_FILE=/path/to/config.yaml.
+# Local AI Platform (LAI) Example Configuration (Linux / Ubuntu x64)
+# Copy to config/config.yaml or set LAI_CONFIG_FILE=/etc/lai/config.yaml.
 # Precedence: CLI flags > LAI_* env vars > YAML config > defaults.
 
 host: "127.0.0.1"
 port: 8400
-# Inference backend: "llamacpp" (direct llama-server.exe) or "ollama" (signed Ollama daemon)
-inference_backend: "llamacpp"
+# Pure Linux x64 llama.cpp server (Gemma 4 GPU on :8081, ShieldGemma-2B CPU on :8082)
 llama_host: "127.0.0.1"
 llama_port: 8081
-ollama_base_url: "http://127.0.0.1:11434"
 
 data_dir: "data"
 models_dir: "models"
@@ -40,8 +38,9 @@ cors_extra_allow_headers: []
 auth_providers:
   - "api_key"
 
-# Optional Google / OIDC JWT authentication (fail-closed: requires audiences + allowed emails/domains)
-# Note: Consumer domains (gmail.com, yahoo.com, outlook.com, etc.) are rejected in oidc_allowed_domains.
+# Optional OIDC JWT authentication (Google OIDC or Microsoft Entra ID v2.0)
+# Fail-closed: requires non-empty oidc_audiences and oidc_allowed_emails or oidc_allowed_domains.
+# Consumer domains (gmail.com, yahoo.com, outlook.com, etc.) are rejected in oidc_allowed_domains.
 oidc_enabled: false
 oidc_issuer_url: "https://accounts.google.com"
 oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
@@ -49,6 +48,12 @@ oidc_audience: null
 oidc_audiences: [] # Preferred multi-audience list (e.g. Web SPA + Desktop OAuth client IDs)
 oidc_allowed_emails: []
 oidc_allowed_domains: []
+# Set to false for Microsoft Entra ID v2 tokens that omit `email_verified`
+oidc_require_email_verified: true
+oidc_identity_claims:
+  - "email"
+  - "preferred_username"
+  - "upn"
 oidc_leeway_seconds: 30.0
 oidc_default_scopes:
   - "projects:read"
@@ -60,8 +65,12 @@ oidc_default_scopes:
   - "tools:safe"
 oidc_admin_emails: []
 
-# Proxy & Cloudflare Named Tunnel edge trust (enable only when traffic cannot bypass the proxy)
+# Reverse-proxy client IP trust (enable only when traffic cannot bypass your proxy)
 trust_cloudflare_headers: false
+# Trusted proxy CIDRs for X-Forwarded-For / X-Azure-ClientIP / CF-Connecting-IP (e.g. ["127.0.0.1/32", "::1/128"])
+trusted_proxy_cidrs: []
+# Header inspected when peer IP matches trusted_proxy_cidrs: "x-forwarded-for", "x-azure-clientip", or "cf-connecting-ip"
+proxy_ip_header: "x-forwarded-for"
 
 # Optional Cloudflare Access edge verification (leave false for public SPA/Desktop OIDC APIs)
 cf_access_enabled: false
@@ -70,24 +79,32 @@ cf_access_client_secret: null
 cf_access_team_domain: null
 cf_access_aud: null
 
-# Primary model profile (Gemma 4 26B-A4B MoE)
+# Primary model profile (Gemma 4 26B-A4B MoE with pinned HuggingFace revision & SHA-256)
 default_model_profile: "gemma4-26b-a4b"
 custom_profiles: {}
 
-# CPU-only ShieldGemma-2B pre-flight prompt safety guardrail
+# Boot-only GGUF supply-chain integrity and allowlist enforcement
+model_integrity:
+  strict_allowlist: true
+  verify_sha256_on_startup: true
+  approved_model_sha256s: []
+  allowed_hf_repos: []
+
+# CPU-only ShieldGemma-2B ingress + buffered egress safety guardrail (boot-locked by default)
 guardrails:
   enabled: true
-  backend: "llamacpp"
-  block_mode: "refusal_message"
+  block_mode: "refusal_message" # "refusal_message" or "http_error"
+  output_mode: "buffered" # "buffered", "audit_only", or "off"
+  allow_runtime_disable: false # Boot-only lock: prevents live API from disabling guardrails or enabling fail_open
+  max_violation_threshold: 0.95 # Boot-only ceiling for runtime violation_threshold updates
   refusal_text: "I cannot fulfill this request because the prompt was flagged by the safety guardrail policy."
   host: "127.0.0.1"
   port: 8082
-  ollama_base_url: "http://127.0.0.1:11434"
-  ollama_model: "lai-shieldgemma-2b"
   hf_repo: "QuantFactory/shieldgemma-2b-GGUF"
   fallback_hf_repo: "mradermacher/shieldgemma-2b-GGUF"
   hf_filename: "shieldgemma-2b.Q4_K_M.gguf"
-  cpu_threads: 12
+  hf_revision: "8755ece4b20dd84d7564131e385d9c205d03621a"
+  sha256: "47b0c3f4ec0bf93659ab2fc92cf2041374ef78bf1cb5b8c790421f463e7b7979"
   ctx_size: 4096
   parallel_slots: 2
   timeout_seconds: 30.0
@@ -110,7 +127,6 @@ logging:
   compress_rotated: true
   alert_cooldown_seconds: 60.0
   alert_on_timeouts: true
-  # Emit deduplicated alerts for plain ERROR-level logs (not just CRITICAL/timeouts)
   alert_on_errors: true
   # Optional secondary webhook sink (set secret URL via LAI_LOGGING__ALERT_WEBHOOK_URL)
   alert_webhook_url: null
@@ -120,7 +136,7 @@ logging:
   # Optional primary outbound SMTP email alert sink (set password via LAI_LOGGING__ALERT_SMTP__PASSWORD)
   alert_smtp:
     enabled: false
-    host: null # e.g. "smtp.gmail.com" or "smtp.mailgun.org"
+    host: null # e.g. "smtp.office365.com" or "smtp.mailgun.org"
     port: 587
     tls_mode: "starttls" # "starttls", "ssl", or "none"
     username: null
@@ -133,7 +149,22 @@ logging:
     min_severity: "error" # "error" or "critical"
     categories: [] # empty = all categories
 
-# Built-in privacy-preserving hourly endpoint & token usage analytics
+# Built-in privacy-preserving hourly endpoint, token, and guardrail efficacy analytics
 analytics:
   enabled: true
   retention_days: 90
+
+# Verified atomic wheel upgrades & automatic rollback (`lai upgrade` / `lai-upgrade.timer`)
+updates:
+  enabled: false # Opt-in: keep false unless automated systemd timer upgrades are desired
+  github_repo: "blake-olinger/lai"
+  releases_dir: "/opt/lai/releases"
+  current_symlink: "/opt/lai/current"
+  backups_dir: "/var/lib/lai/backups"
+  service_name: "lai.service"
+  health_url: "http://127.0.0.1:8400/v1/health"
+  health_timeout_seconds: 60.0
+  health_poll_interval_seconds: 1.0
+  keep_releases: 3
+  auto_rollback: true
+  allow_prerelease: false

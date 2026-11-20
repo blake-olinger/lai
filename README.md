@@ -5,233 +5,171 @@
 [![Docs](https://github.com/blake-olinger/lai/actions/workflows/docs.yml/badge.svg)](https://blake-olinger.github.io/lai/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Local, multi-tenant, security-hardened AI server for isolated project workspaces, large log and
-source-code analysis, pre-flight prompt safety guardrails, guarded tool execution, and
-OpenAI-compatible remote access over Cloudflare Named Tunnels.
+Linux-first, multi-tenant, security-hardened local AI server for isolated project workspaces, large
+log and source-code analysis, bidirectional ingress/egress safety guardrails, guarded tool
+execution, verified atomic self-upgrades, and OpenAI-compatible remote access behind Cloudflare
+Named Tunnels or Nginx / Azure Application Gateway.
 
 ## Key Capabilities
 
-- **Isolated Project Workspaces**: Organize uploaded logs, source files, chat sessions, and search
-  indexes per project, with strict per-user ownership isolation and `404` anti-enumeration.
-- **Large Log & Code Analysis**: Stream-upload files over HTTP only (no server filesystem access),
-  automatically indexed for hybrid full-text and semantic retrieval with adaptive context routing
-  (direct, retrieval, or map-reduce for oversized inputs).
-- **Pre-Flight Safety Guardrails**: Evaluates prompts on CPU with ShieldGemma-2B before requests
-  reach the GPU, with scrubbed prompt auditing and configurable refusal or error responses.
+- **Pure Linux `llama.cpp` Runtime & Model Integrity**: Supervises CUDA-accelerated `llama-server`
+  (Gemma 4 on `:8081`) and CPU-only ShieldGemma-2B (`:8082`) with Linux `PR_SET_PDEATHSIG` orphan
+  protection, pinned GitHub/HuggingFace revisions, constant-time SHA-256 startup verification, and
+  boot-only `model_integrity.strict_allowlist` enforcement.
+- **Bidirectional Safety Guardrails (Ingress, Tool Output & Buffered Egress)**: Evaluates session
+  `system_prompt`, user messages, client tool outputs (`direction=tool_output`), and model
+  thinking/content (`output_mode=buffered` or `audit_only`) on CPU with calibrated `n_probs`
+  scoring, boot-locked `allow_runtime_disable: false` protection, scrubbed JSONL auditing, and
+  `X-LAI-Guardrail-Blocked` / `X-LAI-Guardrail-Policy` / `X-LAI-Guardrail-Direction` headers.
+- **Isolated Project Workspaces & Large Log/Code Analysis**: HTTP-upload-only file ingestion
+  (no server filesystem access), CPU FastEmbed + LanceDB + SQLite FTS5 hybrid RRF retrieval, and
+  adaptive context routing (`direct`, `retrieval`, or `map_reduce`) with strict per-user ownership
+  isolation (`404` anti-enumeration) and POSIX `0700`/`0600` storage permissions.
 - **OpenAI-Compatible API & Streaming**: Drop-in `/v1/models` and `/v1/chat/completions` endpoints
-  plus native project/session routes, SSE streaming, and proxy keepalives to prevent tunnel
-  timeouts.
-- **Guarded Tool Execution**: Read-only analysis over uploaded project files on the server, plus
-  optional client-executed tools gated by permission tiers (`read`, `write`, `exec`, `network`) and
-  explicit human approvals.
-- **Multi-Tenant Security & Quotas**: Authenticate via API keys or Google OIDC (supporting multiple
-  web and desktop clients with zero static client secrets), backed by per-user project, storage,
-  and queue quotas, fair scheduling, and rate limiting.
-- **Remote Access, Alerting & Usage Analytics**: Expose your local server safely over HTTPS with a
-  Cloudflare Named Tunnel, strict live-editable CORS allowlisting, 24-hour rotating structured logs,
-  configurable outbound SMTP email & webhook alerts, built-in hourly endpoint/token usage analytics,
-  and isolated zero-restart configuration hot-swapping.
+  plus native project/session routes, SSE streaming, and proxy keepalives to prevent edge timeouts.
+- **Enterprise Multi-Tenant Auth (API Keys, Google OIDC & Microsoft Entra ID)**: Supports multiple
+  web and desktop OAuth client IDs with zero static client secrets, configurable identity claim
+  precedence (`email`, `preferred_username`, `upn`), `azp`/`appid`/`aud` binding, and per-user
+  project/storage/queue quotas.
+- **Observability, Guardrail Analytics, Live Hot-Swap & Atomic Upgrades**: 24-hour rotating JSONL
+  logs, outbound SMTP email & webhook alerts, hourly endpoint/token/guardrail efficacy analytics
+  (`GET /v1/system/analytics`), zero-restart per-section config hot-swapping (`/v1/system/config/*`),
+  and SHA-256-verified atomic release slot upgrades with SQLite WAL backup and automatic rollback
+  (`lai upgrade`).
 
-## Prerequisites & Installation
+## Prerequisites & Installation (Linux / Ubuntu 24.04 or WSL2 Ubuntu)
 
-- **Python 3.13** (`>=3.13,<3.14`)
-- **[`uv`](https://docs.astral.sh/uv/)** for dependency management
-- **NVIDIA GPU with CUDA drivers** (for `llamacpp` local GPU inference) or **Ollama**
+- **Ubuntu 24.04 LTS** (bare-metal, Azure GPU VM, or WSL2 Ubuntu for local development)
+- **[`mise`](https://mise.jdx.dev/)** (single source of truth in [`mise.toml`](mise.toml) for Python
+  `3.13`, `uv`, and `gitleaks`)
+- **Docker** (used for identical local and CI verification via `scripts/run-in-container.sh`)
+- **NVIDIA GPU + CUDA drivers** (for local `llama.cpp` GPU inference; `lai models setup`
+  auto-selects CUDA `13.5` or `12.8`)
 
-Install dependencies:
+Install toolchain and locked dependencies:
 
-```powershell
-uv python install 3.13
-uv sync --locked
+```bash
+mise trust && mise install
+mise run setup
+mise run hooks
 ```
 
 Copy the example configuration to customize settings:
 
-```powershell
-Copy-Item config/config.example.yaml config/config.yaml
+```bash
+cp config/config.example.yaml config/config.yaml
 ```
 
 ## Quickstart
 
-1. **Initialize local storage and database** (`data/`, `models/`, `bin/`):
+1. **Initialize local storage, permissions (`0700`/`0600`), and SQLite database**:
 
-   ```powershell
-   uv run python -m lai.cli init
+   ```bash
+   uv run lai init --config config/config.yaml
    ```
 
 2. **Create an admin API key** (copy the one-time `lai_sk_...` secret):
 
-   ```powershell
-   uv run python -m lai.cli keys create --name "local-admin" --admin
-   uv run python -m lai.cli keys list
+   ```bash
+   uv run lai keys create --config config/config.yaml --name "local-admin" --admin
+   uv run lai keys list --config config/config.yaml
    ```
 
-3. **Download models and inference runtime**:
+3. **Download verified Linux `llama.cpp` CUDA binaries, GGUF models, and CPU FastEmbed ONNX cache**:
 
-   ```powershell
-   uv run python -m lai.cli models setup
+   ```bash
+   uv run lai models setup --config config/config.yaml
    ```
 
-   > **Note:** Automated `llama.cpp` CUDA binary downloads support both **Windows x64** and
-   > **Linux x64**. On other platforms, use `inference_backend: "ollama"`
-   > (`lai models setup --backend ollama`) or install `llama-server` on your `PATH` and run
-   > `lai models setup --skip-binaries`.
+   `lai models setup` verifies every `llama.cpp` release tarball and HuggingFace GGUF against pinned
+   SHA-256 digests, atomically activates `bin/llama/current/llama-server`, and pre-warms FastEmbed
+   into `models/fastembed` (pass `--skip-embeddings` to opt out).
 
-4. **Start the server** (inference backend, CPU guardrail, and API server on `127.0.0.1:8400`):
+4. **Start the server** (Gemma 4 `:8081`, CPU ShieldGemma-2B `:8082`, FastAPI `:8400`):
 
-   ```powershell
-   uv run python -m lai.cli serve --config config/config.yaml
-   ```
-
-   On Windows, you can also use the included launcher script (which optionally supervises
-   `cloudflared` alongside LAI):
-
-   ```powershell
-   .\scripts\start-lai.ps1 -ConfigPath config\config.yaml
+   ```bash
+   uv run lai serve --config config/config.yaml
    ```
 
 5. **Verify with a quick API check**:
 
-   ```powershell
+   ```bash
    # Unauthenticated liveness probe
-   curl.exe http://127.0.0.1:8400/v1/health
+   curl -fsS http://127.0.0.1:8400/v1/health
 
    # Create a project and stream-upload a log file
-   curl.exe -X POST http://127.0.0.1:8400/v1/projects `
-     -H "Authorization: Bearer $env:LAI_API_KEY" `
-     -H "Content-Type: application/json" `
+   curl -fsS -X POST http://127.0.0.1:8400/v1/projects \
+     -H "Authorization: Bearer ${LAI_API_KEY}" \
+     -H "Content-Type: application/json" \
      -d '{"name":"backend-logs","description":"Crash diagnostics"}'
 
-   curl.exe -X POST "http://127.0.0.1:8400/v1/files/stream?project_id=prj_..." `
-     -H "Authorization: Bearer $env:LAI_API_KEY" `
-     -H "X-LAI-Filename: app.log" `
+   curl -fsS -X POST "http://127.0.0.1:8400/v1/files/stream?project_id=prj_..." \
+     -H "Authorization: Bearer ${LAI_API_KEY}" \
+     -H "X-LAI-Filename: app.log" \
      --data-binary "@app.log"
 
    # OpenAI-compatible chat completion
-   curl.exe -X POST http://127.0.0.1:8400/v1/chat/completions `
-     -H "Authorization: Bearer $env:LAI_API_KEY" `
-     -H "Content-Type: application/json" `
-     -H "X-LAI-Project-Id: prj_..." `
-     -H "X-LAI-Context-Mode: auto" `
+   curl -fsS -X POST http://127.0.0.1:8400/v1/chat/completions \
+     -H "Authorization: Bearer ${LAI_API_KEY}" \
+     -H "Content-Type: application/json" \
+     -H "X-LAI-Project-Id: prj_..." \
+     -H "X-LAI-Context-Mode: auto" \
      -d '{"model":"gemma4-26b-a4b","messages":[{"role":"user","content":"Summarize the top errors"}],"stream":false}'
    ```
 
-   When the guardrail blocks a prompt in `refusal_message` mode, the response includes
-   `X-LAI-Guardrail-Blocked: true` and `X-LAI-Guardrail-Policy: <policy>`.
+   When guardrails block an ingress prompt or buffered model response, the response includes
+   `X-LAI-Guardrail-Blocked: true`, `X-LAI-Guardrail-Policy: <policy>`, and
+   `X-LAI-Guardrail-Direction: ingress|egress`.
 
 ## Authentication & Multi-Tenancy
 
-All protected endpoints accept `Authorization: Bearer <google_id_token>` or
-`Authorization: Bearer lai_sk_...`.
-
-### Google OIDC & Secret-Free Public Clients
-
-LAI supports multiple Google OAuth 2.0 client IDs (such as a browser SPA and a desktop app) at the
-same time via `oidc_audiences`:
+All protected endpoints accept `Authorization: Bearer <oidc_jwt>` (Google OIDC or Microsoft Entra ID
+v2.0) or `Authorization: Bearer lai_sk_...`.
 
 ```yaml
 auth_providers:
   - "api_key"
   - "oidc"
 oidc_enabled: true
-oidc_issuer_url: "https://accounts.google.com"
-oidc_jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
+# Example: Microsoft Entra ID v2.0 (see docs/deployment.md for Google OIDC too)
+oidc_issuer_url: "https://login.microsoftonline.com/<TENANT_ID>/v2.0"
+oidc_jwks_url: "https://login.microsoftonline.com/<TENANT_ID>/discovery/v2.0/keys"
 oidc_audiences:
-  - "1234567890-webapp.apps.googleusercontent.com"
-  - "1234567890-desktop.apps.googleusercontent.com"
+  - "<ENTRA_API_APP_CLIENT_ID>"
+oidc_identity_claims: ["email", "preferred_username", "upn"]
+oidc_require_email_verified: false
 oidc_allowed_domains:
-  - "yourcompany.com"
+  - "corp.example.com"
 oidc_admin_emails:
-  - "owner@yourcompany.com"
+  - "ai-admin@corp.example.com"
 ```
 
 Startup validation fails closed:
 
-- OIDC requires at least one audience in `oidc_audiences` and at least one entry in
-  `oidc_allowed_emails` or `oidc_allowed_domains`.
+- OIDC requires at least one audience in `oidc_audiences`, non-empty `oidc_identity_claims`, and at
+  least one entry in `oidc_allowed_emails` or `oidc_allowed_domains`.
 - Public consumer email domains (`gmail.com`, `yahoo.com`, `outlook.com`, `icloud.com`,
   `proton.me`, etc.) are rejected in `oidc_allowed_domains` — list individual accounts in
   `oidc_allowed_emails` instead.
+- Register secret-free OAuth client apps for client-executed tools via `lai apps create` — see
+  [Client App & Project Lifecycle](docs/client-apps-and-projects.md).
 
-Because public SPAs and desktop binaries cannot safely embed static client secrets, LAI issues and
-accepts **zero static client secrets**. Client applications are bound cryptographically to their
-verified Google OAuth Client ID and registered with:
+## Deployment Topologies & Self-Upgrades
 
-```powershell
-uv run python -m lai.cli apps create `
-  --name "lai-web-spa" `
-  --oauth-client-id "1234567890-webapp.apps.googleusercontent.com" `
-  --tier read
-```
+LAI ships production-hardened Linux systemd units (`deploy/systemd/`), Cloudflare Named Tunnel
+overlays (`deploy/cloudflare/`), and Azure Ubuntu VM + Nginx + Entra ID overlays (`deploy/azure/`).
 
-See [Client App & Project Lifecycle](docs/client-apps-and-projects.md) for onboarding, updating,
-rotating, and decommissioning client apps and projects.
+- **Dev (WSL2 Ubuntu)**: Local development and identical containerized CI verification via
+  `bash scripts/run-in-container.sh pre-commit` and `bash scripts/run-in-container.sh pre-push`.
+- **Test (Headless Ubuntu + Cloudflare Named Tunnel)**: Systemd-managed `lai.service` +
+  `cloudflared.service` with `trust_cloudflare_headers: true` and `trusted_proxy_cidrs`.
+- **Prod (Azure Ubuntu VM + Nginx / Application Gateway + Entra ID)**: FHS layout under `/opt/lai`,
+  `/etc/lai`, `/var/lib/lai`, `/var/log/lai` provisioned by `deploy/systemd/install-ubuntu.sh`,
+  boot-locked guardrails, `model_integrity.strict_allowlist: true`, and `lai upgrade` atomic slot
+  deployments with WAL-safe SQLite backup and automatic health-checked rollback.
 
-### Isolation & Quotas
-
-- **Owner Isolation**: Projects, uploaded files, sessions, messages, and tool approvals are scoped
-  to their owner. Non-admin access attempts against another user's resources return
-  `404 Not Found` to prevent resource ID enumeration.
-- **Per-User Quotas** (configurable in `config/config.yaml`, non-admin defaults):
-  - `max_projects_per_principal`: `10`
-  - `max_storage_bytes_per_principal`: `1073741824` (1 GiB)
-  - `max_queued_jobs_per_principal`: `4`
-- **Fair Scheduling & Rate Limits**: Inference jobs are scheduled fairly across users and sessions,
-  with configurable per-IP (`ip_rate_limit_rpm`) and per-user (`rate_limit_rpm`) limits.
-
-## Remote Access (Cloudflare Named Tunnel & CORS)
-
-Expose your loopback server (`127.0.0.1:8400`) over HTTPS without opening inbound firewall ports:
-
-```powershell
-cloudflared tunnel login
-cloudflared tunnel create lai-local
-cloudflared tunnel route dns lai-local ai.example.com
-
-uv run python -m lai.cli tunnel render-config `
-  --tunnel "<TUNNEL_UUID>" `
-  --hostname "ai.example.com" `
-  --output deploy/cloudflared/config.yml
-
-cloudflared tunnel --config deploy/cloudflared/config.yml run
-```
-
-Configure browser origins and proxy trust in `config/config.yaml`:
-
-```yaml
-cors_allowed_origins:
-  - "https://app.example.com"
-trust_cloudflare_headers: true
-cf_access_enabled: false
-```
-
-- **Exact CORS origins**: Wildcard `"*"` and trailing slashes are rejected at startup.
-- **`trust_cloudflare_headers: true`**: Enable only when traffic reaches LAI exclusively via
-  Cloudflare on loopback so client IP headers cannot be spoofed.
-- **`cf_access_enabled: false`**: Recommended for browser SPAs and desktop clients authenticating
-  with Google OIDC bearer tokens so Cloudflare Access redirects do not block CORS preflights.
-- **100 MB Tunnel Upload Limit**: Cloudflare Free and Pro plans cap HTTP request bodies at 100 MB
-  (`HTTP 413`).
-
-See the [Deployment & Operations Guide](docs/deployment.md) for the full Google Cloud OIDC and
-Cloudflare setup walkthrough.
-
-## Logging, Operational Alerts & Analytics
-
-Structured JSONL logs rotate daily at UTC midnight under `data/logs/`:
-
-- `lai.jsonl` — Application events and HTTP request telemetry (14-day compressed retention by default).
-- `errors.jsonl` — Errors and tracebacks (30-day retention).
-- `prompts_audit.jsonl` — Scrubbed prompt audit records and guardrail verdicts (30-day retention).
-- `alerts.jsonl` — Fatal error, application error, timeout, crash, storage, and security alerts.
-
-Configure outbound **SMTP email alerting** (`logging.alert_smtp` with `LAI_LOGGING__ALERT_SMTP__PASSWORD`)
-and/or optional webhooks (`logging.alert_webhook_url`) with per-sink severity/category filters and
-cooldown deduplication. Verify delivery with `POST /v1/system/alerting/test`, inspect recent alerts
-via `GET /v1/system/alerts`, query privacy-preserving hourly endpoint and token usage via
-`GET /v1/system/analytics`, or hot-swap alerting, analytics, OIDC, CORS, quota, and guardrail
-policies live via `/v1/system/config/*` (`admin` scope). See the
-[Deployment & Operations Guide](docs/deployment.md) for full details.
+See the [Deployment & Operations Guide](docs/deployment.md) for step-by-step instructions across all
+three environments.
 
 ## Documentation
 
@@ -249,6 +187,6 @@ policies live via `/v1/system/config/*` (`admin` scope). See the
 - **Security**: Report vulnerabilities privately via
   [GitHub Security Advisories](https://github.com/blake-olinger/lai/security/advisories/new) or
   `hello@blakeolinger.dev` — see [SECURITY.md](SECURITY.md).
-- **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture rules, verification
-  gates, and pull request requirements.
+- **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture rules, container-backed
+  git hooks, verification gates, and pull request requirements.
 - **License**: [Apache License, Version 2.0](LICENSE) (`Copyright 2026 Blake Olinger`).

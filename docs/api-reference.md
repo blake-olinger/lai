@@ -784,6 +784,7 @@ Hot-swap guardrail enforcement policy without restarting inference subprocesses.
 | `block_mode` | [`GuardrailBlockMode`](#schema-guardrailblockmode) \| null | no | - |
 | `enabled` | boolean \| null | no | - |
 | `fail_open` | boolean \| null | no | - |
+| `output_mode` | [`GuardrailOutputMode`](#schema-guardrailoutputmode) \| null | no | - |
 | `refusal_text` | string \| null | no | - |
 | `timeout_seconds` | number \| null | no | - |
 | `violation_threshold` | number \| null | no | - |
@@ -828,8 +829,10 @@ Hot-swap limits, quotas, and log level in place without dropping buckets or queu
 | `max_queued_jobs_per_principal` | integer \| null | no | - |
 | `max_storage_bytes_per_principal` | integer \| null | no | - |
 | `max_upload_bytes` | integer \| null | no | - |
+| `proxy_ip_header` | string \| null | no | - |
 | `rate_limit_rpm` | integer \| null | no | - |
 | `trust_cloudflare_headers` | boolean \| null | no | - |
+| `trusted_proxy_cidrs` | array[string] \| null | no | - |
 
 **Responses**
 
@@ -867,7 +870,9 @@ Hot-swap OIDC authorization policy in place while preserving cached JWKS.
 | `oidc_allowed_emails` | array[string] \| null | no | - |
 | `oidc_audiences` | array[string] \| null | no | - |
 | `oidc_default_scopes` | array[string] \| null | no | - |
+| `oidc_identity_claims` | array[string] \| null | no | - |
 | `oidc_leeway_seconds` | number \| null | no | - |
+| `oidc_require_email_verified` | boolean \| null | no | - |
 
 **Responses**
 
@@ -895,6 +900,44 @@ Reload only the explicitly requested section(s) from YAML and environment variab
 | Status | Description | Schema |
 | --- | --- | --- |
 | `200` | Successful Response | `application/json`: [`ScopedConfigReloadResponse`](#schema-scopedconfigreloadresponse) |
+| `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
+
+### `GET /v1/system/config/updates`
+
+**Get Updates Runtime Config**
+
+Return live self-update scheduling and rollback configuration.
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`UpdatesRuntimeConfigResponse`](#schema-updatesruntimeconfigresponse) |
+
+### `PATCH /v1/system/config/updates`
+
+**Patch Updates Runtime Config**
+
+Hot-swap non-privileged self-update scheduling and rollback toggles.
+
+**Request Body** (required)
+
+- `application/json`: [`UpdateUpdatesConfigRequest`](#schema-updateupdatesconfigrequest)
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `allow_prerelease` | boolean \| null | no | - |
+| `auto_rollback` | boolean \| null | no | - |
+| `enabled` | boolean \| null | no | - |
+| `health_poll_interval_seconds` | number \| null | no | - |
+| `health_timeout_seconds` | number \| null | no | - |
+| `keep_releases` | integer \| null | no | - |
+
+**Responses**
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| `200` | Successful Response | `application/json`: [`UpdatesRuntimeConfigResponse`](#schema-updatesruntimeconfigresponse) |
 | `422` | Validation Error | `application/json`: [`HTTPValidationError`](#schema-httpvalidationerror) |
 
 ### `GET /v1/system/status`
@@ -1113,6 +1156,7 @@ Windowed usage analytics report returned by GET /v1/system/analytics.
 | `error_count` | integer | yes | minimum=0.0 |
 | `error_rate` | number | yes | minimum=0.0; maximum=1.0 |
 | `generated_at` | string (date-time) | no | - |
+| `guardrails` | [`GuardrailAnalyticsSummary`](#schema-guardrailanalyticssummary) | no | - |
 | `hourly` | array[[`HourlyUsageBucket`](#schema-hourlyusagebucket)] | no | - |
 | `principals` | array[[`PrincipalUsageSummary`](#schema-principalusagesummary)] | no | - |
 | `total_completion_tokens` | integer | yes | minimum=0.0 |
@@ -1394,27 +1438,87 @@ GPU utilization and VRAM snapshot reported by nvidia-smi.
 | `temperature_c` | number \| null | no | - |
 | `utilization_percent` | integer | yes | minimum=0.0; maximum=100.0 |
 
+<a id="schema-guardrailanalyticssummary"></a>
+### `GuardrailAnalyticsSummary`
+
+Windowed guardrail efficacy summary embedded in AnalyticsReport.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `avg_latency_ms` | number | no | default=`0.0`; minimum=0.0 |
+| `block_rate` | number | no | default=`0.0`; minimum=0.0; maximum=1.0 |
+| `by_direction` | array[[`GuardrailDirectionSummary`](#schema-guardraildirectionsummary)] | no | - |
+| `fail_closed_count` | integer | no | default=`0`; minimum=0.0 |
+| `max_latency_ms` | number | no | default=`0.0`; minimum=0.0 |
+| `top_policies` | array[[`GuardrailPolicyCount`](#schema-guardrailpolicycount)] | no | - |
+| `total_allowed` | integer | no | default=`0`; minimum=0.0 |
+| `total_blocked` | integer | no | default=`0`; minimum=0.0 |
+| `total_evaluations` | integer | no | default=`0`; minimum=0.0 |
+
 <a id="schema-guardrailblockmode"></a>
 ### `GuardrailBlockMode`
 
-Response mode when a prompt is blocked by the guardrail policy.
+Response mode when a prompt or output is blocked by the guardrail policy.
 
 **Enum values**: `refusal_message`, `http_error`
+
+<a id="schema-guardraildirection"></a>
+### `GuardrailDirection`
+
+Direction of text inspected by the guardrail pipeline.
+
+**Enum values**: `ingress`, `egress`, `tool_output`
+
+<a id="schema-guardraildirectionsummary"></a>
+### `GuardrailDirectionSummary`
+
+Aggregated guardrail evaluation volume, block rate, and latency per direction.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `allowed` | integer | yes | minimum=0.0 |
+| `avg_latency_ms` | number | yes | minimum=0.0 |
+| `block_rate` | number | yes | minimum=0.0; maximum=1.0 |
+| `blocked` | integer | yes | minimum=0.0 |
+| `direction` | [`GuardrailDirection`](#schema-guardraildirection) | yes | - |
+| `evaluations` | integer | yes | minimum=0.0 |
+| `fail_closed` | integer | yes | minimum=0.0 |
+| `max_latency_ms` | number | yes | minimum=0.0 |
+
+<a id="schema-guardrailoutputmode"></a>
+### `GuardrailOutputMode`
+
+Enforcement mode for ShieldGemma model response egress scanning.
+
+**Enum values**: `buffered`, `audit_only`, `off`
+
+<a id="schema-guardrailpolicycount"></a>
+### `GuardrailPolicyCount`
+
+Aggregated block count per violated safety policy and direction.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `block_count` | integer | yes | minimum=0.0 |
+| `direction` | [`GuardrailDirection`](#schema-guardraildirection) | yes | - |
+| `policy` | string | yes | minLength=1 |
 
 <a id="schema-guardrailspolicyconfigresponse"></a>
 ### `GuardrailsPolicyConfigResponse`
 
-Live pre-flight guardrail enforcement policy.
+Live ingress and egress ShieldGemma guardrail enforcement policy.
 
 | Field | Type | Required | Details |
 | --- | --- | --- | --- |
-| `backend` | string | yes | enum: `llamacpp`, `ollama` |
+| `allow_runtime_disable` | boolean | yes | - |
 | `block_mode` | [`GuardrailBlockMode`](#schema-guardrailblockmode) | yes | - |
 | `enabled` | boolean | yes | - |
 | `fail_open` | boolean | yes | - |
+| `max_violation_threshold` | number | yes | minimum=0.0; maximum=1.0 |
+| `output_mode` | [`GuardrailOutputMode`](#schema-guardrailoutputmode) | yes | - |
 | `refusal_text` | string | yes | - |
 | `timeout_seconds` | number | yes | exclusiveMinimum=0.0 |
-| `violation_threshold` | number | yes | exclusiveMinimum=0.0 |
+| `violation_threshold` | number | yes | minimum=0.0; maximum=1.0 |
 
 <a id="schema-httpvalidationerror"></a>
 ### `HTTPValidationError`
@@ -1466,7 +1570,7 @@ Priority order for inference spooler scheduling (lower runs first).
 <a id="schema-limitsruntimeconfigresponse"></a>
 ### `LimitsRuntimeConfigResponse`
 
-Live rate limits, per-principal quotas, upload limits, keepalive, and log level.
+Live rate limits, per-principal quotas, proxy trust, upload limits, keepalive, and logs.
 
 | Field | Type | Required | Details |
 | --- | --- | --- | --- |
@@ -1479,8 +1583,10 @@ Live rate limits, per-principal quotas, upload limits, keepalive, and log level.
 | `max_queued_jobs_per_principal` | integer | yes | minimum=1.0 |
 | `max_storage_bytes_per_principal` | integer | yes | minimum=1.0 |
 | `max_upload_bytes` | integer | yes | minimum=1.0 |
+| `proxy_ip_header` | string | yes | enum: `cf-connecting-ip`, `x-forwarded-for`, `x-azure-clientip` |
 | `rate_limit_rpm` | integer | yes | minimum=1.0 |
 | `trust_cloudflare_headers` | boolean | yes | - |
+| `trusted_proxy_cidrs` | array[string] | no | - |
 
 <a id="schema-logfilesummary"></a>
 ### `LogFileSummary`
@@ -1546,7 +1652,9 @@ Live OIDC authorization policy settings.
 | `oidc_allowed_emails` | array[string] | no | - |
 | `oidc_audiences` | array[string] | no | - |
 | `oidc_default_scopes` | array[string] | no | - |
+| `oidc_identity_claims` | array[string] | no | - |
 | `oidc_leeway_seconds` | number | yes | minimum=0.0; maximum=300.0 |
+| `oidc_require_email_verified` | boolean | yes | - |
 
 <a id="schema-openaichatchoice"></a>
 ### `OpenAIChatChoice`
@@ -1997,6 +2105,7 @@ Final result of a completed orchestrator turn.
 | `citations` | array[[`Citation`](#schema-citation)] | no | default=`[]` |
 | `context_mode_used` | [`ContextMode`](#schema-contextmode) | yes | - |
 | `guardrail_blocked` | boolean | no | default=`False` |
+| `guardrail_direction` | string \| null | no | - |
 | `guardrail_policy` | string \| null | no | - |
 | `message` | [`Message`](#schema-message) | yes | - |
 | `pending_approval_id` | string \| null | no | - |
@@ -2073,6 +2182,7 @@ Partial live update for guardrail enforcement policy without restarting subproce
 | `block_mode` | [`GuardrailBlockMode`](#schema-guardrailblockmode) \| null | no | - |
 | `enabled` | boolean \| null | no | - |
 | `fail_open` | boolean \| null | no | - |
+| `output_mode` | [`GuardrailOutputMode`](#schema-guardrailoutputmode) \| null | no | - |
 | `refusal_text` | string \| null | no | - |
 | `timeout_seconds` | number \| null | no | - |
 | `violation_threshold` | number \| null | no | - |
@@ -2080,7 +2190,7 @@ Partial live update for guardrail enforcement policy without restarting subproce
 <a id="schema-updatelimitsconfigrequest"></a>
 ### `UpdateLimitsConfigRequest`
 
-Partial live update for rate limits, quotas, queue bounds, keepalive, and log level.
+Partial live update for limits, quotas, proxy trust, keepalive, and log level.
 
 | Field | Type | Required | Details |
 | --- | --- | --- | --- |
@@ -2093,13 +2203,15 @@ Partial live update for rate limits, quotas, queue bounds, keepalive, and log le
 | `max_queued_jobs_per_principal` | integer \| null | no | - |
 | `max_storage_bytes_per_principal` | integer \| null | no | - |
 | `max_upload_bytes` | integer \| null | no | - |
+| `proxy_ip_header` | string \| null | no | - |
 | `rate_limit_rpm` | integer \| null | no | - |
 | `trust_cloudflare_headers` | boolean \| null | no | - |
+| `trusted_proxy_cidrs` | array[string] \| null | no | - |
 
 <a id="schema-updateoidcconfigrequest"></a>
 ### `UpdateOidcConfigRequest`
 
-Partial live update for OIDC audiences, allowlists, scopes, and clock leeway.
+Partial live update for OIDC audiences, allowlists, scopes, claims, and leeway.
 
 | Field | Type | Required | Details |
 | --- | --- | --- | --- |
@@ -2108,7 +2220,43 @@ Partial live update for OIDC audiences, allowlists, scopes, and clock leeway.
 | `oidc_allowed_emails` | array[string] \| null | no | - |
 | `oidc_audiences` | array[string] \| null | no | - |
 | `oidc_default_scopes` | array[string] \| null | no | - |
+| `oidc_identity_claims` | array[string] \| null | no | - |
 | `oidc_leeway_seconds` | number \| null | no | - |
+| `oidc_require_email_verified` | boolean \| null | no | - |
+
+<a id="schema-updateupdatesconfigrequest"></a>
+### `UpdateUpdatesConfigRequest`
+
+Partial live update for non-privileged self-update scheduling and rollback toggles.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `allow_prerelease` | boolean \| null | no | - |
+| `auto_rollback` | boolean \| null | no | - |
+| `enabled` | boolean \| null | no | - |
+| `health_poll_interval_seconds` | number \| null | no | - |
+| `health_timeout_seconds` | number \| null | no | - |
+| `keep_releases` | integer \| null | no | - |
+
+<a id="schema-updatesruntimeconfigresponse"></a>
+### `UpdatesRuntimeConfigResponse`
+
+Live self-update and rollback orchestration settings.
+
+| Field | Type | Required | Details |
+| --- | --- | --- | --- |
+| `allow_prerelease` | boolean | yes | - |
+| `auto_rollback` | boolean | yes | - |
+| `backups_dir` | string | yes | - |
+| `current_symlink` | string | yes | - |
+| `enabled` | boolean | yes | - |
+| `github_repo` | string | yes | - |
+| `health_poll_interval_seconds` | number | yes | maximum=30.0; exclusiveMinimum=0.0 |
+| `health_timeout_seconds` | number | yes | maximum=600.0; exclusiveMinimum=0.0 |
+| `health_url` | string | yes | - |
+| `keep_releases` | integer | yes | minimum=1.0; maximum=20.0 |
+| `releases_dir` | string | yes | - |
+| `service_name` | string | yes | - |
 
 <a id="schema-validationerror"></a>
 ### `ValidationError`
