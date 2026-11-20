@@ -87,9 +87,12 @@ LAI verifies Google RS256/ES256 ID tokens directly against Google's JWKS endpoin
 **Option A — Token-managed systemd service (recommended for headless hosts):**
 
 ```bash
+getent group cloudflared >/dev/null || sudo groupadd --system cloudflared
+id -u cloudflared >/dev/null 2>&1 || sudo useradd --system --gid cloudflared --no-create-home --shell /usr/sbin/nologin cloudflared
 sudo cp deploy/cloudflare/cloudflared.service /etc/systemd/system/cloudflared.service
-sudo install -m 0600 -o root -g root /dev/null /etc/lai/cloudflared.env
-echo 'TUNNEL_TOKEN=<YOUR_CLOUDFLARE_TUNNEL_TOKEN>' | sudo tee /etc/lai/cloudflared.env >/dev/null
+sudo install -d -m 0750 -o root -g cloudflared /etc/cloudflared
+sudo install -m 0600 -o cloudflared -g cloudflared /dev/null /etc/cloudflared/tunnel.env
+echo 'TUNNEL_TOKEN=<YOUR_CLOUDFLARE_TUNNEL_TOKEN>' | sudo tee /etc/cloudflared/tunnel.env >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now lai.service cloudflared.service
 ```
@@ -258,7 +261,7 @@ sudo /opt/lai/current/.venv/bin/lai upgrade apply \
 # Roll back immediately to the previous slot (and optionally restore a pre-upgrade DB backup)
 sudo /opt/lai/current/.venv/bin/lai upgrade rollback \
   --config /etc/lai/config.yaml \
-  --backup /var/lib/lai/backups/pre-v0.2.0-<timestamp>.db
+  --backup /var/lib/lai/backups/lai-pre-v0.2.0-<timestamp>.db
 ```
 
 ### Opt-In Scheduled Upgrades (`lai-upgrade.timer`)
