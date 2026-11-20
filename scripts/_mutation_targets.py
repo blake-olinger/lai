@@ -1,4 +1,4 @@
-"""Mutation target definitions and tier resolution for scripts/verify.py."""
+"""Mutation target definitions and tier resolution for scripts/check_mutation.py."""
 
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ CRITICAL_MUTATION_TARGETS: tuple[str, ...] = (
     "src/lai/security/client_apps.py",
     "src/lai/guardrails/pipeline.py",
     "src/lai/guardrails/shieldgemma.py",
-    "src/lai/guardrails/ollama_provider.py",
     "src/lai/tools/executor.py",
     "src/lai/tools/_client_dispatch.py",
     "src/lai/tools/plugins/_scoping.py",
@@ -98,7 +97,7 @@ _TEMP_ENV_KEYS: tuple[str, ...] = ("TEMP", "TMP", "TMPDIR")
 def isolated_temp_env() -> Generator[Path]:
     """Run a block with TEMP/TMP/TMPDIR pointed at an isolated temporary directory."""
     previous = {key: os.environ.get(key) for key in _TEMP_ENV_KEYS}
-    with tempfile.TemporaryDirectory(prefix="lai-verify-", ignore_cleanup_errors=True) as raw_dir:
+    with tempfile.TemporaryDirectory(prefix="lai-mutate-", ignore_cleanup_errors=True) as raw_dir:
         tmp_path = Path(raw_dir)
         tmp_str = str(tmp_path)
         for key in _TEMP_ENV_KEYS:

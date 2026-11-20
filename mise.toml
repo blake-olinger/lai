@@ -1,60 +1,142 @@
+# Single source of truth for LAI tool versions, environment defaults, and task DAGs.
+
 [tools]
-uv = "0.13"
+python = "3.13"
+uv = "0.13.0"
+gitleaks = "8.30.1"
+
+[env]
+LAI_COV_FAIL_UNDER = "90"
+LAI_MIN_MUTATION_SCORE = "85.0"
+LAI_MUTANT_TIMEOUT = "20"
+UV_LINK_MODE = "copy"
 
 [tasks.setup]
-description = "Install Python 3.13 and sync locked project dependencies"
-run = [
-    "uv python install 3.13",
-    "uv sync --locked",
-]
+description = "Sync locked project dependencies"
+run = "uv sync --locked"
 
 [tasks.fmt]
-description = "Autofix lint issues then format source and tests with ruff"
+description = "Autofix lint issues and format source, tests, and scripts with ruff"
 run = [
     "uv run python -m ruff check --fix src tests scripts",
     "uv run python -m ruff format src tests scripts",
 ]
 
-[tasks.build]
-description = "Build sdist and wheel without local source overrides"
-run = "uv build --no-sources"
-
 [tasks.lint]
 description = "Run ruff lint, format check, and 350-line file size guard"
-run = "uv run python scripts/verify.py lint"
+run = [
+    "uv run python -m ruff check src tests scripts",
+    "uv run python -m ruff format --check src tests scripts",
+    "uv run python scripts/check_file_sizes.py",
+]
 
 [tasks.typecheck]
 description = "Run basedpyright (strict) and mypy (strict)"
-run = "uv run python scripts/verify.py typecheck"
+run = [
+    "uv run python -m basedpyright src tests scripts",
+    "uv run python -m mypy src tests scripts",
+]
 
 [tasks.boundaries]
 description = "Check architectural layer and independence contracts"
-run = "uv run python scripts/verify.py boundaries"
+run = 'uv run python -c "import sys, importlinter.cli; sys.exit(importlinter.cli.lint_imports_command(args=[], standalone_mode=False))"'
+
+[tasks.schema]
+description = "Validate checked-in OpenAPI 3.1 schema and Markdown reference"
+run = "uv run python scripts/export_openapi.py --check"
+
+[tasks.openapi]
+description = "Export validated OpenAPI 3.1 schema and Markdown API reference"
+run = "uv run python scripts/export_openapi.py"
+
+[tasks.docs]
+description = "Build static Scalar OpenAPI documentation site"
+run = "uv run python scripts/build_pages_docs.py --output-dir site"
 
 [tasks.test]
-description = "Run unit and integration tests with coverage"
-run = "uv run python scripts/verify.py test --cov-fail-under 90"
+description = "Run unit and integration tests with branch coverage threshold"
+run = "uv run python -m pytest tests/unit tests/integration -v --cov=lai --cov-branch --cov-fail-under=${LAI_COV_FAIL_UNDER}"
 
 [tasks.test-hardware]
 description = "Run opt-in hardware tests against live ONNX models and local binaries"
 run = "uv run python -m pytest tests/hardware -m hardware -v"
 
-[tasks.schema]
-description = "Validate exported OpenAPI schema"
-run = "uv run python scripts/verify.py schema"
+[tasks.mutate]
+description = "Run critical-tier mutation tests with pytest-gremlins"
+wait_for = ["test"]
+run = "uv run python scripts/check_mutation.py --tier critical --min-score ${LAI_MIN_MUTATION_SCORE}"
+
+[tasks.mutate-full]
+description = "Run full-tier mutation tests with pytest-gremlins"
+wait_for = ["test"]
+run = "uv run python scripts/check_mutation.py --tier full --min-score ${LAI_MIN_MUTATION_SCORE}"
+
+[tasks."secrets:staged"]
+description = "Scan staged git changes for secrets with gitleaks"
+run = "gitleaks protect --staged --redact --no-banner"
+
+[tasks.secrets]
+description = "Scan full git history for secrets with gitleaks"
+run = "gitleaks git --redact --no-banner ."
+
+[tasks."security:bandit"]
+description = "Run ruff Bandit (S) security checks on src and scripts"
+run = "uv run python -m ruff check --select S src scripts"
+
+[tasks.audit]
+description = "Audit locked Python dependencies with isolated pip-audit"
+run = """
+set -eu
+req_file="$(mktemp "${TMPDIR:-/tmp}/lai-requirements.XXXXXX.txt")"
+trap 'rm -f "${req_file}"' EXIT
+uv export --quiet --frozen --no-emit-project --format requirements.txt -o "${req_file}"
+env -u UV_PROJECT_ENVIRONMENT -u UV_NO_SYNC uv run --project .github/tools/pip-audit --locked --isolated -- python -m pip_audit --disable-pip -r "${req_file}"
+"""
+
+[tasks.security]
+description = "Run full security suite (secrets, Bandit lint, dependency audit)"
+depends = ["secrets", "security:bandit", "audit"]
+
+[tasks.build]
+description = "Build sdist and wheel without local source overrides"
+run = "uv build --no-sources"
 
 [tasks.bump]
 description = "Bump SemVer version and sync lockfile, OpenAPI docs, and CHANGELOG"
 run = "uv run python scripts/bump_version.py"
 
-[tasks.mutate]
-description = "Run critical-tier mutation tests with pytest-gremlins"
-run = "uv run python scripts/verify.py mutate --tier critical"
+[tasks.serve]
+description = "Start the LAI FastAPI server"
+run = "uv run python -m lai.cli serve"
 
-[tasks.mutate-full]
-description = "Run full-tier mutation tests with pytest-gremlins"
-run = "uv run python scripts/verify.py mutate --tier full"
+[tasks.hooks]
+description = "Configure repository git hooks path to .githooks"
+run = "git config core.hooksPath .githooks"
 
-[tasks.verify]
-description = "Run full local verification suite"
-run = "uv run python scripts/verify.py all --skip-mutate --cov-fail-under 90"
+[tasks.update]
+description = "Upgrade locked dependencies respecting exclude-newer cooldown"
+run = "uv lock --upgrade && uv sync"
+
+[tasks."container:build"]
+description = "Build or refresh the shared Linux CI validation container"
+run = "bash scripts/run-in-container.sh --build-only"
+
+[tasks."container:shell"]
+description = "Open an interactive shell inside the shared Linux CI validation container"
+run = "bash scripts/run-in-container.sh --shell"
+
+[tasks.pre-commit]
+description = "Fast pre-commit validation DAG"
+depends = ["lint", "secrets:staged", "typecheck", "boundaries", "schema"]
+
+[tasks.pre-push]
+description = "Full pre-push validation DAG"
+depends = ["pre-commit", "test", "build", "security", "docs", "mutate"]
+
+[tasks.ci]
+description = "Canonical CI verification DAG"
+depends = ["lint", "typecheck", "boundaries", "schema", "build", "test", "mutate"]
+
+[tasks.release-check]
+description = "Full release verification DAG including security, docs, and full-tier mutation"
+depends = ["lint", "typecheck", "boundaries", "schema", "build", "test", "security", "docs", "mutate-full"]
