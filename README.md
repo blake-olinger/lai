@@ -179,7 +179,7 @@ three environments.
 - **Deployment & Operations Guide**: [docs/deployment.md](docs/deployment.md)
 - **Client App & Project Lifecycle**: [docs/client-apps-and-projects.md](docs/client-apps-and-projects.md)
 - **Security Policy**: [SECURITY.md](SECURITY.md)
-- **Changelog**: [CHANGELOG.md](CHANGELOG.md)
+- **Releases & Release Notes**: [GitHub Releases](https://github.com/blake-olinger/lai/releases)
 - **Contributing Guide**: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Security, Contributing & License

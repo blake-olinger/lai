@@ -95,53 +95,27 @@ def test_bump_version_helpers_and_check_tag(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """bump_version validates 3-part SemVer, updates pyproject + CHANGELOG, and checks tags."""
+    """bump_version validates 3-part SemVer, updates pyproject.toml, and checks tags."""
     assert bump_version.validate_semver(" 1.2.3 ") == "1.2.3"
     for bad_ver in ("1.0.2.0", "v1.2.3", "01.2.3", "1.2", "abc"):
         with pytest.raises(ValueError, match="SemVer"):
             bump_version.validate_semver(bad_ver)
-
-    assert bump_version.validate_release_date("2026-12-01") == "2026-12-01"
-    with pytest.raises(ValueError, match="YYYY-MM-DD"):
-        bump_version.validate_release_date("12/01/2026")
 
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         '[project]\nname = "lai"\nversion = "0.1.0"\n\n[tool.demo]\nversion = "9.9.9"\n',
         encoding="utf-8",
     )
-    changelog = tmp_path / "CHANGELOG.md"
-    changelog.write_text(
-        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Feature X.\n\n"
-        "## [0.1.0] - 2026-11-19\n\n- Init.\n\n"
-        "[Unreleased]: https://github.com/blake-olinger/lai/compare/v0.1.0...HEAD\n"
-        "[0.1.0]: https://github.com/blake-olinger/lai/releases/tag/v0.1.0\n",
-        encoding="utf-8",
-    )
 
     old_v, new_v = bump_version.bump_repository_version(
         "0.2.0",
         repo_root=tmp_path,
-        release_date="2026-12-01",
         skip_lock=True,
         skip_openapi=True,
     )
     assert (old_v, new_v) == ("0.1.0", "0.2.0")
     assert 'version = "0.2.0"' in pyproject.read_text(encoding="utf-8")
     assert 'version = "9.9.9"' in pyproject.read_text(encoding="utf-8")
-
-    cl_text = changelog.read_text(encoding="utf-8")
-    assert "## [Unreleased]\n\n## [0.2.0] - 2026-12-01\n\n### Added" in cl_text
-    assert "[Unreleased]: https://github.com/blake-olinger/lai/compare/v0.2.0...HEAD" in cl_text
-    assert "[0.2.0]: https://github.com/blake-olinger/lai/compare/v0.1.0...v0.2.0" in cl_text
-
-    with pytest.raises(ValueError, match="already exists"):
-        bump_version.update_changelog(
-            changelog,
-            "0.2.0",
-            previous_version="0.1.0",
-            release_date="2026-12-02",
-        )
 
     assert (
         bump_version.check_release_tag(

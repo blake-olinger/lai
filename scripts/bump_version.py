@@ -1,4 +1,4 @@
-"""Bump SemVer version in pyproject.toml and sync CHANGELOG, uv.lock, and OpenAPI docs."""
+"""Bump SemVer version in pyproject.toml and sync uv.lock and OpenAPI docs."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import re
 import subprocess
 import sys
 import tomllib
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -18,15 +17,9 @@ if str(REPO_ROOT) not in sys.path:
 from lai.domain.version import get_package_version, read_pyproject_version  # noqa: E402
 
 _SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _PROJECT_SECTION_RE = re.compile(r"(?m)^\[project\][ \t]*$")
 _NEXT_SECTION_RE = re.compile(r"(?m)^\[[^\]]+\][ \t]*$")
 _VERSION_LINE_RE = re.compile(r'(?m)^(version[ \t]*=[ \t]*")([^"]+)(")[ \t]*$')
-_UNRELEASED_HEADING = "## [Unreleased]"
-_UNRELEASED_LINK_RE = re.compile(
-    r"(?m)^\[Unreleased\]:\s+(https://github\.com/[^/]+/[^/]+)/compare/v(\d+\.\d+\.\d+)\.\.\.HEAD\s*$"
-)
-_REPO_URL_DEFAULT = "https://github.com/blake-olinger/lai"
 
 
 def validate_semver(version: str) -> str:
@@ -34,17 +27,6 @@ def validate_semver(version: str) -> str:
     cleaned = version.strip()
     if _SEMVER_RE.fullmatch(cleaned) is None:
         msg = f"Invalid SemVer version {version!r}; expected MAJOR.MINOR.PATCH (e.g. 1.0.2)."
-        raise ValueError(msg)
-    return cleaned
-
-
-def validate_release_date(raw_date: str | None) -> str:
-    """Validate YYYY-MM-DD release date or default to today in UTC."""
-    if raw_date is None:
-        return datetime.now(UTC).strftime("%Y-%m-%d")
-    cleaned = raw_date.strip()
-    if _DATE_RE.fullmatch(cleaned) is None:
-        msg = f"Invalid release date {raw_date!r}; expected YYYY-MM-DD."
         raise ValueError(msg)
     return cleaned
 
@@ -82,49 +64,6 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> str:
     updated = text[: sec_match.end()] + updated_body + text[sec_end:]
     pyproject_path.write_text(updated, encoding="utf-8", newline="\n")
     return old_version
-
-
-def update_changelog(
-    changelog_path: Path,
-    new_version: str,
-    *,
-    previous_version: str,
-    release_date: str,
-    repo_url: str = _REPO_URL_DEFAULT,
-) -> None:
-    """Promote [Unreleased] entries into a dated version section and update compare links."""
-    if not changelog_path.is_file():
-        msg = f"Changelog file not found: {changelog_path}"
-        raise FileNotFoundError(msg)
-
-    text = changelog_path.read_text(encoding="utf-8")
-    if f"## [{new_version}]" in text:
-        msg = f"Version {new_version!r} already exists in {changelog_path}."
-        raise ValueError(msg)
-    if _UNRELEASED_HEADING not in text:
-        msg = f"Missing {_UNRELEASED_HEADING!r} heading in {changelog_path}."
-        raise ValueError(msg)
-
-    replacement = f"{_UNRELEASED_HEADING}\n\n## [{new_version}] - {release_date}"
-    updated = text.replace(_UNRELEASED_HEADING, replacement, 1)
-
-    link_match = _UNRELEASED_LINK_RE.search(updated)
-    if link_match is not None:
-        base_url = link_match.group(1)
-        prev_tag = link_match.group(2)
-        new_links = (
-            f"[Unreleased]: {base_url}/compare/v{new_version}...HEAD\n"
-            f"[{new_version}]: {base_url}/compare/v{prev_tag}...v{new_version}"
-        )
-        updated = updated[: link_match.start()] + new_links + updated[link_match.end() :]
-    else:
-        tail_links = (
-            f"\n[Unreleased]: {repo_url}/compare/v{new_version}...HEAD\n"
-            f"[{new_version}]: {repo_url}/compare/v{previous_version}...v{new_version}\n"
-        )
-        updated = updated.rstrip() + "\n" + tail_links
-
-    changelog_path.write_text(updated, encoding="utf-8", newline="\n")
 
 
 def check_release_tag(
@@ -188,23 +127,13 @@ def bump_repository_version(
     new_version: str,
     *,
     repo_root: Path = REPO_ROOT,
-    release_date: str | None = None,
     skip_lock: bool = False,
     skip_openapi: bool = False,
 ) -> tuple[str, str]:
-    """Bump version in pyproject.toml + CHANGELOG.md and resync uv.lock and OpenAPI docs."""
+    """Bump version in pyproject.toml and resync uv.lock and OpenAPI docs."""
     validated_version = validate_semver(new_version)
-    resolved_date = validate_release_date(release_date)
     pyproject_path = repo_root / "pyproject.toml"
-    changelog_path = repo_root / "CHANGELOG.md"
-
     old_version = update_pyproject_version(pyproject_path, validated_version)
-    update_changelog(
-        changelog_path,
-        validated_version,
-        previous_version=old_version,
-        release_date=resolved_date,
-    )
     if not skip_lock:
         _run_checked(["uv", "lock"], cwd=repo_root)
         _run_checked(["uv", "sync", "--locked"], cwd=repo_root)
@@ -219,18 +148,13 @@ def bump_repository_version(
 def build_parser() -> argparse.ArgumentParser:
     """Construct CLI parser for version bumping and release tag verification."""
     parser = argparse.ArgumentParser(
-        description="Bump SemVer version and synchronize lockfile, OpenAPI docs, and CHANGELOG.",
+        description="Bump SemVer version and synchronize lockfile and OpenAPI docs.",
     )
     parser.add_argument(
         "version",
         nargs="?",
         default=None,
         help="Target SemVer version (MAJOR.MINOR.PATCH, e.g. 0.2.0).",
-    )
-    parser.add_argument(
-        "--date",
-        default=None,
-        help="Optional release date (YYYY-MM-DD, default UTC today).",
     )
     parser.add_argument(
         "--skip-lock",
@@ -264,7 +188,6 @@ def main() -> int:
     try:
         old_ver, new_ver = bump_repository_version(
             raw_version,
-            release_date=cast("str | None", args.date),
             skip_lock=cast("bool", args.skip_lock),
             skip_openapi=cast("bool", args.skip_openapi),
         )

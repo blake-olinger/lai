@@ -102,7 +102,7 @@ description = "Build sdist and wheel without local source overrides"
 run = "uv build --no-sources"
 
 [tasks.bump]
-description = "Bump SemVer version and sync lockfile, OpenAPI docs, and CHANGELOG"
+description = "Bump SemVer version and sync lockfile and OpenAPI docs"
 run = "uv run python scripts/bump_version.py"
 
 [tasks.serve]
