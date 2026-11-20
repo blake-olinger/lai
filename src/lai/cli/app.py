@@ -12,12 +12,13 @@ from lai.cli.keys_cmd import keys_app
 from lai.cli.models_cmd import models_app
 from lai.cli.serve_cmd import serve_command
 from lai.cli.tunnel_cmd import tunnel_app
+from lai.cli.upgrade_cmd import upgrade_app
 from lai.domain.version import PACKAGE_VERSION
 
 app = typer.Typer(
     name="lai",
     no_args_is_help=True,
-    help="Local AI platform CLI for initialization, keys, apps, models, serving, and tunnels.",
+    help="Local AI platform CLI for init, keys, apps, models, serving, upgrades, and tunnels.",
 )
 
 
@@ -51,6 +52,7 @@ app.add_typer(apps_app, name="apps")
 app.add_typer(keys_app, name="keys")
 app.add_typer(models_app, name="models")
 app.add_typer(tunnel_app, name="tunnel")
+app.add_typer(upgrade_app, name="upgrade")
 
 
 def main() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path  # noqa: TC003 - evaluated at runtime by Typer
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 import uvicorn
@@ -14,7 +14,7 @@ from lai.cli._common import resolve_llama_executable, resolve_log_dir, resolve_s
 from lai.config.profiles import get_model_profile
 from lai.domain.errors import LaiError
 from lai.guardrails import ShieldGemmaSupervisor
-from lai.inference import LlamaCppSupervisor, OllamaSupervisor
+from lai.inference import LlamaCppSupervisor
 
 if TYPE_CHECKING:
     from lai.config.settings import LaiSettings
@@ -26,24 +26,17 @@ __all__ = ["build_supervisors", "create_app", "serve_async", "serve_command"]
 def build_supervisors(
     settings: LaiSettings,
 ) -> tuple[InferenceSupervisorPort, ShieldGemmaSupervisor | None]:
-    """Construct primary inference supervisor and optional standalone ShieldGemma supervisor."""
+    """Construct primary llama-server supervisor and optional CPU ShieldGemma supervisor."""
     log_dir = resolve_log_dir(settings)
-    if settings.inference_backend == "ollama":
-        return (
-            OllamaSupervisor(
-                base_url=settings.ollama_base_url,
-                log_dir=log_dir,
-            ),
-            None,
-        )
-
     exe_path = resolve_llama_executable(settings.bin_dir)
+    verify_sha = settings.model_integrity.verify_sha256_on_startup
     llama_supervisor = LlamaCppSupervisor(
         executable_path=exe_path,
         models_dir=settings.models_dir,
         log_dir=log_dir,
         host=settings.llama_host,
         port=settings.llama_port,
+        verify_sha256=verify_sha,
     )
     guardrail_supervisor: ShieldGemmaSupervisor | None = None
     if settings.guardrails.enabled:
@@ -54,6 +47,8 @@ def build_supervisors(
             log_dir=log_dir,
             retention_days=settings.logging.retention_days,
             compress_rotated=settings.logging.compress_rotated,
+            expected_sha256=settings.guardrails.sha256,
+            verify_sha256=verify_sha,
         )
     return llama_supervisor, guardrail_supervisor
 
@@ -95,7 +90,7 @@ async def serve_async(
             await llama_supervisor.stop()
 
 
-def serve_command(  # noqa: PLR0913, PLR0917
+def serve_command(
     config: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Optional YAML configuration path."),
@@ -112,10 +107,6 @@ def serve_command(  # noqa: PLR0913, PLR0917
         str | None,
         typer.Option("--profile", "-p", help="Override active model profile."),
     ] = None,
-    backend: Annotated[
-        Literal["llamacpp", "ollama"] | None,
-        typer.Option("--backend", "-b", help="Override inference backend (llamacpp or ollama)."),
-    ] = None,
     no_supervise: Annotated[
         bool,
         typer.Option(
@@ -124,7 +115,7 @@ def serve_command(  # noqa: PLR0913, PLR0917
         ),
     ] = False,
 ) -> None:
-    """Start inference backend, CPU ShieldGemma-2B guardrail, and FastAPI server (:8400)."""
+    """Start llama-server inference, CPU ShieldGemma-2B guardrail, and FastAPI server (:8400)."""
     overrides: dict[str, object] = {}
     if host is not None:
         overrides["host"] = host
@@ -132,8 +123,6 @@ def serve_command(  # noqa: PLR0913, PLR0917
         overrides["port"] = port
     if profile is not None:
         overrides["default_model_profile"] = profile
-    if backend is not None:
-        overrides["inference_backend"] = backend
 
     settings = resolve_settings(config, **overrides)
     try:

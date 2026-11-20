@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Annotated
 
 import typer
 import yaml
 
-from lai.cli._common import resolve_settings
+from lai.cli._common import chmod_posix, resolve_settings
+
+_POSIX_FILE_MODE = 0o600
 
 tunnel_app = typer.Typer(
     name="tunnel",
@@ -18,12 +19,9 @@ tunnel_app = typer.Typer(
 )
 
 
-def _default_credentials_file(tunnel: str, *, platform_name: str | None = None) -> str:
-    """Resolve default cloudflared credentials path, expanding home on Windows."""
-    target = (platform_name or sys.platform).lower()
-    if target == "win32":
-        return str(Path.home() / ".cloudflared" / f"{tunnel}.json")
-    return f"~/.cloudflared/{tunnel}.json"
+def _default_credentials_file(tunnel: str) -> str:
+    """Resolve absolute default cloudflared credentials path under the user's home directory."""
+    return str(Path.home() / ".cloudflared" / f"{tunnel}.json")
 
 
 def render_cloudflared_config(
@@ -32,13 +30,10 @@ def render_cloudflared_config(
     hostname: str,
     origin_url: str,
     credentials_file: Path | None = None,
-    platform_name: str | None = None,
 ) -> str:
     """Render a cloudflared YAML configuration routing hostname to the local LAI server."""
     creds_str = (
-        str(credentials_file)
-        if credentials_file is not None
-        else _default_credentials_file(tunnel, platform_name=platform_name)
+        str(credentials_file) if credentials_file is not None else _default_credentials_file(tunnel)
     )
     payload: dict[str, object] = {
         "tunnel": tunnel,
@@ -98,6 +93,7 @@ def render_config_command(  # noqa: PLR0913, PLR0917
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered, encoding="utf-8")
+        chmod_posix(output, _POSIX_FILE_MODE)
         typer.echo(f"Wrote cloudflared config to: {output}")
     else:
         typer.echo(rendered, nl=False)

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 import typer
 import yaml
 
+from lai.cli._common import chmod_posix
 from lai.config.profiles import DEFAULT_MODEL_PROFILE_NAME
 from lai.db import SqliteDatabase
+
+_POSIX_DIR_MODE = 0o700
+_POSIX_FILE_MODE = 0o600
 
 
 async def _init_database(db_path: Path) -> None:
@@ -19,11 +24,10 @@ async def _init_database(db_path: Path) -> None:
     await db.close()
 
 
-def _build_initial_config_payload(  # noqa: PLR0913
+def _build_initial_config_payload(
     *,
     host: str,
     port: int,
-    backend: Literal["llamacpp", "ollama"],
     data_dir: Path,
     models_dir: Path,
     bin_dir: Path,
@@ -32,22 +36,25 @@ def _build_initial_config_payload(  # noqa: PLR0913
     return {
         "host": host,
         "port": port,
-        "inference_backend": backend,
         "llama_host": "127.0.0.1",
         "llama_port": 8081,
-        "ollama_base_url": "http://127.0.0.1:11434",
         "data_dir": str(data_dir),
         "models_dir": str(models_dir),
         "bin_dir": str(bin_dir),
         "default_model_profile": DEFAULT_MODEL_PROFILE_NAME,
         "auth_providers": ["api_key"],
+        "model_integrity": {
+            "strict_allowlist": True,
+            "verify_sha256_on_startup": True,
+        },
         "guardrails": {
             "enabled": True,
-            "backend": backend,
             "block_mode": "refusal_message",
+            "output_mode": "buffered",
+            "allow_runtime_disable": False,
+            "max_violation_threshold": 0.95,
             "host": "127.0.0.1",
             "port": 8082,
-            "ollama_base_url": "http://127.0.0.1:11434",
         },
         "logging": {
             "log_dir": str(data_dir / "logs"),
@@ -65,7 +72,9 @@ def init_command(  # noqa: PLR0913, PLR0917
     ] = Path("config/config.yaml"),
     data_dir: Annotated[
         Path,
-        typer.Option("--data-dir", help="Directory for SQLite DB, blobs, logs, and LanceDB."),
+        typer.Option(
+            "--data-dir", help="Directory for SQLite DB, blobs, backups, logs, and LanceDB."
+        ),
     ] = Path("data"),
     models_dir: Annotated[
         Path,
@@ -80,30 +89,26 @@ def init_command(  # noqa: PLR0913, PLR0917
         typer.Option("--host", help="Bind host for the API server."),
     ] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8400,
-    backend: Annotated[
-        Literal["llamacpp", "ollama"],
-        typer.Option("--backend", "-b", help="Default inference backend (llamacpp or ollama)."),
-    ] = "llamacpp",
     force: Annotated[
         bool,
         typer.Option("--force", help="Overwrite existing config file if present."),
     ] = False,
 ) -> None:
     """Initialize local LAI workspace directories, SQLite database, and YAML config."""
-    import asyncio  # noqa: PLC0415
-
-    for directory in (
+    private_dirs = (
         data_dir,
         data_dir / "blobs",
-        data_dir / "logs",
         data_dir / "lancedb",
-        models_dir,
-        bin_dir,
-    ):
+        data_dir / "backups",
+    )
+    for directory in (*private_dirs, data_dir / "logs", models_dir, bin_dir):
         directory.mkdir(parents=True, exist_ok=True)
+    for private_dir in private_dirs:
+        chmod_posix(private_dir, _POSIX_DIR_MODE)
 
     db_path = data_dir / "lai.db"
     asyncio.run(_init_database(db_path))
+    chmod_posix(db_path, _POSIX_FILE_MODE)
 
     config_status = "kept existing"
     if not config.exists() or force:
@@ -111,12 +116,12 @@ def init_command(  # noqa: PLR0913, PLR0917
         payload = _build_initial_config_payload(
             host=host,
             port=port,
-            backend=backend,
             data_dir=data_dir,
             models_dir=models_dir,
             bin_dir=bin_dir,
         )
         config.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        chmod_posix(config, _POSIX_FILE_MODE)
         config_status = "wrote"
 
     typer.echo(f"Initialized database: {db_path}")

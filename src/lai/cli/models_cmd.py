@@ -1,17 +1,18 @@
-"""CLI subcommands for downloading llama.cpp CUDA binaries and GGUF models."""
+"""CLI subcommands for downloading Linux llama.cpp CUDA binaries, GGUF models, and embeddings."""
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
 from lai.cli._common import resolve_settings
 from lai.config.profiles import BUILTIN_PROFILES, get_model_profile
 from lai.domain.errors import LaiError
-from lai.inference import ModelDownloader, setup_ollama_models
+from lai.inference import ModelDownloader
+from lai.ingestion import FastEmbedCpuAdapter
 
 if TYPE_CHECKING:
     from lai.config.settings import LaiSettings
@@ -19,13 +20,18 @@ if TYPE_CHECKING:
 models_app = typer.Typer(
     name="models",
     no_args_is_help=True,
-    help="Download and inspect local llama.cpp binaries and GGUF models.",
+    help="Download and inspect Linux llama.cpp binaries, GGUF models, and CPU embeddings.",
 )
 
 
 def build_downloader(settings: LaiSettings) -> ModelDownloader:
     """Construct a ModelDownloader configured from settings."""
     return ModelDownloader(bin_dir=settings.bin_dir, models_dir=settings.models_dir)
+
+
+def build_embedder(settings: LaiSettings) -> FastEmbedCpuAdapter:
+    """Construct a CPU-only FastEmbed adapter caching ONNX artifacts under models_dir/fastembed."""
+    return FastEmbedCpuAdapter(cache_dir=settings.models_dir / "fastembed")
 
 
 async def _setup_models_async(  # noqa: PLR0913
@@ -37,9 +43,10 @@ async def _setup_models_async(  # noqa: PLR0913
     hf_token: str | None,
     skip_binaries: bool,
     skip_guardrail: bool,
+    skip_embeddings: bool,
     force: bool,
 ) -> dict[str, Path]:
-    """Download CUDA llama-server binaries, primary Gemma 4 GGUF, and ShieldGemma-2B GGUF."""
+    """Download llama-server CUDA binaries, Gemma 4 GGUF, ShieldGemma-2B GGUF, and FastEmbed."""
     downloader = build_downloader(settings)
     profile = get_model_profile(profile_name, settings.custom_profiles)
     results: dict[str, Path] = {}
@@ -64,23 +71,18 @@ async def _setup_models_async(  # noqa: PLR0913
             token=hf_token,
         )
 
+    if not skip_embeddings:
+        embed_dir = settings.models_dir / "fastembed"
+        embed_dir.mkdir(parents=True, exist_ok=True)
+        embedder = build_embedder(settings)
+        try:
+            await embedder.embed_query("warmup")
+        except (OSError, RuntimeError, ValueError) as exc:
+            msg = f"Failed to pre-warm FastEmbed CPU model in {embed_dir}: {exc}"
+            raise LaiError(msg, code="embeddings_setup_failed", status_code=500) from exc
+        results["embeddings_cache"] = embed_dir
+
     return results
-
-
-async def _setup_ollama_async(
-    settings: LaiSettings,
-    *,
-    profile_name: str,
-    skip_guardrail: bool,
-) -> dict[str, str]:
-    """Pull HF GGUFs via Ollama and create tuned local aliases."""
-    profile = get_model_profile(profile_name, settings.custom_profiles)
-    return await setup_ollama_models(
-        profile,
-        settings.guardrails,
-        base_url=settings.ollama_base_url,
-        skip_guardrail=skip_guardrail,
-    )
 
 
 @models_app.command("setup")
@@ -93,17 +95,15 @@ def setup_models(  # noqa: PLR0913, PLR0917
         str | None,
         typer.Option("--profile", "-p", help="Model profile name to download."),
     ] = None,
-    backend: Annotated[
-        Literal["llamacpp", "ollama"] | None,
-        typer.Option("--backend", "-b", help="Override inference backend (llamacpp or ollama)."),
-    ] = None,
     tag: Annotated[
         str | None,
-        typer.Option("--tag", help="Optional llama.cpp GitHub release tag."),
+        typer.Option(
+            "--tag", help="Optional llama.cpp GitHub release tag (default: manifest pin)."
+        ),
     ] = None,
     cuda_version: Annotated[
         str | None,
-        typer.Option("--cuda-version", help="Preferred CUDA toolkit filter (e.g. 12.4)."),
+        typer.Option("--cuda-version", help="Preferred CUDA toolkit version (e.g. 12.8 or 13.5)."),
     ] = None,
     hf_token: Annotated[
         str | None,
@@ -117,37 +117,32 @@ def setup_models(  # noqa: PLR0913, PLR0917
         bool,
         typer.Option("--skip-guardrail", help="Skip downloading ShieldGemma-2B GGUF."),
     ] = False,
+    skip_embeddings: Annotated[
+        bool,
+        typer.Option("--skip-embeddings", help="Skip pre-warming FastEmbed CPU ONNX embeddings."),
+    ] = False,
     force: Annotated[
         bool,
         typer.Option("--force", help="Re-download artifacts even if already present."),
     ] = False,
 ) -> None:
-    """Download CUDA llama-server or pull Ollama models + ShieldGemma-2B."""
+    """Download verified Linux llama-server binaries, GGUF models, and FastEmbed ONNX cache."""
     settings = resolve_settings(config)
     target_profile = profile or settings.default_model_profile
-    effective_backend = backend or settings.inference_backend
     try:
-        if effective_backend == "ollama":
-            resolved: dict[str, Path] | dict[str, str] = asyncio.run(
-                _setup_ollama_async(
-                    settings,
-                    profile_name=target_profile,
-                    skip_guardrail=skip_guardrail,
-                )
+        resolved = asyncio.run(
+            _setup_models_async(
+                settings,
+                profile_name=target_profile,
+                tag=tag,
+                cuda_version=cuda_version,
+                hf_token=hf_token,
+                skip_binaries=skip_binaries,
+                skip_guardrail=skip_guardrail,
+                skip_embeddings=skip_embeddings,
+                force=force,
             )
-        else:
-            resolved = asyncio.run(
-                _setup_models_async(
-                    settings,
-                    profile_name=target_profile,
-                    tag=tag,
-                    cuda_version=cuda_version,
-                    hf_token=hf_token,
-                    skip_binaries=skip_binaries,
-                    skip_guardrail=skip_guardrail,
-                    force=force,
-                )
-            )
+        )
     except LaiError as exc:
         typer.echo(f"Model setup failed ({exc.code}): {exc.message}", err=True)
         raise typer.Exit(code=1) from exc

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
-import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -42,10 +42,20 @@ def resolve_db_path(settings: LaiSettings, db_path: Path | None = None) -> Path:
     return db_path if db_path is not None else settings.data_dir / "lai.db"
 
 
+def chmod_posix(path: Path, mode: int) -> None:
+    """Apply POSIX file or directory permissions on a best-effort basis."""
+    if os.name == "posix":
+        with suppress(OSError):
+            path.chmod(mode)
+
+
 def resolve_llama_executable(bin_dir: Path) -> Path:
-    """Locate the llama-server executable under bin_dir/llama or PATH."""
+    """Locate Linux llama-server under bin_dir/llama/current, bin_dir/llama, or PATH."""
     llama_dir = bin_dir / "llama"
-    binary_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+    binary_name = "llama-server"
+    current = llama_dir / "current" / binary_name
+    if current.exists():
+        return current
     direct = llama_dir / binary_name
     if direct.exists():
         return direct
@@ -53,10 +63,10 @@ def resolve_llama_executable(bin_dir: Path) -> Path:
         found = next(llama_dir.rglob(binary_name), None)
         if found is not None:
             return found
-    on_path = shutil.which(binary_name) or shutil.which("llama-server")
+    on_path = shutil.which(binary_name)
     if on_path is not None:
         return Path(on_path)
-    return direct
+    return current
 
 
 @asynccontextmanager

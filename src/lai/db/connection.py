@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,17 @@ from lai.observability.logging import get_component_logger
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
+
+
+_POSIX_DIR_MODE = 0o700
+_POSIX_FILE_MODE = 0o600
+
+
+def _chmod_posix(path: Path, mode: int) -> None:
+    """Apply POSIX file or directory permissions on a best-effort basis."""
+    if os.name == "posix":
+        with suppress(OSError):
+            path.chmod(mode)
 
 
 async def _safe_rollback(conn: aiosqlite.Connection) -> None:
@@ -72,8 +84,13 @@ class SqliteDatabase:
             if self._conn is not None:
                 return self._conn
             raw_path = str(self._db_path)
-            if raw_path != ":memory:" and not raw_path.startswith("file:"):
-                Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
+            is_local_file = raw_path != ":memory:" and not raw_path.startswith("file:")
+            db_file = Path(raw_path) if is_local_file else None
+            if db_file is not None:
+                parent_existed = db_file.parent.exists()
+                db_file.parent.mkdir(parents=True, exist_ok=True)
+                if not parent_existed:
+                    _chmod_posix(db_file.parent, _POSIX_DIR_MODE)
             try:
                 conn = await aiosqlite.connect(self._db_path, isolation_level=None)
                 conn.row_factory = aiosqlite.Row
@@ -83,6 +100,8 @@ class SqliteDatabase:
                 await conn.execute("PRAGMA synchronous=NORMAL;")
             except (sqlite3.Error, OSError) as exc:
                 raise _log_and_raise_storage_error("connect", exc) from exc
+            if db_file is not None and db_file.exists():
+                _chmod_posix(db_file, _POSIX_FILE_MODE)
             self._conn = conn
             return conn
 

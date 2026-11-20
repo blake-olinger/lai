@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from lai.db.analytics_repo import SqliteUsageAnalyticsRepository
 from lai.db.auth_repo import SqliteApiKeyRepository
+from lai.db.backup import SqliteDatabaseBackupAdapter
 from lai.db.client_app_repo import SqliteClientAppRepository
 from lai.db.connection import SqliteDatabase
 from lai.db.file_repo import SqliteFileRepository, sanitize_fts5_query
@@ -18,6 +19,7 @@ __all__ = [
     "SqliteApiKeyRepository",
     "SqliteClientAppRepository",
     "SqliteDatabase",
+    "SqliteDatabaseBackupAdapter",
     "SqliteFileRepository",
     "SqliteProjectRepository",
     "SqliteRuntimeConfigRepository",

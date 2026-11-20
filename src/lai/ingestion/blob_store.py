@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import uuid
+from contextlib import suppress
 from typing import TYPE_CHECKING, BinaryIO
 
 from lai.domain.errors import NotFoundError, PayloadTooLargeError, ValidationFailedError
@@ -17,6 +19,15 @@ if TYPE_CHECKING:
 DEFAULT_MAX_UPLOAD_BYTES = 262_144_000
 _FLUSH_BUFFER_BYTES = 65_536
 _FORBIDDEN_SEGMENT_CHARS = ("/", "\\", "\x00")
+_POSIX_DIR_MODE = 0o700
+_POSIX_FILE_MODE = 0o600
+
+
+def _chmod_posix(path: Path, mode: int) -> None:
+    """Apply POSIX file or directory permissions on a best-effort basis."""
+    if os.name == "posix":
+        with suppress(OSError):
+            path.chmod(mode)
 
 
 def _validate_segment(value: str, field_name: str) -> str:
@@ -40,10 +51,15 @@ def _validate_filename(filename: str) -> str:
     return filename
 
 
-def _open_temp_file(tmp_path: Path) -> BinaryIO:
-    """Create parent directories and open a temporary staging file for streaming writes."""
+def _open_temp_file(tmp_path: Path, blobs_root: Path) -> BinaryIO:
+    """Create parent directories with private POSIX permissions and open staging file."""
+    blobs_root.mkdir(parents=True, exist_ok=True)
+    _chmod_posix(blobs_root, _POSIX_DIR_MODE)
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    return tmp_path.open("wb")
+    _chmod_posix(tmp_path.parent, _POSIX_DIR_MODE)
+    handle = tmp_path.open("wb")
+    _chmod_posix(tmp_path, _POSIX_FILE_MODE)
+    return handle
 
 
 def _write_and_clear(handle: BinaryIO, payload: bytes) -> None:
@@ -58,7 +74,9 @@ def _finalize_temp_file(handle: BinaryIO, tmp_path: Path, dest_path: Path, trail
     handle.flush()
     handle.close()
     dest_path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod_posix(dest_path.parent, _POSIX_DIR_MODE)
     tmp_path.replace(dest_path)
+    _chmod_posix(dest_path, _POSIX_FILE_MODE)
 
 
 def _cleanup_temp_file(handle: BinaryIO | None, tmp_path: Path) -> None:
@@ -186,7 +204,7 @@ class LocalBlobStore(BlobStorePort):
         handle: BinaryIO | None = None
 
         try:
-            handle = await asyncio.to_thread(_open_temp_file, tmp_path)
+            handle = await asyncio.to_thread(_open_temp_file, tmp_path, self._blobs_dir)
             async for chunk in chunks:
                 if not chunk:
                     continue
