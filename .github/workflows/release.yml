@@ -17,32 +17,47 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv and Python 3.13
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.13.0"
-          python-version: "3.13"
-          enable-cache: true
+          fetch-depth: 0
 
-      - name: Sync locked dependencies
-        run: uv sync --locked
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Verify release tag matches pyproject.toml version
-        run: uv run python scripts/bump_version.py --check-tag "${{ github.ref_name }}"
+      - name: Build shared Linux validation container
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/ci.Dockerfile
+          load: true
+          tags: lai-ci:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Run full verification suite
-        run: uv run python scripts/verify.py all --tier full --cov-fail-under 90
-
-      - name: Build sdist and wheel
-        run: uv build --no-sources
-
-      - name: Export OpenAPI 3.1 schema and API reference artifacts
-        run: uv run python scripts/export_openapi.py --output dist/openapi.json --markdown-output dist/api-reference.md
-
-      - name: Generate SHA-256 checksums
-        working-directory: dist
-        run: sha256sum * > SHA256SUMS.txt
+      - name: Verify release tag, run release-check, and assemble checksummed artifacts
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          docker run --rm --init \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            -e LAI_IN_CONTAINER=1 \
+            -e UV_PROJECT_ENVIRONMENT=/opt/lai-venv \
+            -e RELEASE_TAG="${RELEASE_TAG}" \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
+            lai-ci:local \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /workspace
+              uv pip install --python /opt/lai-venv/bin/python --no-deps -e /workspace >/dev/null
+              export UV_NO_SYNC=1
+              uv run python scripts/bump_version.py --check-tag "${RELEASE_TAG}"
+              rm -rf dist
+              mise run release-check
+              uv run python scripts/export_openapi.py --output dist/openapi.json --markdown-output dist/api-reference.md
+              (cd dist && sha256sum * > SHA256SUMS.txt)
+              chown -R "${HOST_UID}:${HOST_GID}" dist site
+            '
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4

@@ -1,0 +1,164 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices"
+  ],
+  "timezone": "UTC",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "minimumReleaseAge": "7 days",
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 3,
+  "labels": [
+    "dependencies"
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on monday"
+    ],
+    "automerge": true,
+    "automergeType": "pr"
+  },
+  "pep621": {
+    "managerFilePatterns": [
+      "/^pyproject\\.toml$/",
+      "/^\\.github/tools/pip-audit/pyproject\\.toml$/"
+    ]
+  },
+  "mise": {
+    "managerFilePatterns": [
+      "/^mise\\.toml$/"
+    ]
+  },
+  "dockerfile": {
+    "managerFilePatterns": [
+      "/^docker/ci\\.Dockerfile$/"
+    ]
+  },
+  "github-actions": {
+    "managerFilePatterns": [
+      "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+    ]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track Scalar API Reference CDN version in scripts/build_pages_docs.py",
+      "managerFilePatterns": [
+        "/^scripts/build_pages_docs\\.py$/"
+      ],
+      "matchStrings": [
+        "_SCALAR_VERSION\\s*=\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "@scalar/api-reference",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "description": "Track pinned llama.cpp release tag in src/lai/inference/manifest.py",
+      "managerFilePatterns": [
+        "/^src/lai/inference/manifest\\.py$/"
+      ],
+      "matchStrings": [
+        "DEFAULT_LLAMA_CPP_TAG\\s*=\\s*\"(?<currentValue>b\\d+)\""
+      ],
+      "depNameTemplate": "ggml-org/llama.cpp",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "regex:^b(?<major>\\d+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Track pinned mise binary version in docker/ci.Dockerfile and deploy/systemd/install-ubuntu.sh",
+      "managerFilePatterns": [
+        "/^docker/ci\\.Dockerfile$/",
+        "/^deploy/systemd/install-ubuntu\\.sh$/"
+      ],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\n(?:ARG\\s+)?MISE_VERSION=\"?(?<currentValue>[^\"\\s]+)\"?"
+      ],
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group Python runtime dependencies",
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchFileNames": [
+        "pyproject.toml"
+      ],
+      "matchDepTypes": [
+        "dependencies"
+      ],
+      "groupName": "python-runtime"
+    },
+    {
+      "description": "Group Python development and verification dependencies",
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchFileNames": [
+        "pyproject.toml"
+      ],
+      "matchDepTypes": [
+        "dev"
+      ],
+      "groupName": "python-dev-tools"
+    },
+    {
+      "description": "Group isolated pip-audit tool dependencies",
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchFileNames": [
+        ".github/tools/pip-audit/pyproject.toml"
+      ],
+      "groupName": "pip-audit-tool"
+    },
+    {
+      "description": "Group mise toolchain pins",
+      "matchManagers": [
+        "mise"
+      ],
+      "groupName": "mise-tools"
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Group Docker base image digest refreshes",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "groupName": "docker-base-images"
+    },
+    {
+      "description": "Automerge passing patch, minor, and digest PRs after 7-day release cooldown",
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Require manual review for checksum-coupled custom pins (Scalar SRI, llama.cpp manifest SHA-256, mise SHA-256)",
+      "matchPackageNames": [
+        "@scalar/api-reference",
+        "ggml-org/llama.cpp",
+        "jdx/mise"
+      ],
+      "automerge": false
+    }
+  ]
+}

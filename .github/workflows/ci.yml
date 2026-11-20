@@ -19,49 +19,62 @@ concurrency:
 
 jobs:
   verify:
-    name: Verify (${{ matrix.os }}, Python 3.13)
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: Verify (Linux container, Python 3.13)
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install uv and Python 3.13
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build shared Linux validation container
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          version: "0.13.0"
-          python-version: "3.13"
-          enable-cache: true
+          context: .
+          file: docker/ci.Dockerfile
+          load: true
+          tags: lai-ci:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Sync locked dependencies
-        run: uv sync --locked
-
-      - name: Lint and file size budget
-        run: uv run python scripts/verify.py lint
-
-      - name: Typecheck (basedpyright + mypy)
-        run: uv run python scripts/verify.py typecheck
-
-      - name: Architectural boundary contracts
-        run: uv run python scripts/verify.py boundaries
-
-      - name: Validate OpenAPI 3.1 schema
-        run: uv run python scripts/verify.py schema
-
-      - name: Verify sdist and wheel build
-        run: uv build --no-sources
-
-      - name: Run unit and integration tests with coverage
-        run: uv run python scripts/verify.py test --cov-fail-under 90
-
-      - name: Run critical mutation tests
+      - name: Run CI verification suite (critical mutation tier)
         if: github.event_name != 'schedule'
-        run: uv run python scripts/verify.py mutate --tier critical
+        run: |
+          docker run --rm --init \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            -e LAI_IN_CONTAINER=1 \
+            -e UV_PROJECT_ENVIRONMENT=/opt/lai-venv \
+            lai-ci:local \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /workspace
+              uv pip install --python /opt/lai-venv/bin/python --no-deps -e /workspace >/dev/null
+              export UV_NO_SYNC=1
+              mise run ci
+            '
 
-      - name: Run full mutation tests (scheduled)
+      - name: Run scheduled verification suite (full mutation tier)
         if: github.event_name == 'schedule'
-        run: uv run python scripts/verify.py mutate --tier full
+        run: |
+          docker run --rm --init \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            -e LAI_IN_CONTAINER=1 \
+            -e UV_PROJECT_ENVIRONMENT=/opt/lai-venv \
+            lai-ci:local \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /workspace
+              uv pip install --python /opt/lai-venv/bin/python --no-deps -e /workspace >/dev/null
+              export UV_NO_SYNC=1
+              mise run lint
+              mise run typecheck
+              mise run boundaries
+              mise run schema
+              mise run build
+              mise run test
+              mise run mutate-full
+            '
