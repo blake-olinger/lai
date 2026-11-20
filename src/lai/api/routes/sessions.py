@@ -30,6 +30,9 @@ from lai.api.schemas.sessions import (
 )
 from lai.domain.auth import ApiScope, AuthPrincipal
 from lai.domain.chat import Session, TurnInput, TurnOutput
+from lai.domain.errors import GuardrailBlockedError
+from lai.domain.guardrails import GuardrailDirection, GuardrailVerdict
+from lai.observability.logging import get_request_id
 from lai.scheduler import await_or_keepalive_json
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
@@ -43,6 +46,23 @@ async def create_session(
 ) -> Session:
     """Create a new chat session scoped to an accessible project."""
     project = await require_accessible_project(services, body.project_id, principal)
+    if body.system_prompt and body.system_prompt.strip():
+        decision = await services.guardrail_pipeline.check_prompt(
+            body.system_prompt,
+            direction=GuardrailDirection.INGRESS,
+            request_id=get_request_id(),
+            project_id=body.project_id,
+            principal_id=principal.principal_id,
+        )
+        if decision.verdict is GuardrailVerdict.BLOCK:
+            raise GuardrailBlockedError(
+                services.settings.guardrails.refusal_text,
+                violated_policy=decision.violated_policy,
+                details={
+                    "provider": decision.provider,
+                    "direction": GuardrailDirection.INGRESS.value,
+                },
+            )
     session = Session(
         project_id=body.project_id,
         title=body.title,
@@ -137,6 +157,7 @@ async def post_session_message(
             **build_guardrail_headers(
                 guardrail_blocked=primed.guardrail_blocked,
                 guardrail_policy=primed.guardrail_policy,
+                guardrail_direction=primed.guardrail_direction,
             ),
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -161,6 +182,7 @@ async def post_session_message(
         headers = build_guardrail_headers(
             guardrail_blocked=outcome.guardrail_blocked,
             guardrail_policy=outcome.guardrail_policy,
+            guardrail_direction=outcome.guardrail_direction,
         )
         return JSONResponse(
             content=outcome.model_dump(mode="json"),

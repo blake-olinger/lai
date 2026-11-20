@@ -12,13 +12,13 @@ from lai.api.schemas.system_config import (
     GuardrailsPolicyConfigResponse,
     LimitsRuntimeConfigResponse,
     OidcRuntimeConfigResponse,
+    UpdatesRuntimeConfigResponse,
 )
 from lai.db.analytics_repo import SqliteUsageAnalyticsRepository
 from lai.domain.auth import ApiScope
 from lai.guardrails import (
     AllowAllGuardrailProvider,
     CompositeGuardrailPipeline,
-    OllamaShieldGemmaProvider,
     ShieldGemmaCpuProvider,
 )
 from lai.ingestion import LocalBlobStore
@@ -76,6 +76,8 @@ def apply_live_oidc(services: AppServices) -> None:
                 allowed_domains=s.oidc_allowed_domains,
                 default_scopes=tuple(ApiScope(scope) for scope in s.oidc_default_scopes),
                 admin_emails=s.oidc_admin_emails,
+                require_email_verified=s.oidc_require_email_verified,
+                identity_claims=s.oidc_identity_claims,
                 leeway_seconds=s.oidc_leeway_seconds,
             )
             provider.reconfigure(updated_cfg)
@@ -118,28 +120,17 @@ def apply_live_guardrails(services: AppServices) -> None:
             isinstance(provider, AllowAllGuardrailProvider) for provider in existing
         )
         if cfg.enabled and only_passthrough:
-            new_providers: list[GuardrailProviderPort]
-            if cfg.backend == "ollama" or services.settings.inference_backend == "ollama":
-                ollama_cfg = (
-                    cfg
-                    if cfg.backend == "ollama"
-                    else cfg.model_copy(
-                        update={
-                            "backend": "ollama",
-                            "ollama_base_url": services.settings.ollama_base_url,
-                        }
-                    )
-                )
-                ollama_guard = OllamaShieldGemmaProvider(ollama_cfg)
-                new_providers = [ollama_guard]
-                services.guardrail_health_probe = ollama_guard.health
-            else:
-                shield_guard = ShieldGemmaCpuProvider(cfg)
-                new_providers = [shield_guard]
-                services.guardrail_health_probe = shield_guard.health
+            shield_guard = ShieldGemmaCpuProvider(cfg)
+            new_providers: list[GuardrailProviderPort] = [shield_guard]
+            services.guardrail_health_probe = shield_guard.health
             services.guardrail_pipeline.reconfigure(cfg, providers=new_providers)
         else:
             services.guardrail_pipeline.reconfigure(cfg)
+    sync_orchestrator_settings(services)
+
+
+def apply_live_updates(services: AppServices) -> None:
+    """Sync live update settings reference onto the orchestrator."""
     sync_orchestrator_settings(services)
 
 
@@ -187,6 +178,8 @@ def build_oidc_response(settings: LaiSettings) -> OidcRuntimeConfigResponse:
         oidc_allowed_domains=list(settings.oidc_allowed_domains),
         oidc_admin_emails=list(settings.oidc_admin_emails),
         oidc_default_scopes=list(settings.oidc_default_scopes),
+        oidc_require_email_verified=settings.oidc_require_email_verified,
+        oidc_identity_claims=list(settings.oidc_identity_claims),
         oidc_leeway_seconds=settings.oidc_leeway_seconds,
     )
 
@@ -213,6 +206,8 @@ def build_limits_response(settings: LaiSettings) -> LimitsRuntimeConfigResponse:
         keepalive_interval_seconds=settings.keepalive_interval_seconds,
         json_keepalive_threshold_seconds=settings.json_keepalive_threshold_seconds,
         trust_cloudflare_headers=settings.trust_cloudflare_headers,
+        trusted_proxy_cidrs=list(settings.trusted_proxy_cidrs),
+        proxy_ip_header=settings.proxy_ip_header,
         log_level=settings.log_level,
     )
 
@@ -222,10 +217,31 @@ def build_guardrails_response(settings: LaiSettings) -> GuardrailsPolicyConfigRe
     cfg = settings.guardrails
     return GuardrailsPolicyConfigResponse(
         enabled=cfg.enabled,
-        backend=cfg.backend,
         block_mode=cfg.block_mode,
+        output_mode=cfg.output_mode,
         refusal_text=cfg.refusal_text,
         violation_threshold=cfg.violation_threshold,
         fail_open=cfg.fail_open,
+        allow_runtime_disable=cfg.allow_runtime_disable,
+        max_violation_threshold=cfg.max_violation_threshold,
         timeout_seconds=cfg.timeout_seconds,
+    )
+
+
+def build_updates_response(settings: LaiSettings) -> UpdatesRuntimeConfigResponse:
+    """Build UpdatesRuntimeConfigResponse from current settings."""
+    cfg = settings.updates
+    return UpdatesRuntimeConfigResponse(
+        enabled=cfg.enabled,
+        github_repo=cfg.github_repo,
+        releases_dir=str(cfg.releases_dir),
+        current_symlink=str(cfg.current_symlink),
+        backups_dir=str(cfg.backups_dir),
+        service_name=cfg.service_name,
+        health_url=cfg.health_url,
+        health_timeout_seconds=cfg.health_timeout_seconds,
+        health_poll_interval_seconds=cfg.health_poll_interval_seconds,
+        keep_releases=cfg.keep_releases,
+        auto_rollback=cfg.auto_rollback,
+        allow_prerelease=cfg.allow_prerelease,
     )

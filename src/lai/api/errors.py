@@ -73,6 +73,9 @@ def _extract_lai_details_and_headers(exc: LaiError) -> tuple[dict[str, str], dic
         if exc.violated_policy:
             headers["X-LAI-Guardrail-Policy"] = exc.violated_policy
             details.setdefault("violated_policy", exc.violated_policy)
+        direction = details.get("direction")
+        if direction:
+            headers["X-LAI-Guardrail-Direction"] = direction
 
     return details, headers
 

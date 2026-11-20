@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from lai.api._analytics import track_turn_output, track_turn_stream
 from lai.api._client_auth import require_authenticated_client_app
 from lai.api._streaming import (
+    build_guardrail_headers,
     format_orchestrator_sse,
     guard_orchestrator_sse_frames,
     prime_sse_stream,
@@ -121,7 +122,15 @@ async def submit_tool_result(
             keepalive_interval_seconds=services.settings.keepalive_interval_seconds,
             is_disconnected=request.is_disconnected,
         )
-        headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        headers = {
+            **build_guardrail_headers(
+                guardrail_blocked=primed.guardrail_blocked,
+                guardrail_policy=primed.guardrail_policy,
+                guardrail_direction=primed.guardrail_direction,
+            ),
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
         return StreamingResponse(
             guard_orchestrator_sse_frames(format_orchestrator_sse(primed.events)),
             media_type="text/event-stream",
@@ -139,5 +148,10 @@ async def submit_tool_result(
         is_disconnected=request.is_disconnected,
     )
     if isinstance(outcome, TurnOutput):
-        return JSONResponse(content=outcome.model_dump(mode="json"))
+        headers = build_guardrail_headers(
+            guardrail_blocked=outcome.guardrail_blocked,
+            guardrail_policy=outcome.guardrail_policy,
+            guardrail_direction=outcome.guardrail_direction,
+        )
+        return JSONResponse(content=outcome.model_dump(mode="json"), headers=headers)
     return StreamingResponse(outcome, media_type="application/json")

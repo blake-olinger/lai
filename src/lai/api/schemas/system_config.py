@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import Field
 
 from lai.domain.base import StrictModel
-from lai.domain.guardrails import GuardrailBlockMode
+from lai.domain.guardrails import GuardrailBlockMode, GuardrailOutputMode
 from lai.domain.observability import (
     AlertCategory,
     AlertSeverity,
@@ -15,7 +15,8 @@ from lai.domain.observability import (
     SmtpTlsMode,
 )
 
-ReloadSection = Literal["alerting", "analytics", "oidc", "cors", "limits", "guardrails"]
+ProxyIpHeader = Literal["cf-connecting-ip", "x-forwarded-for", "x-azure-clientip"]
+ReloadSection = Literal["alerting", "analytics", "oidc", "cors", "limits", "guardrails", "updates"]
 ALL_RELOAD_SECTIONS: tuple[ReloadSection, ...] = (
     "alerting",
     "analytics",
@@ -23,6 +24,7 @@ ALL_RELOAD_SECTIONS: tuple[ReloadSection, ...] = (
     "cors",
     "limits",
     "guardrails",
+    "updates",
 )
 
 
@@ -124,17 +126,21 @@ class OidcRuntimeConfigResponse(StrictModel):
     oidc_allowed_domains: list[str] = Field(default_factory=list)
     oidc_admin_emails: list[str] = Field(default_factory=list)
     oidc_default_scopes: list[str] = Field(default_factory=list)
+    oidc_require_email_verified: bool
+    oidc_identity_claims: list[str] = Field(default_factory=list)
     oidc_leeway_seconds: float = Field(ge=0.0, le=300.0)
 
 
 class UpdateOidcConfigRequest(StrictModel):
-    """Partial live update for OIDC audiences, allowlists, scopes, and clock leeway."""
+    """Partial live update for OIDC audiences, allowlists, scopes, claims, and leeway."""
 
     oidc_audiences: list[str] | None = None
     oidc_allowed_emails: list[str] | None = None
     oidc_allowed_domains: list[str] | None = None
     oidc_admin_emails: list[str] | None = None
     oidc_default_scopes: list[str] | None = None
+    oidc_require_email_verified: bool | None = None
+    oidc_identity_claims: list[str] | None = None
     oidc_leeway_seconds: float | None = Field(default=None, ge=0.0, le=300.0)
 
 
@@ -154,7 +160,7 @@ class UpdateCorsConfigRequest(StrictModel):
 
 
 class LimitsRuntimeConfigResponse(StrictModel):
-    """Live rate limits, per-principal quotas, upload limits, keepalive, and log level."""
+    """Live rate limits, per-principal quotas, proxy trust, upload limits, keepalive, and logs."""
 
     rate_limit_rpm: int = Field(ge=1)
     ip_rate_limit_rpm: int = Field(ge=1)
@@ -166,11 +172,13 @@ class LimitsRuntimeConfigResponse(StrictModel):
     keepalive_interval_seconds: float = Field(gt=0.0)
     json_keepalive_threshold_seconds: float = Field(gt=0.0)
     trust_cloudflare_headers: bool
+    trusted_proxy_cidrs: list[str] = Field(default_factory=list)
+    proxy_ip_header: ProxyIpHeader
     log_level: str
 
 
 class UpdateLimitsConfigRequest(StrictModel):
-    """Partial live update for rate limits, quotas, queue bounds, keepalive, and log level."""
+    """Partial live update for limits, quotas, proxy trust, keepalive, and log level."""
 
     rate_limit_rpm: int | None = Field(default=None, ge=1)
     ip_rate_limit_rpm: int | None = Field(default=None, ge=1)
@@ -182,18 +190,22 @@ class UpdateLimitsConfigRequest(StrictModel):
     keepalive_interval_seconds: float | None = Field(default=None, gt=0.0)
     json_keepalive_threshold_seconds: float | None = Field(default=None, gt=0.0)
     trust_cloudflare_headers: bool | None = None
+    trusted_proxy_cidrs: list[str] | None = None
+    proxy_ip_header: ProxyIpHeader | None = None
     log_level: str | None = None
 
 
 class GuardrailsPolicyConfigResponse(StrictModel):
-    """Live pre-flight guardrail enforcement policy."""
+    """Live ingress and egress ShieldGemma guardrail enforcement policy."""
 
     enabled: bool
-    backend: Literal["llamacpp", "ollama"]
     block_mode: GuardrailBlockMode
+    output_mode: GuardrailOutputMode
     refusal_text: str
-    violation_threshold: float = Field(gt=0.0, lt=1.0)
+    violation_threshold: float = Field(ge=0.0, le=1.0)
     fail_open: bool
+    allow_runtime_disable: bool
+    max_violation_threshold: float = Field(ge=0.0, le=1.0)
     timeout_seconds: float = Field(gt=0.0)
 
 
@@ -202,10 +214,39 @@ class UpdateGuardrailsPolicyRequest(StrictModel):
 
     enabled: bool | None = None
     block_mode: GuardrailBlockMode | None = None
+    output_mode: GuardrailOutputMode | None = None
     refusal_text: str | None = Field(default=None, min_length=1)
-    violation_threshold: float | None = Field(default=None, gt=0.0, lt=1.0)
+    violation_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     fail_open: bool | None = None
     timeout_seconds: float | None = Field(default=None, gt=0.0)
+
+
+class UpdatesRuntimeConfigResponse(StrictModel):
+    """Live self-update and rollback orchestration settings."""
+
+    enabled: bool
+    github_repo: str
+    releases_dir: str
+    current_symlink: str
+    backups_dir: str
+    service_name: str
+    health_url: str
+    health_timeout_seconds: float = Field(gt=0.0, le=600.0)
+    health_poll_interval_seconds: float = Field(gt=0.0, le=30.0)
+    keep_releases: int = Field(ge=1, le=20)
+    auto_rollback: bool
+    allow_prerelease: bool
+
+
+class UpdateUpdatesConfigRequest(StrictModel):
+    """Partial live update for non-privileged self-update scheduling and rollback toggles."""
+
+    enabled: bool | None = None
+    health_timeout_seconds: float | None = Field(default=None, gt=0.0, le=600.0)
+    health_poll_interval_seconds: float | None = Field(default=None, gt=0.0, le=30.0)
+    keep_releases: int | None = Field(default=None, ge=1, le=20)
+    auto_rollback: bool | None = None
+    allow_prerelease: bool | None = None
 
 
 class ScopedConfigReloadRequest(StrictModel):

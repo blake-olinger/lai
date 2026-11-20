@@ -12,14 +12,17 @@ from lai.api._runtime_config_apply import (
     apply_live_guardrails,
     apply_live_limits,
     apply_live_oidc,
+    apply_live_updates,
     build_alerting_response,
     build_cors_response,
     build_guardrails_response,
     build_limits_response,
     build_oidc_response,
+    build_updates_response,
 )
+from lai.api._runtime_config_reload import copy_section_from_fresh_settings
 from lai.api._runtime_config_sections import (
-    copy_section_from_fresh_settings,
+    enforce_guardrail_boot_lock,
     extract_nonsecret_section_payload,
     validate_candidate_settings,
     validate_log_level_name,
@@ -41,6 +44,8 @@ from lai.api.schemas.system_config import (
     UpdateGuardrailsPolicyRequest,
     UpdateLimitsConfigRequest,
     UpdateOidcConfigRequest,
+    UpdatesRuntimeConfigResponse,
+    UpdateUpdatesConfigRequest,
 )
 from lai.config.settings import load_settings
 from lai.domain.base import utc_now
@@ -57,6 +62,7 @@ __all__ = [
     "build_guardrails_response",
     "build_limits_response",
     "build_oidc_response",
+    "build_updates_response",
     "reload_config_sections",
     "update_alerting_config",
     "update_analytics_config",
@@ -64,6 +70,7 @@ __all__ = [
     "update_guardrails_config",
     "update_limits_config",
     "update_oidc_config",
+    "update_updates_config",
 ]
 
 _logger = get_component_logger("api.runtime_config")
@@ -168,6 +175,10 @@ async def update_oidc_config(
         data["oidc_admin_emails"] = list(body.oidc_admin_emails)
     if body.oidc_default_scopes is not None:
         data["oidc_default_scopes"] = list(validate_scopes_list(body.oidc_default_scopes))
+    if body.oidc_require_email_verified is not None:
+        data["oidc_require_email_verified"] = body.oidc_require_email_verified
+    if body.oidc_identity_claims is not None:
+        data["oidc_identity_claims"] = list(body.oidc_identity_claims)
     if body.oidc_leeway_seconds is not None:
         data["oidc_leeway_seconds"] = body.oidc_leeway_seconds
     services.settings = validate_candidate_settings(data)
@@ -211,10 +222,13 @@ async def update_limits_config(
         "keepalive_interval_seconds",
         "json_keepalive_threshold_seconds",
         "trust_cloudflare_headers",
+        "proxy_ip_header",
     ):
         val = getattr(body, field_name)
         if val is not None:
             data[field_name] = val
+    if body.trusted_proxy_cidrs is not None:
+        data["trusted_proxy_cidrs"] = list(body.trusted_proxy_cidrs)
     if body.log_level is not None:
         normalized_level = validate_log_level_name(body.log_level)
         data["log_level"] = normalized_level
@@ -232,12 +246,13 @@ async def update_guardrails_config(
     services: AppServices,
     body: UpdateGuardrailsPolicyRequest,
 ) -> GuardrailsPolicyConfigResponse:
-    """Validate, live-swap guardrail policy in place, and persist."""
+    """Validate, enforce boot locks, live-swap guardrail policy in place, and persist."""
     data = services.settings.model_dump()
     gr_data = dict(cast("dict[str, object]", data["guardrails"]))
     for field_name in (
         "enabled",
         "block_mode",
+        "output_mode",
         "refusal_text",
         "violation_threshold",
         "fail_open",
@@ -247,11 +262,40 @@ async def update_guardrails_config(
         if val is not None:
             gr_data[field_name] = val
     data["guardrails"] = gr_data
-    services.settings = validate_candidate_settings(data)
+    candidate = validate_candidate_settings(data)
+    boot_guardrails = services.boot_guardrails_config or services.settings.guardrails
+    enforce_guardrail_boot_lock(boot_guardrails, candidate.guardrails)
+    services.settings = candidate
     apply_live_guardrails(services)
     await _persist_section(services, "guardrails")
     _logger.info("runtime_config_updated", section="guardrails")
     return build_guardrails_response(services.settings)
+
+
+async def update_updates_config(
+    services: AppServices,
+    body: UpdateUpdatesConfigRequest,
+) -> UpdatesRuntimeConfigResponse:
+    """Validate, live-swap non-privileged self-update settings, and persist."""
+    data = services.settings.model_dump()
+    upd_data = dict(cast("dict[str, object]", data["updates"]))
+    for field_name in (
+        "enabled",
+        "health_timeout_seconds",
+        "health_poll_interval_seconds",
+        "keep_releases",
+        "auto_rollback",
+        "allow_prerelease",
+    ):
+        val = getattr(body, field_name)
+        if val is not None:
+            upd_data[field_name] = val
+    data["updates"] = upd_data
+    services.settings = validate_candidate_settings(data)
+    apply_live_updates(services)
+    await _persist_section(services, "updates")
+    _logger.info("runtime_config_updated", section="updates")
+    return build_updates_response(services.settings)
 
 
 async def reload_config_sections(
@@ -266,6 +310,9 @@ async def reload_config_sections(
         candidate = copy_section_from_fresh_settings(candidate, fresh_settings, section)
     if "limits" in ordered:
         validate_log_level_name(candidate.log_level)
+    if "guardrails" in ordered:
+        boot_guardrails = services.boot_guardrails_config or services.settings.guardrails
+        enforce_guardrail_boot_lock(boot_guardrails, candidate.guardrails)
 
     services.settings = candidate
     appliers = {
@@ -275,6 +322,7 @@ async def reload_config_sections(
         "cors": apply_live_cors,
         "limits": apply_live_limits,
         "guardrails": apply_live_guardrails,
+        "updates": apply_live_updates,
     }
     for section in ordered:
         appliers[section](services)

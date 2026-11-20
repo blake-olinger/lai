@@ -12,6 +12,7 @@ from lai.api._runtime_config import (
     build_guardrails_response,
     build_limits_response,
     build_oidc_response,
+    build_updates_response,
     reload_config_sections,
     update_alerting_config,
     update_analytics_config,
@@ -19,6 +20,7 @@ from lai.api._runtime_config import (
     update_guardrails_config,
     update_limits_config,
     update_oidc_config,
+    update_updates_config,
 )
 from lai.api.deps import AppServices, get_services, require_scope_dep
 from lai.api.schemas.system_config import (
@@ -38,6 +40,8 @@ from lai.api.schemas.system_config import (
     UpdateGuardrailsPolicyRequest,
     UpdateLimitsConfigRequest,
     UpdateOidcConfigRequest,
+    UpdatesRuntimeConfigResponse,
+    UpdateUpdatesConfigRequest,
 )
 from lai.domain.analytics import AnalyticsReport
 from lai.domain.auth import ApiScope, AuthPrincipal
@@ -213,6 +217,25 @@ async def patch_guardrails_runtime_config(
 ) -> GuardrailsPolicyConfigResponse:
     """Hot-swap guardrail enforcement policy without restarting inference subprocesses."""
     return await update_guardrails_config(services, body)
+
+
+@router.get("/config/updates", response_model=UpdatesRuntimeConfigResponse)
+async def get_updates_runtime_config(
+    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.ADMIN))],
+    services: Annotated[AppServices, Depends(get_services)],
+) -> UpdatesRuntimeConfigResponse:
+    """Return live self-update scheduling and rollback configuration."""
+    return build_updates_response(services.settings)
+
+
+@router.patch("/config/updates", response_model=UpdatesRuntimeConfigResponse)
+async def patch_updates_runtime_config(
+    body: UpdateUpdatesConfigRequest,
+    _principal: Annotated[AuthPrincipal, Depends(require_scope_dep(ApiScope.ADMIN))],
+    services: Annotated[AppServices, Depends(get_services)],
+) -> UpdatesRuntimeConfigResponse:
+    """Hot-swap non-privileged self-update scheduling and rollback toggles."""
+    return await update_updates_config(services, body)
 
 
 @router.post("/config/reload", response_model=ScopedConfigReloadResponse)

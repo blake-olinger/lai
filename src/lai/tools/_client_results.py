@@ -12,7 +12,7 @@ from lai.domain.errors import (
     PayloadTooLargeError,
     ValidationFailedError,
 )
-from lai.domain.guardrails import GuardrailVerdict
+from lai.domain.guardrails import GuardrailDirection, GuardrailVerdict
 from lai.domain.tools import (
     ApprovalStatus,
     PolicyDecision,
@@ -188,6 +188,7 @@ async def _scan_client_result_guardrails(
     try:
         decision = await guardrail_pipeline.check_prompt(
             scan_text,
+            direction=GuardrailDirection.TOOL_OUTPUT,
             request_id=get_request_id(),
             session_id=record.session_id,
             project_id=record.project_id,
@@ -197,7 +198,11 @@ async def _scan_client_result_guardrails(
             blocked_exc = GuardrailBlockedError(
                 "Client tool output blocked by safety guardrail policy.",
                 violated_policy=decision.violated_policy,
-                details={"approval_id": record.id, "provider": decision.provider},
+                details={
+                    "approval_id": record.id,
+                    "provider": decision.provider,
+                    "direction": GuardrailDirection.TOOL_OUTPUT.value,
+                },
             )
     except GuardrailBlockedError as exc:
         blocked_exc = exc

@@ -33,12 +33,25 @@ class PrimedSseStream:
     events: AsyncIterator[OrchestratorEvent]
     guardrail_blocked: bool
     guardrail_policy: str | None
+    guardrail_direction: str | None = None
+
+
+@dataclass(slots=True)
+class _PrimingOutcome:
+    """Internal result returned by _consume_priming_window."""
+
+    buffered: list[OrchestratorEvent]
+    pending_task: asyncio.Task[OrchestratorEvent] | None
+    guardrail_blocked: bool
+    guardrail_policy: str | None
+    guardrail_direction: str | None
 
 
 def build_guardrail_headers(
     *,
     guardrail_blocked: bool,
     guardrail_policy: str | None,
+    guardrail_direction: str | None = None,
 ) -> dict[str, str]:
     """Build X-LAI-Guardrail-* headers when a turn was blocked by guardrails."""
     if not guardrail_blocked:
@@ -46,6 +59,8 @@ def build_guardrail_headers(
     headers = {"X-LAI-Guardrail-Blocked": "true"}
     if guardrail_policy:
         headers["X-LAI-Guardrail-Policy"] = guardrail_policy
+    if guardrail_direction:
+        headers["X-LAI-Guardrail-Direction"] = guardrail_direction
     return headers
 
 
@@ -75,17 +90,13 @@ async def _consume_priming_window(
     guarded: AsyncIterator[OrchestratorEvent],
     *,
     budget_seconds: float,
-) -> tuple[
-    list[OrchestratorEvent],
-    asyncio.Task[OrchestratorEvent] | None,
-    bool,
-    str | None,
-]:
+) -> _PrimingOutcome:
     """Peek initial immediate events without cancelling slow producer tasks."""
     buffered: list[OrchestratorEvent] = []
     pending_task: asyncio.Task[OrchestratorEvent] | None = None
     guardrail_blocked = False
     guardrail_policy: str | None = None
+    guardrail_direction: str | None = None
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + budget_seconds
@@ -118,11 +129,18 @@ async def _consume_priming_window(
         if isinstance(event, TurnCompletedEvent):
             guardrail_blocked = event.output.guardrail_blocked
             guardrail_policy = event.output.guardrail_policy
+            guardrail_direction = event.output.guardrail_direction
             break
         if not isinstance(event, ContentDeltaEvent):
             break
 
-    return buffered, pending_task, guardrail_blocked, guardrail_policy
+    return _PrimingOutcome(
+        buffered=buffered,
+        pending_task=pending_task,
+        guardrail_blocked=guardrail_blocked,
+        guardrail_policy=guardrail_policy,
+        guardrail_direction=guardrail_direction,
+    )
 
 
 async def prime_sse_stream(
@@ -140,10 +158,9 @@ async def prime_sse_stream(
         is_disconnected=is_disconnected,
     )
     budget = min(peek_budget_seconds, keepalive_interval_seconds * 0.5)
-    buffered, pending_task, blocked, policy = await _consume_priming_window(
-        guarded,
-        budget_seconds=budget,
-    )
+    primed = await _consume_priming_window(guarded, budget_seconds=budget)
+    buffered = primed.buffered
+    pending_task = primed.pending_task
 
     async def _replay() -> AsyncIterator[OrchestratorEvent]:
         nonlocal pending_task
@@ -165,8 +182,9 @@ async def prime_sse_stream(
 
     return PrimedSseStream(
         events=_replay(),
-        guardrail_blocked=blocked,
-        guardrail_policy=policy,
+        guardrail_blocked=primed.guardrail_blocked,
+        guardrail_policy=primed.guardrail_policy,
+        guardrail_direction=primed.guardrail_direction,
     )
 
 

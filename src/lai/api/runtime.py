@@ -27,10 +27,9 @@ from lai.domain.errors import LaiError
 from lai.guardrails import (
     AllowAllGuardrailProvider,
     CompositeGuardrailPipeline,
-    OllamaShieldGemmaProvider,
     ShieldGemmaCpuProvider,
 )
-from lai.inference import LlamaCppProvider, OpenAICompatProvider
+from lai.inference import LlamaCppProvider
 from lai.ingestion import (
     FastEmbedCpuAdapter,
     LanceDbVectorStore,
@@ -105,6 +104,8 @@ async def _build_authenticator(
             allowed_domains=settings.oidc_allowed_domains,
             default_scopes=tuple(ApiScope(scope) for scope in settings.oidc_default_scopes),
             admin_emails=settings.oidc_admin_emails,
+            require_email_verified=settings.oidc_require_email_verified,
+            identity_claims=settings.oidc_identity_claims,
             leeway_seconds=settings.oidc_leeway_seconds,
         )
         providers.append(OidcJwtAuthProvider(oidc_cfg))
@@ -132,9 +133,7 @@ async def _build_authenticator(
 
 
 def _build_inference_provider(settings: LaiSettings) -> InferenceProviderPort:
-    """Construct the active inference provider from LaiSettings."""
-    if settings.inference_backend == "ollama":
-        return OpenAICompatProvider(settings.ollama_base_url, timeout_seconds=300.0)
+    """Construct the active llama.cpp inference provider from LaiSettings."""
     return LlamaCppProvider(host=settings.llama_host, port=settings.llama_port)
 
 
@@ -151,15 +150,6 @@ def _build_guardrail_providers(
             ],
             None,
         )
-    if settings.guardrails.backend == "ollama" or settings.inference_backend == "ollama":
-        ollama_cfg = settings.guardrails
-        if settings.guardrails.backend != "ollama":
-            ollama_cfg = settings.guardrails.model_copy(
-                update={"backend": "ollama", "ollama_base_url": settings.ollama_base_url}
-            )
-        ollama_guard = OllamaShieldGemmaProvider(ollama_cfg)
-        return [ollama_guard], ollama_guard.health
-
     shield_provider = ShieldGemmaCpuProvider(settings.guardrails)
     return [shield_provider], shield_provider.health
 
@@ -185,10 +175,15 @@ async def build_app_services(
     db = SqliteDatabase(settings.data_dir / "lai.db")
     await db.initialize()
 
+    boot_guardrails_config = settings.guardrails
     runtime_config_repo = SqliteRuntimeConfigRepository(db)
     persisted_overrides = await runtime_config_repo.get_all_sections()
     if persisted_overrides:
-        settings = merge_persisted_runtime_overrides(settings, persisted_overrides)
+        settings = merge_persisted_runtime_overrides(
+            settings,
+            persisted_overrides,
+            boot_guardrails_config=boot_guardrails_config,
+        )
         logging_cfg = _resolve_logging_config(settings)
         reconfigure_observability_alerting(
             alert_manager,
@@ -246,6 +241,7 @@ async def build_app_services(
         settings.guardrails,
         providers=guardrail_providers,
         audit_logger=audit_logger,
+        analytics_repo=analytics_repo,
     )
     tool_registry = build_default_tool_registry(
         file_repo,
@@ -317,6 +313,7 @@ async def build_app_services(
         analytics_repo=analytics_repo,
         runtime_config_repo=runtime_config_repo,
         config_path=config_path,
+        boot_guardrails_config=boot_guardrails_config,
         close_callbacks=close_callbacks,
     )
 

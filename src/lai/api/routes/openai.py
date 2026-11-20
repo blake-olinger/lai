@@ -154,6 +154,7 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
             **build_guardrail_headers(
                 guardrail_blocked=primed.guardrail_blocked,
                 guardrail_policy=primed.guardrail_policy,
+                guardrail_direction=primed.guardrail_direction,
             ),
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -182,6 +183,7 @@ async def create_openai_chat_completion(  # noqa: PLR0913, PLR0917
         headers = build_guardrail_headers(
             guardrail_blocked=outcome.guardrail_blocked,
             guardrail_policy=outcome.guardrail_policy,
+            guardrail_direction=outcome.guardrail_direction,
         )
         return JSONResponse(content=payload.model_dump(mode="json"), headers=headers)
     return StreamingResponse(outcome, media_type="application/json")

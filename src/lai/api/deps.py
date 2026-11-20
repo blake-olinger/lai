@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -15,11 +16,12 @@ from lai.observability.logging import get_component_logger
 from lai.security import TokenBucketRateLimiter, has_effective_scope, require_scope
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
     from pathlib import Path
 
     from lai.api._cors import DynamicCorsController
     from lai.config.settings import LaiSettings
+    from lai.domain.guardrails import GuardrailConfig
     from lai.domain.inference import BackendHealth
     from lai.ports.analytics import RuntimeConfigRepositoryPort, UsageAnalyticsPort
     from lai.ports.auth import AuthenticatorPort
@@ -83,6 +85,7 @@ class AppServices:
     runtime_config_repo: RuntimeConfigRepositoryPort | None = None
     cors_controller: DynamicCorsController | None = None
     config_path: Path | None = None
+    boot_guardrails_config: GuardrailConfig | None = None
 
     def schedule_background_task(
         self,
@@ -143,17 +146,83 @@ def extract_request_credentials(request: Request) -> RequestCredentials:
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+_IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+_IpNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
-def _resolve_client_ip(credentials: RequestCredentials, *, trust_cf_header: bool) -> str:
-    """Resolve client IP for rate limiting, trusting CF-Connecting-IP only from loopback."""
+def _get_header_ci(headers: Mapping[str, str], target_lower: str) -> str | None:
+    """Return the first non-empty stripped header matching target_lower case-insensitively."""
+    for header_name, header_value in headers.items():
+        if header_name.lower() == target_lower:
+            stripped = header_value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _parse_ip_address(raw: str) -> _IpAddress | None:
+    """Parse an IPv4 or IPv6 address, returning None when malformed."""
+    try:
+        return ipaddress.ip_address(raw.strip())
+    except ValueError:
+        return None
+
+
+def _is_trusted_ip(ip: _IpAddress, networks: tuple[_IpNetwork, ...]) -> bool:
+    """Return True if ip belongs to any configured trusted proxy CIDR network."""
+    return any(ip.version == net.version and ip in net for net in networks)
+
+
+def _extract_xff_client_ip(header_value: str, networks: tuple[_IpNetwork, ...]) -> str | None:
+    """Return the rightmost untrusted IP hop from X-Forwarded-For, or None if malformed."""
+    hops = [part.strip() for part in header_value.split(",") if part.strip()]
+    if not hops:
+        return None
+    parsed_hops: list[_IpAddress] = []
+    for hop in hops:
+        parsed = _parse_ip_address(hop)
+        if parsed is None:
+            return None
+        parsed_hops.append(parsed)
+    for hop_ip in reversed(parsed_hops):
+        if not _is_trusted_ip(hop_ip, networks):
+            return str(hop_ip)
+    return str(parsed_hops[0])
+
+
+def _resolve_client_ip(
+    credentials: RequestCredentials,
+    *,
+    trust_cf_header: bool,
+    trusted_proxy_cidrs: tuple[str, ...] = (),
+    proxy_ip_header: str = "x-forwarded-for",
+) -> str:
+    """Resolve client IP from loopback Cloudflare headers or configured trusted proxy CIDRs."""
     host = (credentials.client_host or "").strip()
     if trust_cf_header and host in _LOOPBACK_HOSTS:
-        for header_name, header_value in credentials.headers.items():
-            if header_name.lower() == "cf-connecting-ip":
-                stripped = header_value.strip()
-                if stripped:
-                    return stripped
+        cf_ip = _get_header_ci(credentials.headers, "cf-connecting-ip")
+        if cf_ip is not None:
+            return cf_ip
+
+    if trusted_proxy_cidrs and host:
+        peer_ip = _parse_ip_address(host)
+        if peer_ip is not None:
+            networks = tuple(
+                ipaddress.ip_network(cidr.strip(), strict=False) for cidr in trusted_proxy_cidrs
+            )
+            if _is_trusted_ip(peer_ip, networks):
+                header_key = proxy_ip_header.strip().lower()
+                header_val = _get_header_ci(credentials.headers, header_key)
+                if header_val is not None:
+                    if header_key == "x-forwarded-for":
+                        resolved = _extract_xff_client_ip(header_val, networks)
+                        if resolved is not None:
+                            return resolved
+                    else:
+                        parsed_single = _parse_ip_address(header_val)
+                        if parsed_single is not None:
+                            return str(parsed_single)
+
     return host or "unknown"
 
 
@@ -169,6 +238,8 @@ async def get_current_principal(
     client_ip = _resolve_client_ip(
         credentials,
         trust_cf_header=trust_cf_header,
+        trusted_proxy_cidrs=services.settings.trusted_proxy_cidrs,
+        proxy_ip_header=services.settings.proxy_ip_header,
     )
     await services.ip_rate_limiter.acquire(f"ip:{client_ip}")
     principal = await services.authenticator.authenticate(credentials)
