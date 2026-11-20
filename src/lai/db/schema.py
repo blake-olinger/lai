@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from lai.db._schema_analytics import ANALYTICS_AND_RUNTIME_STATEMENTS
+from lai.domain.errors import LaiError
 
 if TYPE_CHECKING:
     import aiosqlite
+
+CURRENT_SCHEMA_VERSION: Final[int] = 1
 
 _CLIENT_APPS_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS client_apps (
@@ -234,14 +237,8 @@ _TOOL_APPROVALS_MIGRATIONS: tuple[tuple[str, str], ...] = (
         "ALTER TABLE tool_approvals ADD COLUMN "
         "execution_target TEXT NOT NULL DEFAULT 'server_attachment';",
     ),
-    (
-        "client_app_id",
-        "ALTER TABLE tool_approvals ADD COLUMN client_app_id TEXT;",
-    ),
-    (
-        "tool_call_id",
-        "ALTER TABLE tool_approvals ADD COLUMN tool_call_id TEXT;",
-    ),
+    ("client_app_id", "ALTER TABLE tool_approvals ADD COLUMN client_app_id TEXT;"),
+    ("tool_call_id", "ALTER TABLE tool_approvals ADD COLUMN tool_call_id TEXT;"),
     (
         "allowed_file_ids_json",
         "ALTER TABLE tool_approvals ADD COLUMN allowed_file_ids_json TEXT NOT NULL DEFAULT '[]';",
@@ -250,14 +247,8 @@ _TOOL_APPROVALS_MIGRATIONS: tuple[tuple[str, str], ...] = (
         "principal_scopes_json",
         "ALTER TABLE tool_approvals ADD COLUMN principal_scopes_json TEXT NOT NULL DEFAULT '[]';",
     ),
-    (
-        "expires_at",
-        "ALTER TABLE tool_approvals ADD COLUMN expires_at TEXT;",
-    ),
-    (
-        "execution_result_json",
-        "ALTER TABLE tool_approvals ADD COLUMN execution_result_json TEXT;",
-    ),
+    ("expires_at", "ALTER TABLE tool_approvals ADD COLUMN expires_at TEXT;"),
+    ("execution_result_json", "ALTER TABLE tool_approvals ADD COLUMN execution_result_json TEXT;"),
 )
 
 
@@ -328,7 +319,26 @@ async def _migrate_existing_tables(conn: aiosqlite.Connection) -> None:
 
 
 async def apply_schema(conn: aiosqlite.Connection) -> None:
-    """Execute all idempotent DDL statements and column migrations on an open connection."""
+    """Verify PRAGMA user_version, execute idempotent DDL/migrations, and stamp version."""
+    cursor = await conn.execute("PRAGMA user_version;")
+    row = await cursor.fetchone()
+    db_version = int(row[0]) if row is not None else 0
+    if db_version > CURRENT_SCHEMA_VERSION:
+        msg = (
+            f"Database schema version {db_version} is newer than supported "
+            f"version {CURRENT_SCHEMA_VERSION}."
+        )
+        raise LaiError(
+            msg,
+            code="schema_version_unsupported",
+            status_code=500,
+            details={
+                "db_version": str(db_version),
+                "supported_version": str(CURRENT_SCHEMA_VERSION),
+            },
+        )
     for statement in SCHEMA_STATEMENTS:
         await conn.execute(statement)
     await _migrate_existing_tables(conn)
+    if db_version < CURRENT_SCHEMA_VERSION:
+        await conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION};")

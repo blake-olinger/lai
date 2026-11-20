@@ -5,11 +5,15 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from lai.db._analytics_queries import (
+    query_endpoints,
+    query_guardrails,
+    query_hourly,
+    query_principals,
+)
 from lai.domain.analytics import (
     AnalyticsReport,
-    EndpointUsageSummary,
-    HourlyUsageBucket,
-    PrincipalUsageSummary,
+    GuardrailUsageEvent,
     TokenUsageRecord,
     UsageEvent,
 )
@@ -24,7 +28,6 @@ _STATUS_3XX_MIN = 300
 _STATUS_4XX_MIN = 400
 _STATUS_5XX_MIN = 500
 _ERROR_RATE_DIGITS = 4
-_DURATION_DIGITS = 2
 
 _UPSERT_ENDPOINT_SQL = """
     INSERT INTO usage_endpoint_hourly (
@@ -64,6 +67,19 @@ _UPSERT_PRINCIPAL_TOKENS_SQL = """
         total_tokens = usage_principal_hourly.total_tokens + excluded.total_tokens;
 """
 
+_UPSERT_GUARDRAIL_SQL = """
+    INSERT INTO usage_guardrail_hourly (
+        bucket_hour, direction, policy, verdict,
+        evaluation_count, fail_closed_count, total_latency_ms, max_latency_ms
+    )
+    VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+    ON CONFLICT(bucket_hour, direction, policy, verdict) DO UPDATE SET
+        evaluation_count = usage_guardrail_hourly.evaluation_count + 1,
+        fail_closed_count = usage_guardrail_hourly.fail_closed_count + excluded.fail_closed_count,
+        total_latency_ms = usage_guardrail_hourly.total_latency_ms + excluded.total_latency_ms,
+        max_latency_ms = MAX(usage_guardrail_hourly.max_latency_ms, excluded.max_latency_ms);
+"""
+
 
 def _to_bucket_hour(ts: datetime) -> str:
     """Truncate a datetime to an ISO-8601 UTC hourly bucket string."""
@@ -72,14 +88,8 @@ def _to_bucket_hour(ts: datetime) -> str:
     return floored.isoformat()
 
 
-def _parse_bucket_hour(raw: str) -> datetime:
-    """Parse an ISO-8601 UTC hourly bucket string back into a timezone-aware datetime."""
-    parsed = datetime.fromisoformat(raw)
-    return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-
-
 class SqliteUsageAnalyticsRepository(UsageAnalyticsPort):
-    """Privacy-preserving UTC hourly rollup store for endpoint and token usage analytics."""
+    """Privacy-preserving UTC hourly rollup store for endpoint, token, and guardrail analytics."""
 
     def __init__(self, db: SqliteDatabase, *, retention_days: int = 90) -> None:
         self._db = db
@@ -89,6 +99,12 @@ class SqliteUsageAnalyticsRepository(UsageAnalyticsPort):
     def set_retention_days(self, retention_days: int) -> None:
         """Update the retention window used for automatic hourly bucket pruning."""
         self._retention_days = max(1, retention_days)
+
+    async def _maybe_prune(self, bucket_hour: str, timestamp: datetime) -> None:
+        if bucket_hour != self._last_prune_bucket:
+            self._last_prune_bucket = bucket_hour
+            cutoff = timestamp - timedelta(days=self._retention_days)
+            await self.prune_before(cutoff)
 
     async def record_request(self, event: UsageEvent) -> None:
         """Upsert one completed HTTP request into endpoint and optional principal rollups."""
@@ -124,10 +140,7 @@ class SqliteUsageAnalyticsRepository(UsageAnalyticsPort):
                     ),
                 )
 
-        if bucket_hour != self._last_prune_bucket:
-            self._last_prune_bucket = bucket_hour
-            cutoff = event.timestamp - timedelta(days=self._retention_days)
-            await self.prune_before(cutoff)
+        await self._maybe_prune(bucket_hour, event.timestamp)
 
     async def record_tokens(self, record: TokenUsageRecord) -> None:
         """Upsert inference token counts into the UTC hourly principal rollup table."""
@@ -147,6 +160,24 @@ class SqliteUsageAnalyticsRepository(UsageAnalyticsPort):
             ),
         )
 
+    async def record_guardrail(self, event: GuardrailUsageEvent) -> None:
+        """Upsert one guardrail evaluation into the UTC hourly guardrail efficacy rollup."""
+        bucket_hour = _to_bucket_hour(event.timestamp)
+        latency = max(0.0, float(event.latency_ms))
+        await self._db.execute_write(
+            _UPSERT_GUARDRAIL_SQL,
+            (
+                bucket_hour,
+                event.direction.value,
+                event.policy or "",
+                event.verdict.value,
+                1 if event.fail_closed else 0,
+                latency,
+                latency,
+            ),
+        )
+        await self._maybe_prune(bucket_hour, event.timestamp)
+
     async def prune_before(self, cutoff: datetime) -> int:
         """Delete hourly rollup rows older than cutoff and return total rows removed."""
         cutoff_bucket = _to_bucket_hour(cutoff)
@@ -159,7 +190,11 @@ class SqliteUsageAnalyticsRepository(UsageAnalyticsPort):
                 "DELETE FROM usage_principal_hourly WHERE bucket_hour < ?;",
                 (cutoff_bucket,),
             )
-            return max(0, c1.rowcount) + max(0, c2.rowcount)
+            c3 = await conn.execute(
+                "DELETE FROM usage_guardrail_hourly WHERE bucket_hour < ?;",
+                (cutoff_bucket,),
+            )
+            return max(0, c1.rowcount) + max(0, c2.rowcount) + max(0, c3.rowcount)
 
     async def get_report(
         self,
@@ -167,14 +202,15 @@ class SqliteUsageAnalyticsRepository(UsageAnalyticsPort):
         *,
         now: datetime | None = None,
     ) -> AnalyticsReport:
-        """Aggregate endpoints, principals/client apps, and hourly trends across window_hours."""
+        """Aggregate endpoints, principals/client apps, hourly trends, and guardrails."""
         resolved_window = max(1, window_hours)
         resolved_now = now or utc_now()
         start_bucket = _to_bucket_hour(resolved_now - timedelta(hours=resolved_window - 1))
 
-        endpoints = await self._query_endpoints(start_bucket)
-        principals = await self._query_principals(start_bucket)
-        hourly = await self._query_hourly(start_bucket)
+        endpoints = await query_endpoints(self._db, start_bucket)
+        principals = await query_principals(self._db, start_bucket)
+        hourly = await query_hourly(self._db, start_bucket)
+        guardrails = await query_guardrails(self._db, start_bucket)
 
         total_requests = sum(item.request_count for item in endpoints)
         error_count = sum(item.status_4xx + item.status_5xx for item in endpoints)
@@ -200,121 +236,5 @@ class SqliteUsageAnalyticsRepository(UsageAnalyticsPort):
             endpoints=endpoints,
             principals=principals,
             hourly=hourly,
+            guardrails=guardrails,
         )
-
-    async def _query_endpoints(self, start_bucket: str) -> list[EndpointUsageSummary]:
-        rows = await self._db.fetch_all(
-            """
-            SELECT
-                method,
-                route,
-                SUM(request_count) AS request_count,
-                SUM(status_2xx) AS status_2xx,
-                SUM(status_4xx) AS status_4xx,
-                SUM(status_5xx) AS status_5xx,
-                SUM(total_duration_ms) AS total_duration_ms,
-                MAX(max_duration_ms) AS max_duration_ms
-            FROM usage_endpoint_hourly
-            WHERE bucket_hour >= ?
-            GROUP BY method, route
-            ORDER BY request_count DESC, method ASC, route ASC;
-            """,
-            (start_bucket,),
-        )
-        results: list[EndpointUsageSummary] = []
-        for row in rows:
-            req_count = int(row["request_count"])
-            avg_ms = (
-                round(float(row["total_duration_ms"]) / req_count, _DURATION_DIGITS)
-                if req_count > 0
-                else 0.0
-            )
-            results.append(
-                EndpointUsageSummary(
-                    method=str(row["method"]),
-                    route=str(row["route"]),
-                    request_count=req_count,
-                    status_2xx=int(row["status_2xx"]),
-                    status_4xx=int(row["status_4xx"]),
-                    status_5xx=int(row["status_5xx"]),
-                    avg_duration_ms=avg_ms,
-                    max_duration_ms=round(float(row["max_duration_ms"]), _DURATION_DIGITS),
-                )
-            )
-        return results
-
-    async def _query_principals(self, start_bucket: str) -> list[PrincipalUsageSummary]:
-        rows = await self._db.fetch_all(
-            """
-            SELECT
-                principal_id,
-                oauth_client_id,
-                SUM(request_count) AS request_count,
-                SUM(error_count) AS error_count,
-                SUM(prompt_tokens) AS prompt_tokens,
-                SUM(completion_tokens) AS completion_tokens,
-                SUM(total_tokens) AS total_tokens
-            FROM usage_principal_hourly
-            WHERE bucket_hour >= ?
-            GROUP BY principal_id, oauth_client_id
-            ORDER BY request_count DESC, total_tokens DESC, principal_id ASC;
-            """,
-            (start_bucket,),
-        )
-        return [
-            PrincipalUsageSummary(
-                principal_id=str(row["principal_id"]),
-                oauth_client_id=str(row["oauth_client_id"]) or None,
-                request_count=int(row["request_count"]),
-                error_count=int(row["error_count"]),
-                prompt_tokens=int(row["prompt_tokens"]),
-                completion_tokens=int(row["completion_tokens"]),
-                total_tokens=int(row["total_tokens"]),
-            )
-            for row in rows
-        ]
-
-    async def _query_hourly(self, start_bucket: str) -> list[HourlyUsageBucket]:
-        ep_rows = await self._db.fetch_all(
-            """
-            SELECT
-                bucket_hour,
-                SUM(request_count) AS request_count,
-                SUM(status_4xx + status_5xx) AS error_count
-            FROM usage_endpoint_hourly
-            WHERE bucket_hour >= ?
-            GROUP BY bucket_hour
-            ORDER BY bucket_hour ASC;
-            """,
-            (start_bucket,),
-        )
-        tok_rows = await self._db.fetch_all(
-            """
-            SELECT
-                bucket_hour,
-                SUM(total_tokens) AS total_tokens
-            FROM usage_principal_hourly
-            WHERE bucket_hour >= ?
-            GROUP BY bucket_hour
-            ORDER BY bucket_hour ASC;
-            """,
-            (start_bucket,),
-        )
-        merged: dict[str, tuple[int, int, int]] = {}
-        for row in ep_rows:
-            bucket = str(row["bucket_hour"])
-            merged[bucket] = (int(row["request_count"]), int(row["error_count"]), 0)
-        for row in tok_rows:
-            bucket = str(row["bucket_hour"])
-            req_count, err_count, _ = merged.get(bucket, (0, 0, 0))
-            merged[bucket] = (req_count, err_count, int(row["total_tokens"]))
-
-        return [
-            HourlyUsageBucket(
-                bucket_hour=_parse_bucket_hour(bucket),
-                request_count=counts[0],
-                error_count=counts[1],
-                total_tokens=counts[2],
-            )
-            for bucket, counts in sorted(merged.items())
-        ]

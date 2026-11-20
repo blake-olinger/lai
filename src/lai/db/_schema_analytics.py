@@ -45,4 +45,21 @@ ANALYTICS_AND_RUNTIME_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_usage_principal_bucket
         ON usage_principal_hourly(bucket_hour DESC);
     """,
+    """
+    CREATE TABLE IF NOT EXISTS usage_guardrail_hourly (
+        bucket_hour TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        policy TEXT NOT NULL DEFAULT '',
+        verdict TEXT NOT NULL,
+        evaluation_count INTEGER NOT NULL DEFAULT 0,
+        fail_closed_count INTEGER NOT NULL DEFAULT 0,
+        total_latency_ms REAL NOT NULL DEFAULT 0.0,
+        max_latency_ms REAL NOT NULL DEFAULT 0.0,
+        PRIMARY KEY (bucket_hour, direction, policy, verdict)
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_usage_guardrail_bucket
+        ON usage_guardrail_hourly(bucket_hour DESC);
+    """,
 )
