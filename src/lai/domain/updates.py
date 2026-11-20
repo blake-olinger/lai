@@ -32,7 +32,7 @@ class UpdateConfig(StrictModel):
     backups_dir: Path = Path("/var/lib/lai/backups")
     service_name: str = Field(default="lai.service", min_length=1)
     health_url: str = Field(default="http://127.0.0.1:8400/v1/health", min_length=1)
-    health_timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
+    health_timeout_seconds: float = Field(default=300.0, gt=0.0, le=900.0)
     health_poll_interval_seconds: float = Field(default=1.0, gt=0.0, le=30.0)
     keep_releases: int = Field(default=3, ge=1, le=20)
     auto_rollback: bool = True
@@ -58,6 +58,10 @@ class ReleaseArtifact(StrictModel):
     sha256: str
     download_url: str | None = None
     local_path: Path | None = None
+    requirements_filename: str | None = None
+    requirements_sha256: str | None = None
+    requirements_download_url: str | None = None
+    requirements_local_path: Path | None = None
 
     @field_validator("sha256")
     @classmethod
@@ -66,6 +70,18 @@ class ReleaseArtifact(StrictModel):
         normalized = value.strip().lower()
         if not _SHA256_HEX_RE.fullmatch(normalized):
             msg = f"Invalid SHA-256 digest {value!r}; expected 64 hexadecimal characters."
+            raise ValueError(msg)
+        return normalized
+
+    @field_validator("requirements_sha256")
+    @classmethod
+    def _validate_requirements_sha256(cls, value: str | None) -> str | None:
+        """Normalize and enforce a 64-char hex SHA-256 digest when requirements_sha256 is set."""
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not _SHA256_HEX_RE.fullmatch(normalized):
+            msg = f"Invalid requirements SHA-256 digest {value!r}; expected 64 hex characters."
             raise ValueError(msg)
         return normalized
 

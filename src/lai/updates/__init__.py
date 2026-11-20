@@ -15,6 +15,7 @@ from lai.updates.sources import (
     compute_sha256,
     parse_semver_tuple,
     parse_sha256sums,
+    verify_file_sha256,
     verify_wheel_sha256,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "compute_sha256",
     "parse_semver_tuple",
     "parse_sha256sums",
+    "verify_file_sha256",
     "verify_wheel_sha256",
 ]

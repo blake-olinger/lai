@@ -79,6 +79,16 @@
         "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\n(?:ARG\\s+)?MISE_VERSION=\"?(?<currentValue>[^\"\\s]+)\"?"
       ],
       "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Track pinned uv binary version in deploy/systemd/install-ubuntu.sh",
+      "managerFilePatterns": [
+        "/^deploy/systemd/install-ubuntu\\.sh$/"
+      ],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\nUV_VERSION=\"?(?<currentValue>[^\"\\s]+)\"?"
+      ]
     }
   ],
   "packageRules": [
@@ -152,11 +162,12 @@
       "platformAutomerge": true
     },
     {
-      "description": "Require manual review for checksum-coupled custom pins (Scalar SRI, llama.cpp manifest SHA-256, mise SHA-256)",
+      "description": "Require manual review for checksum-coupled custom pins (Scalar SRI, llama.cpp manifest SHA-256, mise SHA-256, uv SHA-256)",
       "matchPackageNames": [
         "@scalar/api-reference",
         "ggml-org/llama.cpp",
-        "jdx/mise"
+        "jdx/mise",
+        "astral-sh/uv"
       ],
       "automerge": false
     }

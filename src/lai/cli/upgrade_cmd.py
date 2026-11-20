@@ -11,11 +11,11 @@ import typer
 
 from lai.api._runtime_config_sections import merge_persisted_runtime_overrides
 from lai.cli._common import resolve_db_path, resolve_log_dir, resolve_settings
+from lai.cli._upgrade_helpers import refresh_slot_binaries
 from lai.db import SqliteDatabase, SqliteDatabaseBackupAdapter, SqliteRuntimeConfigRepository
 from lai.domain.errors import LaiError
 from lai.domain.updates import UpgradeCheckResult, UpgradeResult, UpgradeStatus
 from lai.domain.version import PACKAGE_VERSION
-from lai.inference import ModelDownloader
 from lai.observability import AlertManager, configure_observability
 from lai.updates import (
     GitHubReleaseSource,
@@ -57,15 +57,16 @@ async def load_effective_upgrade_settings(settings: LaiSettings) -> LaiSettings:
         settings,
         persisted,
         boot_guardrails_config=settings.guardrails,
+        boot_smtp_host=settings.logging.alert_smtp.host,
+        boot_smtp_port=settings.logging.alert_smtp.port,
     )
 
 
 def _init_upgrade_observability(settings: LaiSettings) -> AlertManager:
-    """Initialize logging and AlertManager so upgrade failures alert configured sinks."""
-    log_cfg = settings.logging
-    resolved_log_dir = resolve_log_dir(settings)
-    if log_cfg.log_dir != resolved_log_dir:
-        log_cfg = log_cfg.model_copy(update={"log_dir": resolved_log_dir})
+    """Initialize journal/console logging and AlertManager without opening root-owned log files."""
+    log_cfg = settings.logging.model_copy(
+        update={"log_dir": resolve_log_dir(settings), "enable_file_logs": False}
+    )
     return configure_observability(log_cfg, fallback_admin_emails=settings.oidc_admin_emails)
 
 
@@ -80,16 +81,23 @@ async def _shutdown_upgrade_observability(alert_manager: AlertManager) -> None:
     root.handlers.clear()
 
 
-def build_upgrade_coordinator(
+def build_upgrade_coordinator(  # noqa: PLR0913
     settings: LaiSettings,
     *,
     wheel: Path | None = None,
     sha256: str | None = None,
+    requirements: Path | None = None,
+    requirements_sha256: str | None = None,
     github_token: str | None = None,
 ) -> UpgradeCoordinator:
     """Construct UpgradeCoordinator wired to GitHub/local wheel source, slots, systemd, and DB."""
     source: ReleaseSourcePort = (
-        LocalWheelSource(wheel, expected_sha256=sha256)
+        LocalWheelSource(
+            wheel,
+            expected_sha256=sha256,
+            requirements_path=requirements,
+            requirements_sha256=requirements_sha256,
+        )
         if wheel is not None
         else GitHubReleaseSource(settings.updates.github_repo, token=github_token)
     )
@@ -105,11 +113,6 @@ def build_upgrade_coordinator(
         health_probe=HttpHealthProbe(),
         backup=SqliteDatabaseBackupAdapter(),
     )
-
-
-def build_binary_downloader(settings: LaiSettings) -> ModelDownloader:
-    """Construct ModelDownloader for optional --with-binaries llama.cpp refreshes."""
-    return ModelDownloader(bin_dir=settings.bin_dir, models_dir=settings.models_dir)
 
 
 async def _run_check_async(
@@ -129,9 +132,12 @@ async def _run_check_async(
 async def _run_apply_async(  # noqa: PLR0913
     base_settings: LaiSettings,
     *,
+    config_path: Path | None,
     version: str | None,
     wheel: Path | None,
     sha256: str | None,
+    requirements: Path | None,
+    requirements_sha256: str | None,
     with_binaries: bool,
     if_enabled: bool,
     dry_run: bool,
@@ -144,21 +150,27 @@ async def _run_apply_async(  # noqa: PLR0913
     try:
         if if_enabled and not settings.updates.enabled:
             return (
-                UpgradeResult(
-                    status=UpgradeStatus.SKIPPED_DISABLED,
-                    from_version=PACKAGE_VERSION,
-                ),
+                UpgradeResult(status=UpgradeStatus.SKIPPED_DISABLED, from_version=PACKAGE_VERSION),
                 None,
             )
-        if with_binaries and not dry_run:
-            downloader = build_binary_downloader(settings)
-            binary_path = await downloader.download_llama_binaries()
         coordinator = build_upgrade_coordinator(
             settings,
             wheel=wheel,
             sha256=sha256,
+            requirements=requirements,
+            requirements_sha256=requirements_sha256,
             github_token=github_token,
         )
+
+        async def _refresh_hook(slot_path: Path) -> Path | None:
+            nonlocal binary_path
+            binary_path = await refresh_slot_binaries(
+                slot_path,
+                config_path=config_path,
+                bin_dir=settings.bin_dir,
+            )
+            return binary_path
+
         db_path = resolve_db_path(settings)
         result = await coordinator.apply(
             PACKAGE_VERSION,
@@ -167,6 +179,7 @@ async def _run_apply_async(  # noqa: PLR0913
             db_path=db_path if db_path.is_file() else None,
             respect_enabled=if_enabled,
             force=force,
+            pre_activate_hook=_refresh_hook if (with_binaries and not dry_run) else None,
         )
         return result, binary_path
     finally:
@@ -233,6 +246,20 @@ def apply_upgrade(  # noqa: PLR0913, PLR0917
         str | None,
         typer.Option("--sha256", help="Expected 64-hex SHA-256 digest when using --wheel."),
     ] = None,
+    requirements: Annotated[
+        Path | None,
+        typer.Option(
+            "--requirements",
+            help="Path to hashed requirements-lock.txt when using --wheel.",
+        ),
+    ] = None,
+    requirements_sha256: Annotated[
+        str | None,
+        typer.Option(
+            "--requirements-sha256",
+            help="Expected 64-hex SHA-256 digest for --requirements.",
+        ),
+    ] = None,
     with_binaries: Annotated[
         bool,
         typer.Option("--with-binaries", help="Also refresh pinned Linux llama.cpp CUDA binaries."),
@@ -255,17 +282,25 @@ def apply_upgrade(  # noqa: PLR0913, PLR0917
     ] = None,
 ) -> None:
     """Download, SHA-256 verify, back up SQLite, activate slot, and verify health."""
-    if sha256 is not None and wheel is None:
-        typer.echo("--sha256 is only supported together with --wheel.", err=True)
+    if wheel is None and (
+        sha256 is not None or requirements is not None or requirements_sha256 is not None
+    ):
+        typer.echo(
+            "--sha256, --requirements, and --requirements-sha256 require --wheel.",
+            err=True,
+        )
         raise typer.Exit(code=2)
     settings = resolve_settings(config)
     try:
         result, binary_path = asyncio.run(
             _run_apply_async(
                 settings,
+                config_path=config,
                 version=version,
                 wheel=wheel,
                 sha256=sha256,
+                requirements=requirements,
+                requirements_sha256=requirements_sha256,
                 with_binaries=with_binaries,
                 if_enabled=if_enabled,
                 dry_run=dry_run,

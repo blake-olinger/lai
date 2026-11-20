@@ -10,13 +10,19 @@ Type=oneshot
 # atomically flip /opt/lai/current, and restart lai.service on verified upgrades.
 # Safe no-op unless `updates.enabled: true` is configured in /etc/lai/config.yaml.
 WorkingDirectory=/var/lib/lai
+Environment=PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=UV_CACHE_DIR=/opt/lai/uv-cache
+Environment=UV_PYTHON_INSTALL_DIR=/opt/lai/python
+Environment=UV_LINK_MODE=copy
 EnvironmentFile=-/etc/lai/lai.env
 ExecStart=/opt/lai/current/.venv/bin/lai upgrade apply --config /etc/lai/config.yaml --if-enabled
-TimeoutStartSec=600s
+TimeoutStartSec=900s
 
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/lai /var/lib/lai /var/log/lai
+# Intentionally excludes /var/log/lai so root-run upgrades cannot create root-owned
+# JSONL log files that would break unprivileged lai.service log rotation.
+ReadWritePaths=/opt/lai /var/lib/lai
 PrivateTmp=yes
 # Use 0022 so release slots under /opt/lai/releases/v<ver>/.venv are readable/executable
 # by the unprivileged `lai` user; DB backups live under 0700 /var/lib/lai/backups (0600 files).

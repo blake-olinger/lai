@@ -18,9 +18,35 @@ from lai.inference import LlamaCppSupervisor
 
 if TYPE_CHECKING:
     from lai.config.settings import LaiSettings
+    from lai.domain.guardrails import GuardrailConfig
+    from lai.domain.inference import ModelProfile
     from lai.ports.inference import InferenceSupervisorPort
 
 __all__ = ["build_supervisors", "create_app", "serve_async", "serve_command"]
+
+
+async def _start_supervisors(
+    llama_supervisor: InferenceSupervisorPort,
+    guardrail_supervisor: ShieldGemmaSupervisor | None,
+    profile: ModelProfile,
+    guardrail_config: GuardrailConfig,
+) -> None:
+    """Start primary GPU and CPU ShieldGemma supervisors concurrently, cancelling on failure."""
+    if guardrail_supervisor is None:
+        await llama_supervisor.ensure_running(profile)
+        return
+    tasks: tuple[asyncio.Task[object], asyncio.Task[object]] = (
+        asyncio.create_task(llama_supervisor.ensure_running(profile)),
+        asyncio.create_task(guardrail_supervisor.ensure_running(guardrail_config)),
+    )
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 def build_supervisors(
@@ -70,9 +96,12 @@ async def serve_async(
                 settings.default_model_profile,
                 settings.custom_profiles,
             )
-            await llama_supervisor.ensure_running(profile)
-            if guardrail_supervisor is not None:
-                await guardrail_supervisor.ensure_running(settings.guardrails)
+            await _start_supervisors(
+                llama_supervisor,
+                guardrail_supervisor,
+                profile,
+                settings.guardrails,
+            )
 
         app = create_app(settings, config_path=config_path)
         uv_config = uvicorn.Config(

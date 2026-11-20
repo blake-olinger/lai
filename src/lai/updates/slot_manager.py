@@ -1,4 +1,4 @@
-"""Release slot provisioning, atomic symlink switching, systemd control, and health probing."""
+"""Release slot provisioning, atomic symlink switching, and old-slot pruning."""
 
 from __future__ import annotations
 
@@ -6,20 +6,22 @@ import asyncio
 import os
 import re
 import shutil
-import time
 import uuid
-from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
-
-import httpx
+from typing import TYPE_CHECKING
 
 from lai.domain.errors import LaiError
-from lai.ports.updates import HealthProbePort, ServiceControllerPort, SlotInstallerPort
+from lai.ports.updates import SlotInstallerPort
+from lai.updates._service_control import (
+    CommandRunner,
+    HttpHealthProbe,
+    SystemdServiceController,
+    default_command_runner,
+)
 from lai.updates.sources import parse_semver_tuple
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+    from collections.abc import Sequence
 
 __all__ = [
     "CommandRunner",
@@ -29,36 +31,23 @@ __all__ = [
 ]
 
 _SAFE_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
-_HTTP_OK = 200
-
-
-class CommandRunner(Protocol):
-    """Async subprocess execution protocol returning (returncode, stdout, stderr)."""
-
-    async def __call__(self, args: Sequence[str]) -> tuple[int, str, str]:
-        """Run args without a shell and return (returncode, stdout, stderr)."""
-        ...
-
-
-async def _default_command_runner(args: Sequence[str]) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout_bytes, stderr_bytes = await proc.communicate()
-    returncode = proc.returncode if proc.returncode is not None else 1
-    return (
-        returncode,
-        stdout_bytes.decode("utf-8", errors="replace").strip(),
-        stderr_bytes.decode("utf-8", errors="replace").strip(),
-    )
 
 
 def _venv_python_path(venv_dir: Path) -> Path:
     if os.name == "nt":  # pragma: no cover - POSIX hosts use bin/python
         return venv_dir / "Scripts" / "python.exe"
     return venv_dir / "bin" / "python"
+
+
+def _resolve_uv_executable(configured: str) -> str:
+    if configured != "uv":
+        return configured
+    if shutil.which("uv") is not None:
+        return "uv"
+    posix_uv = Path("/usr/local/bin/uv")
+    if os.name == "posix" and posix_uv.is_file():  # pragma: no cover - Linux systemd PATH fallback
+        return str(posix_uv)
+    return configured
 
 
 def _replace_symlink(staging: Path, target: Path) -> None:
@@ -83,18 +72,22 @@ def _slot_sort_key(slot: Path) -> tuple[int, tuple[int, int, int], str]:
 class ReleaseSlotManager(SlotInstallerPort):
     """Manage versioned release slots, uv virtualenvs, atomic symlinks, and pruning."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         releases_dir: Path,
         current_symlink: Path,
         *,
         uv_executable: str = "uv",
+        python_version: str = "3.13",
+        require_hashes: bool = True,
         command_runner: CommandRunner | None = None,
     ) -> None:
         self._releases_dir = releases_dir
         self._current_symlink = current_symlink
         self._uv_executable = uv_executable
-        self._runner: CommandRunner = command_runner or _default_command_runner
+        self._python_version = python_version
+        self._require_hashes = require_hashes
+        self._runner: CommandRunner = command_runner or default_command_runner
         self._previous_slot: Path | None = None
         self._previous_marker = releases_dir / ".previous"
 
@@ -168,21 +161,51 @@ class ReleaseSlotManager(SlotInstallerPort):
             msg = f"Slot {step} failed for {slot_path.name}: {detail}"
             raise LaiError(msg, code="upgrade_slot_install_failed", status_code=500)
 
-    async def install_slot(self, version: str, wheel_path: Path) -> Path:
-        """Create releases_dir/v<version>/.venv and install wheel_path into it via uv."""
+    def _validate_requirements_path(self, requirements_path: Path | None) -> None:
+        if self._require_hashes and requirements_path is None:
+            msg = "Locked requirements-lock.txt is required when require_hashes=True."
+            raise LaiError(msg, code="upgrade_requirements_missing", status_code=400)
+        if requirements_path is not None and not requirements_path.is_file():
+            msg = f"Requirements lockfile does not exist: {requirements_path}"
+            raise LaiError(msg, code="upgrade_requirements_missing", status_code=404)
+
+    async def install_slot(
+        self,
+        version: str,
+        wheel_path: Path,
+        *,
+        requirements_path: Path | None = None,
+    ) -> Path:
+        """Create releases_dir/v<version>/.venv and install hashed deps + wheel via uv."""
+        self._validate_requirements_path(requirements_path)
         slot_path = await asyncio.to_thread(self._prepare_slot_dir, version, wheel_path)
+        uv = _resolve_uv_executable(self._uv_executable)
         venv_dir = slot_path / ".venv"
         venv_python = _venv_python_path(venv_dir)
         await self._run_checked(
-            [self._uv_executable, "venv", str(venv_dir)],
+            [uv, "venv", "--python", self._python_version, str(venv_dir)],
             step="uv venv",
             slot_path=slot_path,
         )
-        await self._run_checked(
-            [self._uv_executable, "pip", "install", "--python", str(venv_python), str(wheel_path)],
-            step="uv pip install",
-            slot_path=slot_path,
-        )
+        if requirements_path is not None:
+            dep_cmd = [uv, "pip", "install", "--python", str(venv_python)]
+            if self._require_hashes:
+                dep_cmd.append("--require-hashes")
+            dep_cmd.extend(["-r", str(requirements_path)])
+            await self._run_checked(
+                dep_cmd, step="uv pip install requirements", slot_path=slot_path
+            )
+            await self._run_checked(
+                [uv, "pip", "install", "--python", str(venv_python), "--no-deps", str(wheel_path)],
+                step="uv pip install wheel",
+                slot_path=slot_path,
+            )
+        else:
+            await self._run_checked(
+                [uv, "pip", "install", "--python", str(venv_python), str(wheel_path)],
+                step="uv pip install",
+                slot_path=slot_path,
+            )
         return slot_path
 
     def activate_slot(self, slot_path: Path) -> Path | None:
@@ -228,101 +251,3 @@ class ReleaseSlotManager(SlotInstallerPort):
                 shutil.rmtree(slot)
                 removed.append(slot)
         return removed
-
-
-class SystemdServiceController(ServiceControllerPort):
-    """ServiceControllerPort executing `systemctl restart <service_name>`."""
-
-    def __init__(
-        self,
-        *,
-        systemctl_executable: str = "systemctl",
-        command_runner: CommandRunner | None = None,
-    ) -> None:
-        self._systemctl = systemctl_executable
-        self._runner: CommandRunner = command_runner or _default_command_runner
-
-    async def restart(self, service_name: str) -> None:
-        """Restart service_name via systemctl, raising LaiError on failure."""
-        cleaned = service_name.strip()
-        if not cleaned:
-            msg = "Service name must not be empty."
-            raise LaiError(msg, code="upgrade_service_restart_failed", status_code=400)
-        try:
-            returncode, stdout, stderr = await self._runner([self._systemctl, "restart", cleaned])
-        except OSError as exc:
-            msg = f"Failed to execute systemctl restart {cleaned}: {exc}"
-            raise LaiError(msg, code="upgrade_service_restart_failed", status_code=500) from exc
-        if returncode != 0:
-            detail = stderr or stdout or f"exit code {returncode}"
-            msg = f"systemctl restart {cleaned} failed: {detail}"
-            raise LaiError(msg, code="upgrade_service_restart_failed", status_code=500)
-
-
-class HttpHealthProbe(HealthProbePort):
-    """HealthProbePort polling an HTTP JSON health endpoint until healthy or timed out."""
-
-    def __init__(
-        self,
-        *,
-        http_client: httpx.AsyncClient | None = None,
-        request_timeout_seconds: float = 5.0,
-        clock: Callable[[], float] = time.monotonic,
-        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    ) -> None:
-        self._http_client = http_client
-        self._request_timeout_seconds = request_timeout_seconds
-        self._clock = clock
-        self._sleeper = sleeper
-
-    @asynccontextmanager
-    async def _client_ctx(self) -> AsyncGenerator[httpx.AsyncClient]:
-        if self._http_client is not None:
-            yield self._http_client
-            return
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(self._request_timeout_seconds)
-        ) as client:
-            yield client
-
-    async def _probe_once(
-        self,
-        client: httpx.AsyncClient,
-        url: str,
-        expected_version: str | None,
-    ) -> bool:
-        try:
-            response = await client.get(url)
-        except (httpx.HTTPError, OSError):
-            return False
-        if response.status_code != _HTTP_OK:
-            return False
-        try:
-            payload: object = response.json()
-        except ValueError:
-            return False
-        if not isinstance(payload, dict):
-            return False
-        data = cast("dict[str, object]", payload)
-        if data.get("status") != "ok":
-            return False
-        return expected_version is None or data.get("version") == expected_version
-
-    async def wait_healthy(
-        self,
-        url: str,
-        *,
-        expected_version: str | None,
-        timeout_seconds: float,
-        poll_interval_seconds: float,
-    ) -> bool:
-        """Poll url until status=='ok' (and version matches expected_version) or timeout elapses."""
-        deadline = self._clock() + timeout_seconds
-        async with self._client_ctx() as client:
-            while True:
-                if await self._probe_once(client, url, expected_version):
-                    return True
-                remaining = deadline - self._clock()
-                if remaining <= 0.0:
-                    return False
-                await self._sleeper(min(poll_interval_seconds, remaining))

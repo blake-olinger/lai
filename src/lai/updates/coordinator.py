@@ -15,11 +15,10 @@ from lai.domain.updates import (
     UpgradeResult,
     UpgradeStatus,
 )
-from lai.observability.logging import get_component_logger
-from lai.updates.sources import parse_semver_tuple
+from lai.updates._checksums import parse_semver_tuple, updates_logger
 
 if TYPE_CHECKING:
-    import structlog
+    from collections.abc import Awaitable, Callable
 
     from lai.ports.updates import (
         DatabaseBackupPort,
@@ -38,10 +37,6 @@ _SEC_ERR = AlertCategory.SECURITY_ALERT
 _TIMEOUT_ERR = AlertCategory.TIMEOUT
 
 
-def _logger() -> structlog.stdlib.BoundLogger:
-    return get_component_logger("updates")
-
-
 def _alert(
     event: str,
     cat: AlertCategory,
@@ -50,7 +45,7 @@ def _alert(
     version: str | None = None,
 ) -> str:
     """Emit a structured error log tagged with AlertCategory and return error."""
-    _logger().error(
+    updates_logger().error(
         event,
         error=error,
         version=version,
@@ -142,17 +137,22 @@ class UpgradeCoordinator:
         db_path: Path | None,
         backup_path: Path | None,
     ) -> tuple[bool, str | None]:
-        try:
-            self._slots.activate_slot(slot)
-        except (LaiError, OSError) as exc:
-            msg = f"Rollback symlink restore failed: {exc}"
-            return False, _alert("upgrade_rollback_activate_failed", _APP_ERR, msg, exc, ver)
         if backup_path is not None and db_path is not None and self._backup is not None:
+            try:
+                await self._service.stop(self._config.service_name)
+            except (LaiError, OSError) as exc:
+                msg = f"Rollback service stop failed; refusing live DB overwrite: {exc}"
+                return False, _alert("upgrade_rollback_stop_failed", _APP_ERR, msg, exc, ver)
             try:
                 await self._backup.restore_backup(backup_path, db_path)
             except (LaiError, OSError) as exc:
                 msg = f"Rollback DB restore failed: {exc}"
                 return False, _alert("upgrade_rollback_db_failed", _DB_ERR, msg, exc, ver)
+        try:
+            self._slots.activate_slot(slot)
+        except (LaiError, OSError) as exc:
+            msg = f"Rollback symlink restore failed: {exc}"
+            return False, _alert("upgrade_rollback_activate_failed", _APP_ERR, msg, exc, ver)
         return await self._restart_and_verify(ver)
 
     async def _prepare_slot(
@@ -161,8 +161,10 @@ class UpgradeCoordinator:
         backup_path: Path | None = None
         ver = artifact.version
         with tempfile.TemporaryDirectory(prefix="lai-upgrade-") as tmp_dir:
+            stage_dir = Path(tmp_dir)
             try:
-                wheel_path = await self._source.download_wheel(artifact, Path(tmp_dir))
+                wheel_path = await self._source.download_wheel(artifact, stage_dir)
+                req_path = await self._source.download_requirements(artifact, stage_dir)
             except (LaiError, OSError) as exc:
                 cat = (
                     _SEC_ERR
@@ -178,13 +180,12 @@ class UpgradeCoordinator:
                 except (LaiError, OSError) as exc:
                     return None, None, _alert("upgrade_backup_failed", _DB_ERR, str(exc), exc, ver)
             try:
-                slot_path = await self._slots.install_slot(ver, wheel_path)
-            except (LaiError, OSError) as exc:
-                return (
-                    None,
-                    backup_path,
-                    _alert("upgrade_install_failed", _APP_ERR, str(exc), exc, ver),
+                slot_path = await self._slots.install_slot(
+                    ver, wheel_path, requirements_path=req_path
                 )
+            except (LaiError, OSError) as exc:
+                err = _alert("upgrade_install_failed", _APP_ERR, str(exc), exc, ver)
+                return None, backup_path, err
         return slot_path, backup_path, None
 
     async def _activate_and_verify(
@@ -212,7 +213,9 @@ class UpgradeCoordinator:
         healthy, reason = await self._restart_and_verify(target_ver)
         if healthy:
             self._slots.prune_old_slots(self._config.keep_releases, active=slot_path)
-            _logger().info("upgrade_completed", from_version=current_ver, to_version=target_ver)
+            updates_logger().info(
+                "upgrade_completed", from_version=current_ver, to_version=target_ver
+            )
             return _res(
                 UpgradeStatus.UPGRADED,
                 current_ver,
@@ -253,6 +256,20 @@ class UpgradeCoordinator:
             error=f"{failure}; automatic rollback failed: {rb_err}",
         )
 
+    async def _run_pre_activate_hook(
+        self,
+        hook: Callable[[Path], Awaitable[Path | None]] | None,
+        slot_path: Path,
+        ver: str,
+    ) -> str | None:
+        if hook is None:
+            return None
+        try:
+            await hook(slot_path)
+        except (LaiError, OSError) as exc:
+            return _alert("upgrade_pre_activate_failed", _APP_ERR, str(exc), exc, ver)
+        return None
+
     async def apply(  # noqa: PLR0913
         self,
         current_version: str,
@@ -262,29 +279,39 @@ class UpgradeCoordinator:
         db_path: Path | None = None,
         respect_enabled: bool = False,
         force: bool = False,
+        pre_activate_hook: Callable[[Path], Awaitable[Path | None]] | None = None,
     ) -> UpgradeResult:
         """Execute a full verified upgrade with automatic rollback on post-activation failure."""
         if respect_enabled and not self._config.enabled:
             return _res(UpgradeStatus.SKIPPED_DISABLED, current_version)
         artifact = await self._resolve_artifact(target_version)
-        if not force and parse_semver_tuple(artifact.version) <= parse_semver_tuple(
-            current_version
-        ):
-            return _res(UpgradeStatus.UP_TO_DATE, current_version, to_ver=artifact.version)
+        ver = artifact.version
+        if not force and parse_semver_tuple(ver) <= parse_semver_tuple(current_version):
+            return _res(UpgradeStatus.UP_TO_DATE, current_version, to_ver=ver)
         if dry_run:
-            return _res(UpgradeStatus.DRY_RUN, current_version, to_ver=artifact.version)
+            return _res(UpgradeStatus.DRY_RUN, current_version, to_ver=ver)
         slot_path, backup_path, prep_err = await self._prepare_slot(artifact, db_path)
         if prep_err is not None or slot_path is None:
             return _res(
                 UpgradeStatus.FAILED,
                 current_version,
-                to_ver=artifact.version,
+                to_ver=ver,
                 backup=backup_path,
                 error=prep_err or "Upgrade preparation failed.",
             )
+        hook_err = await self._run_pre_activate_hook(pre_activate_hook, slot_path, ver)
+        if hook_err is not None:
+            return _res(
+                UpgradeStatus.FAILED,
+                current_version,
+                to_ver=ver,
+                slot=slot_path,
+                backup=backup_path,
+                error=hook_err,
+            )
         return await self._activate_and_verify(
             current_ver=current_version,
-            target_ver=artifact.version,
+            target_ver=ver,
             slot_path=slot_path,
             backup_path=backup_path,
             db_path=db_path,
@@ -300,31 +327,20 @@ class UpgradeCoordinator:
         """Manually switch back to the previous release slot and verify service health."""
         target_slot = self._slots.previous_slot()
         if target_slot is None:
-            msg = _alert(
-                "upgrade_rollback_missing",
-                _APP_ERR,
-                "No previous release slot available.",
-                version=current_version,
-            )
+            err = "No previous release slot available."
+            msg = _alert("upgrade_rollback_missing", _APP_ERR, err, version=current_version)
             return _res(UpgradeStatus.FAILED, current_version, error=msg)
         target_ver = target_slot.name.lstrip("vV") or None
         rb_ok, rb_err = await self._execute_rollback(
             slot=target_slot, ver=target_ver, db_path=db_path, backup_path=backup_path
         )
-        if rb_ok:
-            return _res(
-                UpgradeStatus.ROLLED_BACK,
-                current_version,
-                to_ver=target_ver,
-                slot=target_slot,
-                backup=backup_path,
-                rolled_back=True,
-            )
+        status = UpgradeStatus.ROLLED_BACK if rb_ok else UpgradeStatus.FAILED
         return _res(
-            UpgradeStatus.FAILED,
+            status,
             current_version,
             to_ver=target_ver,
             slot=target_slot,
             backup=backup_path,
-            error=rb_err or "Manual rollback failed.",
+            rolled_back=rb_ok,
+            error=None if rb_ok else (rb_err or "Manual rollback failed."),
         )

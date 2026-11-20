@@ -151,6 +151,40 @@ def setup_models(  # noqa: PLR0913, PLR0917
         typer.echo(f"{key}: {val}")
 
 
+@models_app.command("refresh-binaries")
+def refresh_binaries(
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", "-c", help="Optional YAML configuration path."),
+    ] = None,
+    tag: Annotated[
+        str | None,
+        typer.Option(
+            "--tag", help="Optional llama.cpp GitHub release tag (default: manifest pin)."
+        ),
+    ] = None,
+    cuda_version: Annotated[
+        str | None,
+        typer.Option("--cuda-version", help="Preferred CUDA toolkit version (e.g. 12.8 or 13.5)."),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-download binaries even if already present."),
+    ] = False,
+) -> None:
+    """Download and activate SHA-256-verified Linux llama.cpp CUDA binaries from this slot's pin."""
+    settings = resolve_settings(config)
+    downloader = build_downloader(settings)
+    try:
+        binary_path = asyncio.run(
+            downloader.download_llama_binaries(tag=tag, cuda_version=cuda_version, force=force)
+        )
+    except LaiError as exc:
+        typer.echo(f"Binary refresh failed ({exc.code}): {exc.message}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"llama_server: {binary_path}")
+
+
 @models_app.command("list")
 def list_profiles(
     config: Annotated[

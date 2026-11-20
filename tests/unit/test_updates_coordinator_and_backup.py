@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import sqlite3
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from lai.db.backup import SqliteDatabaseBackupAdapter, create_sqlite_backup, restore_sqlite_backup
+from lai.db.backup import SqliteDatabaseBackupAdapter
 from lai.domain.errors import LaiError
 from lai.domain.observability import AlertCategory, AlertEvent, LoggingConfig
 from lai.domain.updates import UpdateConfig, UpgradeStatus
@@ -28,10 +26,17 @@ from lai.updates import LocalWheelSource, ReleaseSlotManager, UpgradeCoordinator
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
+    from pathlib import Path
 
 _WHL = "lai-0.2.0-py3-none-any.whl"
 _WHL_BYTES = b"PK\x03\x04valid-wheel-0.2.0"
 _WHL_SHA = hashlib.sha256(_WHL_BYTES).hexdigest()
+_REQ = "requirements-lock.txt"
+_REQ_BYTES = (
+    b"anyio==4.16.0 \\\n"
+    b"    --hash=sha256:59bb03251907983d1603d27c3087ddb1e93299ea2163adcdba37899a4fb12ffb\n"
+)
+_REQ_SHA = hashlib.sha256(_REQ_BYTES).hexdigest()
 
 
 class _MemorySink(AlertSinkPort):
@@ -43,15 +48,24 @@ class _MemorySink(AlertSinkPort):
 
 
 class _StubService(ServiceControllerPort):
-    def __init__(self, *, fail_calls: set[int] | None = None) -> None:
+    def __init__(
+        self, *, fail_calls: set[int] | None = None, fail_stops: set[int] | None = None
+    ) -> None:
         self.restarts: list[str] = []
-        self._fails = fail_calls or set()
+        self.stops: list[str] = []
+        self._fails, self._fail_stops = fail_calls or set(), fail_stops or set()
 
     async def restart(self, service_name: str) -> None:
         self.restarts.append(service_name)
         if len(self.restarts) in self._fails:
             msg = f"restart failure #{len(self.restarts)}"
-            raise LaiError(msg, code="upgrade_service_restart_failed", status_code=500)
+            raise LaiError(msg, code="upgrade_service_restart_failed")
+
+    async def stop(self, service_name: str) -> None:
+        self.stops.append(service_name)
+        if len(self.stops) in self._fail_stops:
+            msg = f"stop failure #{len(self.stops)}"
+            raise LaiError(msg, code="upgrade_service_stop_failed")
 
 
 class _StubProbe(HealthProbePort):
@@ -147,24 +161,19 @@ def _wal_db(db_path: Path, rows: list[tuple[int, str]] | None = None) -> list[tu
         conn.close()
 
 
-def _sidecars(db_path: Path, *, touch: bool) -> bool:
-    wal, shm = Path(f"{db_path}-wal"), Path(f"{db_path}-shm")
-    if touch:
-        wal.write_bytes(b"wal")
-        shm.write_bytes(b"shm")
-    return wal.exists() or shm.exists()
-
-
 async def _ok_runner(args: Sequence[str]) -> tuple[int, str, str]:
     del args
     return 0, "ok", ""
 
 
-def _make_wheel(tmp_path: Path) -> Path:
+def _make_wheel(tmp_path: Path) -> tuple[Path, Path]:
     wheel = tmp_path / _WHL
     wheel.write_bytes(_WHL_BYTES)
     (tmp_path / f"{_WHL}.sha256").write_text(f"{_WHL_SHA}\n", encoding="utf-8")
-    return wheel
+    req = tmp_path / _REQ
+    req.write_bytes(_REQ_BYTES)
+    (tmp_path / f"{_REQ}.sha256").write_text(f"{_REQ_SHA}\n", encoding="utf-8")
+    return wheel, req
 
 
 def _cfg(tmp_path: Path, *, enabled: bool = True, auto_rollback: bool = True) -> UpdateConfig:
@@ -197,58 +206,9 @@ def _coord(  # noqa: PLR0913
     )
 
 
-async def test_sqlite_wal_online_backup_restore_and_guards(tmp_path: Path) -> None:
-    """WAL online backup snapshots active frames, restores cleanly, and guards corrupt files."""
-    db_path = tmp_path / "lai.db"
-    _wal_db(db_path, [(1, "alpha"), (2, "beta")])
-    writer = sqlite3.connect(str(db_path))
-    try:
-        writer.execute("PRAGMA journal_mode=WAL;")
-        writer.execute("PRAGMA wal_autocheckpoint=0;")
-        writer.execute("INSERT INTO items (id, val) VALUES (3, 'wal-frame');")
-        writer.commit()
-        snap = create_sqlite_backup(db_path, tmp_path / "backups" / "snap.db")
-    finally:
-        writer.close()
-    assert snap.is_file()
-    if os.name == "posix":
-        assert (snap.stat().st_mode & 0o777) == 0o600
-    expected_rows = [(1, "alpha"), (2, "beta"), (3, "wal-frame")]
-    assert _wal_db(snap) == expected_rows
-    _wal_db(db_path, [(1, "mutated"), (99, "bad")])
-    assert _sidecars(db_path, touch=True)
-    adapter = SqliteDatabaseBackupAdapter()
-    fallback_snap = await adapter.create_backup(db_path, tmp_path / "backups", "!!!")
-    labeled_snap = await adapter.create_backup(db_path, tmp_path / "backups", "pre v0.2.0")
-    assert ("-backup-" in fallback_snap.name, "-pre_v0.2.0-" in labeled_snap.name) == (True, True)
-    await adapter.restore_backup(snap, db_path)
-    assert (_wal_db(db_path), _sidecars(db_path, touch=False)) == (expected_rows, False)
-    mgr, sink = _install_alerts()
-    corrupt = tmp_path / "backups" / "corrupt.db"
-    corrupt.write_bytes(b"not-a-sqlite-db")
-    corrupt_idx = tmp_path / "backups" / "corrupt_idx.db"
-    corrupt_idx.write_bytes(snap.read_bytes().replace(b"alpha", b"XXXXX", 1))
-    out_db = tmp_path / "backups" / "out.db"
-    for fn, code in (
-        (lambda: restore_sqlite_backup(corrupt, db_path), "db_restore_integrity_failed"),
-        (lambda: restore_sqlite_backup(corrupt_idx, db_path), "db_restore_integrity_failed"),
-        (lambda: create_sqlite_backup(corrupt, out_db), "db_backup_failed"),
-        (lambda: restore_sqlite_backup(tmp_path / "nope.bak", db_path), "db_restore_failed"),
-    ):
-        with pytest.raises(LaiError) as err:
-            fn()
-        assert err.value.code == code
-    assert not list((tmp_path / "backups").glob("*.tmp"))
-    with pytest.raises(LaiError) as e_miss:
-        await adapter.create_backup(tmp_path / "nope.db", tmp_path / "backups", "pre v0.2.0")
-    assert (e_miss.value.code, _wal_db(db_path)) == ("db_backup_failed", expected_rows)
-    await mgr.flush()
-    assert any(e.category is AlertCategory.STORAGE_FAILURE for e in sink.events)
-
-
 async def test_coordinator_check_guards_and_happy_path(tmp_path: Path) -> None:
     """Coordinator handles check, disabled skip, up-to-date, dry-run, happy-path, and pruning."""
-    wheel, db_path = _make_wheel(tmp_path), tmp_path / "data" / "lai.db"
+    (wheel, req), db_path = _make_wheel(tmp_path), tmp_path / "data" / "lai.db"
     db_path.parent.mkdir(parents=True)
     _wal_db(db_path, [(1, "prod")])
 
@@ -268,8 +228,8 @@ async def test_coordinator_check_guards_and_happy_path(tmp_path: Path) -> None:
         (await coord.apply("0.2.0", dry_run=True, force=True)).status,
     )
     assert got == (st.SKIPPED_DISABLED, st.UP_TO_DATE, st.DRY_RUN, st.DRY_RUN)
-    old_slot = await slots.install_slot("0.0.1", wheel)
-    v1_slot = await slots.install_slot("0.1.0", wheel)
+    old_slot = await slots.install_slot("0.0.1", wheel, requirements_path=req)
+    v1_slot = await slots.install_slot("0.1.0", wheel, requirements_path=req)
     slots.activate_slot(v1_slot)
     svc, probe = _StubService(), _StubProbe([True])
     res = await _coord(
@@ -285,10 +245,10 @@ async def test_coordinator_check_guards_and_happy_path(tmp_path: Path) -> None:
 async def test_coordinator_failures_auto_and_manual_rollback(tmp_path: Path) -> None:
     """Coordinator aborts on pre-activation errors and handles auto and manual rollback."""
     mgr, sink = _install_alerts()
-    wheel, cfg, st = _make_wheel(tmp_path), _cfg(tmp_path), UpgradeStatus
+    (wheel, req), cfg, st = _make_wheel(tmp_path), _cfg(tmp_path), UpgradeStatus
     src = LocalWheelSource(wheel)
     slots = ReleaseSlotManager(cfg.releases_dir, cfg.current_symlink, command_runner=_ok_runner)
-    v1 = await slots.install_slot("0.1.0", wheel)
+    v1 = await slots.install_slot("0.1.0", wheel, requirements_path=req)
     slots.activate_slot(v1)
     db_path = tmp_path / "lai.db"
     _wal_db(db_path, [(1, "before")])

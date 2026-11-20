@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import yaml
 from typer.testing import CliRunner
@@ -15,10 +15,11 @@ from lai.config.settings import load_settings
 from lai.db import SqliteDatabase, SqliteRuntimeConfigRepository
 from lai.domain.errors import LaiError
 from lai.domain.updates import ReleaseArtifact, UpgradeCheckResult, UpgradeResult, UpgradeStatus
-from lai.inference import ModelDownloader
 from lai.updates import UpgradeCoordinator
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     import pytest
 
 _GOOD_SHA = "a" * 64
@@ -61,13 +62,18 @@ class _StubCoordinator:
         self.apply_calls.append({"current_version": current_version, **kwargs})
         if self._error is not None:
             raise self._error
-        return self._apply_res or UpgradeResult(
+        hook = kwargs.get("pre_activate_hook")
+        res = self._apply_res or UpgradeResult(
             status=UpgradeStatus.UPGRADED,
             from_version=current_version,
             to_version="0.2.0",
             slot_path=Path("/opt/lai/releases/v0.2.0"),
             backup_path=Path("/var/lib/lai/backups/pre-v0.2.0.db"),
         )
+        if callable(hook) and res.slot_path is not None:
+            typed_hook = cast("Callable[[Path], Awaitable[Path | None]]", hook)
+            await typed_hook(res.slot_path)
+        return res
 
     async def rollback(self, current_version: str, **kwargs: object) -> UpgradeResult:
         self.rollback_calls.append({"current_version": current_version, **kwargs})
@@ -120,24 +126,25 @@ def test_cli_upgrade_check_apply_if_enabled_sqlite_merge_and_rollback(
 
     real_coord = upgrade_cmd.build_upgrade_coordinator(load_settings(cfg_path))
     assert isinstance(real_coord, UpgradeCoordinator)
-    assert isinstance(upgrade_cmd.build_binary_downloader(load_settings(cfg_path)), ModelDownloader)
 
     stub = _StubCoordinator()
-    binary_calls: list[bool] = []
+    binary_calls: list[Path] = []
 
-    class _BinDl:
-        async def download_llama_binaries(self) -> Path:
-            binary_calls.append(True)
-            return tmp_path / "bin" / "llama" / "current" / "llama-server"
+    async def _fake_refresh_slot_binaries(
+        slot_path: Path,
+        *,
+        config_path: Path | None,
+        bin_dir: Path,
+    ) -> Path:
+        del config_path, bin_dir
+        binary_calls.append(slot_path)
+        return tmp_path / "bin" / "llama" / "current" / "llama-server"
 
     def _build_stub(*_args: object, **_kwargs: object) -> _StubCoordinator:
         return stub
 
-    def _build_bin_dl(_settings: object) -> _BinDl:
-        return _BinDl()
-
     monkeypatch.setattr(upgrade_cmd, "build_upgrade_coordinator", _build_stub)
-    monkeypatch.setattr(upgrade_cmd, "build_binary_downloader", _build_bin_dl)
+    monkeypatch.setattr(upgrade_cmd, "refresh_slot_binaries", _fake_refresh_slot_binaries)
 
     r_chk = runner.invoke(cli_app, ["upgrade", "check", "-c", str(cfg_path)])
     assert r_chk.exit_code == 0, r_chk.output
@@ -168,13 +175,17 @@ def test_cli_upgrade_check_apply_if_enabled_sqlite_merge_and_rollback(
     assert r_apply.exit_code == 0, r_apply.output
     assert "upgraded" in r_apply.output
     assert "llama_server:" in r_apply.output
-    assert binary_calls == [True]
+    assert binary_calls == [Path("/opt/lai/releases/v0.2.0")]
     assert stub.apply_calls[0]["target_version"] == "0.2.0"
 
     r_bad_opt = runner.invoke(
         cli_app, ["upgrade", "apply", "-c", str(cfg_path), "--sha256", _GOOD_SHA]
     )
     assert r_bad_opt.exit_code == 2
+    r_bad_req = runner.invoke(
+        cli_app, ["upgrade", "apply", "-c", str(cfg_path), "--requirements", str(cfg_path)]
+    )
+    assert r_bad_req.exit_code == 2
 
     backup = tmp_path / "backups" / "pre.db"
     r_rb = runner.invoke(

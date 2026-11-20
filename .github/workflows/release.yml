@@ -54,6 +54,8 @@ jobs:
               uv run python scripts/bump_version.py --check-tag "${RELEASE_TAG}"
               rm -rf dist
               mise run release-check
+              uv export --frozen --no-dev --no-emit-project --format requirements.txt -o dist/requirements-lock.txt
+              grep -q -- "--hash=sha256:" dist/requirements-lock.txt
               uv run python scripts/export_openapi.py --output dist/openapi.json --markdown-output dist/api-reference.md
               (cd dist && sha256sum * > SHA256SUMS.txt)
               chown -R "${HOST_UID}:${HOST_GID}" dist site

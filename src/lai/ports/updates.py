@@ -34,6 +34,14 @@ class ReleaseSourcePort(Protocol):
         """Download or stage the wheel into dest_dir and verify its SHA-256 digest."""
         ...
 
+    async def download_requirements(
+        self,
+        artifact: ReleaseArtifact,
+        dest_dir: Path,
+    ) -> Path | None:
+        """Download or stage verified locked requirements into dest_dir when present."""
+        ...
+
 
 @runtime_checkable
 class SlotInstallerPort(Protocol):
@@ -47,8 +55,14 @@ class SlotInstallerPort(Protocol):
         """Return the previously active release slot path eligible for rollback."""
         ...
 
-    async def install_slot(self, version: str, wheel_path: Path) -> Path:
-        """Provision an isolated release slot virtualenv from wheel_path."""
+    async def install_slot(
+        self,
+        version: str,
+        wheel_path: Path,
+        *,
+        requirements_path: Path | None = None,
+    ) -> Path:
+        """Provision an isolated release slot virtualenv from wheel_path and locked requirements."""
         ...
 
     def activate_slot(self, slot_path: Path) -> Path | None:
@@ -62,7 +76,11 @@ class SlotInstallerPort(Protocol):
 
 @runtime_checkable
 class ServiceControllerPort(Protocol):
-    """Contract for restarting the supervised LAI service."""
+    """Contract for stopping and restarting the supervised LAI service."""
+
+    async def stop(self, service_name: str) -> None:
+        """Stop the named system service, raising on non-zero exit."""
+        ...
 
     async def restart(self, service_name: str) -> None:
         """Restart the named system service, raising on non-zero exit."""

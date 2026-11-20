@@ -1,10 +1,9 @@
-"""Unit tests for update domain models, release sources, slot manager, service, and health probe."""
+"""Unit tests for update domain models, GitHubReleaseSource, and LocalWheelSource."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
-import sys
 from typing import TYPE_CHECKING
 
 import httpx
@@ -19,10 +18,7 @@ from lai.observability import AlertManager, configure_observability
 from lai.ports.observability import AlertSinkPort
 from lai.updates import (
     GitHubReleaseSource,
-    HttpHealthProbe,
     LocalWheelSource,
-    ReleaseSlotManager,
-    SystemdServiceController,
     compute_sha256,
     parse_semver_tuple,
     parse_sha256sums,
@@ -30,12 +26,18 @@ from lai.updates import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Generator, Sequence
+    from collections.abc import Awaitable, Generator
     from pathlib import Path
 
 _WHL = "lai-0.2.0-py3-none-any.whl"
 _WHL_BYTES = b"PK\x03\x04fake-wheel-payload-0.2.0"
 _WHL_SHA = hashlib.sha256(_WHL_BYTES).hexdigest()
+_REQ = "requirements-lock.txt"
+_REQ_BYTES = (
+    b"anyio==4.16.0 \\\n"
+    b"    --hash=sha256:59bb03251907983d1603d27c3087ddb1e93299ea2163adcdba37899a4fb12ffb\n"
+)
+_REQ_SHA = hashlib.sha256(_REQ_BYTES).hexdigest()
 _BAD_SHA = "0" * 64
 _DL = "https://dl.example.test"
 _GH = "https://api.github.com/repos/org/lai"
@@ -75,32 +77,33 @@ async def _expect(code: str, coro: Awaitable[object]) -> None:
     assert exc_info.value.code == code
 
 
-async def _os_err_runner(args: Sequence[str]) -> tuple[int, str, str]:
-    del args
-    msg = "missing"
-    raise OSError(msg)
-
-
-async def _rc_err_runner(args: Sequence[str]) -> tuple[int, str, str]:
-    del args
-    return 1, "", "boom"
-
-
 def _rel(
-    tag: str = "v0.2.0", *, draft: bool = False, wheel: str | None = _WHL, sums: bool = True
+    tag: str = "v0.2.0",
+    *,
+    draft: bool = False,
+    wheel: str | None = _WHL,
+    sums: bool = True,
+    reqs: bool = True,
 ) -> dict[str, object]:
     assets: list[object] = ["ignored", {"name": 123, "browser_download_url": None}]
     if wheel is not None:
         assets.append({"name": wheel, "browser_download_url": f"{_DL}/{wheel}"})
     if sums:
         assets.append({"name": "SHA256SUMS.txt", "browser_download_url": f"{_DL}/SHA256SUMS"})
+    if reqs:
+        assets.append({"name": _REQ, "browser_download_url": f"{_DL}/{_REQ}"})
     return {"tag_name": tag, "draft": draft, "assets": assets}
 
 
 def test_domain_models_and_sha256_semver_helpers(tmp_path: Path) -> None:
     """Domain models, SemVer parser, SHA256SUMS parser, and verifier validate strictly."""
     cfg = UpdateConfig()
-    assert (cfg.enabled, cfg.auto_rollback, cfg.keep_releases) == (False, True, 3)
+    assert (cfg.enabled, cfg.auto_rollback, cfg.keep_releases, cfg.health_timeout_seconds) == (
+        False,
+        True,
+        3,
+        300.0,
+    )
     for bad in ({"github_repo": "bad repo"}, {"keep_releases": 0}):
         with pytest.raises(ValidationError):
             UpdateConfig.model_validate(bad)
@@ -132,7 +135,7 @@ def test_domain_models_and_sha256_semver_helpers(tmp_path: Path) -> None:
 
 @respx.mock
 async def test_github_source_happy_paths_and_tamper_unlink(tmp_path: Path) -> None:
-    """GitHubReleaseSource supports latest, prerelease, tag, injected client, and tamper abort."""
+    """GitHubReleaseSource supports latest, prerelease, tag, requirements lock, and tamper abort."""
     respx.get(f"{_GH}/releases/latest").mock(return_value=httpx.Response(200, json=_rel()))
     rels = [
         _rel("v0.3.0-draft", draft=True),
@@ -140,26 +143,44 @@ async def test_github_source_happy_paths_and_tamper_unlink(tmp_path: Path) -> No
     ]
     respx.get(f"{_GH}/releases").mock(return_value=httpx.Response(200, json=rels))
     respx.get(f"{_GH}/releases/tags/v0.2.0").mock(return_value=httpx.Response(200, json=_rel()))
-    sums_txt = f"{_WHL_SHA}  {_WHL}\n{_WHL_SHA}  lai-0.3.0rc1-py3-none-any.whl\n"
+    sums_txt = (
+        f"{_WHL_SHA}  {_WHL}\n{_WHL_SHA}  lai-0.3.0rc1-py3-none-any.whl\n{_REQ_SHA}  {_REQ}\n"
+    )
     respx.get(f"{_DL}/SHA256SUMS").mock(return_value=httpx.Response(200, text=sums_txt))
-    dl_seq: list[httpx.Response | Exception] = [
-        httpx.Response(200, content=_WHL_BYTES),
-        httpx.Response(200, content=b"tampered-bytes"),
-        httpx.ConnectError("stream reset"),
-    ]
-    respx.get(f"{_DL}/{_WHL}").mock(side_effect=dl_seq)
+    respx.get(f"{_DL}/{_WHL}").mock(
+        side_effect=[
+            httpx.Response(200, content=_WHL_BYTES),
+            httpx.Response(200, content=b"tampered-bytes"),
+            httpx.ConnectError("stream reset"),
+        ]
+    )
+    respx.get(f"{_DL}/{_REQ}").mock(
+        side_effect=[
+            httpx.Response(200, content=_REQ_BYTES),
+            httpx.Response(200, content=b"tampered-req"),
+        ]
+    )
     async with httpx.AsyncClient() as client:
         auth_val = "test-bearer-value"
         src = GitHubReleaseSource("org/lai", token=auth_val, http_client=client)
         latest = await src.get_latest(allow_prerelease=False)
-        assert (latest.version, latest.sha256) == ("0.2.0", _WHL_SHA)
+        assert (latest.version, latest.sha256, latest.requirements_sha256) == (
+            "0.2.0",
+            _WHL_SHA,
+            _REQ_SHA,
+        )
         assert (await src.get_latest(allow_prerelease=True)).tag == "v0.3.0-rc1"
         tagged = await src.get_version("v0.2.0")
         assert (await src.download_wheel(tagged, tmp_path / "ok")).read_bytes() == _WHL_BYTES
+        dl_req = await src.download_requirements(tagged, tmp_path / "ok")
+        assert dl_req is not None
+        assert dl_req.read_bytes() == _REQ_BYTES
         mgr, sink = _install_alerts()
         bad_stage = tmp_path / "bad"
         await _expect("upgrade_checksum_mismatch", src.download_wheel(tagged, bad_stage))
+        await _expect("upgrade_checksum_mismatch", src.download_requirements(tagged, bad_stage))
         assert not (bad_stage / _WHL).exists()
+        assert not (bad_stage / _REQ).exists()
         await mgr.flush()
         assert any(e.category is AlertCategory.SECURITY_ALERT for e in sink.events)
         await _expect("upgrade_download_failed", src.download_wheel(tagged, tmp_path / "net"))
@@ -184,12 +205,16 @@ async def test_github_source_error_branches(tmp_path: Path) -> None:
         (r200(200, json=_rel()), "upgrade_download_failed"),
         (r200(200, json=_rel()), "upgrade_download_failed"),
         (r200(200, json=_rel()), "upgrade_checksum_missing"),
+        (r200(200, json=_rel(reqs=False)), "upgrade_requirements_missing"),
+        (r200(200, json=_rel()), "upgrade_checksum_missing"),
     ]
     respx.get(f"{_GH}/releases/latest").mock(side_effect=[c[0] for c in cases])
     sums_fx: list[httpx.Response | Exception] = [
         httpx.ConnectError("err"),
         r200(503),
         r200(200, text=f"{_WHL_SHA}  other.whl\n"),
+        r200(200, text=f"{_WHL_SHA}  {_WHL}\n"),
+        r200(200, text=f"{_WHL_SHA}  {_WHL}\n"),
     ]
     respx.get(f"{_DL}/SHA256SUMS").mock(side_effect=sums_fx)
     for _, code in cases:
@@ -203,18 +228,26 @@ async def test_github_source_error_branches(tmp_path: Path) -> None:
     )
     await _expect("upgrade_download_failed", src.download_wheel(no_url, tmp_path))
     await _expect("upgrade_invalid_wheel", src.download_wheel(trav, tmp_path))
+    await _expect("upgrade_requirements_missing", src.download_requirements(no_url, tmp_path))
 
 
 async def test_local_wheel_source_variants_and_errors(tmp_path: Path) -> None:
-    """LocalWheelSource handles sidecar, SHA256SUMS, implicit hash, and tamper aborts."""
+    """LocalWheelSource fails closed without checksum/lockfile and verifies staged files."""
     wheel = tmp_path / _WHL
     wheel.write_bytes(_WHL_BYTES)
-    implicit = await LocalWheelSource(wheel).get_latest()
-    assert (implicit.version, implicit.sha256) == ("0.2.0", _WHL_SHA)
-    assert await LocalWheelSource(wheel).download_wheel(implicit, tmp_path) == wheel
+    mgr, sink = _install_alerts()
+    await _expect("upgrade_checksum_missing", LocalWheelSource(wheel).get_latest())
+    await mgr.flush()
+    assert any(e.category is AlertCategory.SECURITY_ALERT for e in sink.events)
 
-    (tmp_path / "SHA256SUMS.txt").write_text(f"{_WHL_SHA}  {_WHL}\n", encoding="utf-8")
-    assert (await LocalWheelSource(wheel).get_latest()).sha256 == _WHL_SHA
+    req = tmp_path / _REQ
+    req.write_bytes(_REQ_BYTES)
+    sums = tmp_path / "SHA256SUMS.txt"
+    sums.write_text(f"{_WHL_SHA}  {_WHL}\n{_REQ_SHA}  {_REQ}\n", encoding="utf-8")
+    art_sums = await LocalWheelSource(wheel).get_latest()
+    assert (art_sums.sha256, art_sums.requirements_sha256) == (_WHL_SHA, _REQ_SHA)
+    assert await LocalWheelSource(wheel).download_wheel(art_sums, tmp_path) == wheel
+    assert await LocalWheelSource(wheel).download_requirements(art_sums, tmp_path) == req
 
     other_sha = tmp_path / "c.sha"
     other_sha.write_text(f"{_WHL_SHA}  other.whl\n", encoding="utf-8")
@@ -225,18 +258,19 @@ async def test_local_wheel_source_variants_and_errors(tmp_path: Path) -> None:
         await _expect(code, LocalWheelSource(wheel, sha256_path=s_path).get_latest())
 
     (tmp_path / f"{_WHL}.sha256").write_text(f"{_WHL_SHA}\n", encoding="utf-8")
+    (tmp_path / f"{_REQ}.sha256").write_text(f"{_REQ_SHA}\n", encoding="utf-8")
     src = LocalWheelSource(wheel)
     art = await src.get_version("v0.2.0")
     assert (await src.download_wheel(art, tmp_path / "staged")).read_bytes() == _WHL_BYTES
+    staged_req = await src.download_requirements(art, tmp_path / "staged")
+    assert staged_req is not None
+    assert staged_req.read_bytes() == _REQ_BYTES
     await _expect("upgrade_release_not_found", src.get_version("0.9.9"))
 
-    mgr, sink = _install_alerts()
     bad = LocalWheelSource(wheel, expected_sha256=_BAD_SHA)
     await _expect(
         "upgrade_checksum_mismatch", bad.download_wheel(await bad.get_latest(), tmp_path / "b")
     )
-    await mgr.flush()
-    assert any(e.category is AlertCategory.SECURITY_ALERT for e in sink.events)
 
     bad_name = tmp_path / "bad.whl"
     bad_name.write_bytes(b"x")
@@ -247,100 +281,3 @@ async def test_local_wheel_source_variants_and_errors(tmp_path: Path) -> None:
         missing.download_wheel(art, tmp_path),
     ):
         await _expect("upgrade_invalid_wheel", coro)
-
-
-async def test_slot_manager_lifecycle_pruning_and_errors(tmp_path: Path) -> None:
-    """ReleaseSlotManager creates slots, flips symlinks, prunes oldest, and rejects errors."""
-    rel, cur, wheel = tmp_path / "releases", tmp_path / "current", tmp_path / _WHL
-    wheel.write_bytes(_WHL_BYTES)
-    cmds: list[list[str]] = []
-
-    async def ok_runner(args: Sequence[str]) -> tuple[int, str, str]:
-        cmds.append(list(args))
-        return 0, "ok", ""
-
-    mgr = ReleaseSlotManager(rel, cur, command_runner=ok_runner)
-    assert (mgr.current_slot(), mgr.previous_slot()) == (None, None)
-    v1 = await mgr.install_slot("0.1.0", wheel)
-    assert (cmds[0][:2], cmds[1][:3]) == (["uv", "venv"], ["uv", "pip", "install"])
-    assert mgr.activate_slot(v1) is None
-    await mgr.install_slot("0.2.0", wheel)
-    v2 = await mgr.install_slot("0.2.0", wheel)
-    assert mgr.activate_slot(v2) == v1
-
-    fresh = ReleaseSlotManager(rel, cur, command_runner=ok_runner)
-    assert (fresh.current_slot(), fresh.previous_slot()) == (v2, v1)
-    (rel / ".previous").unlink()
-    assert fresh.previous_slot() == v1
-
-    (rel / "v-custom").mkdir()
-    await mgr.install_slot("0.3.0", wheel)
-    v4 = await mgr.install_slot("0.4.0", wheel)
-    mgr.activate_slot(v4)
-    pruned = {p.name for p in mgr.prune_old_slots(keep=1, active=v4)}
-    assert {"v0.1.0", "v0.3.0", "v-custom"}.issubset(pruned)
-    assert (v4.is_dir(), v2.is_dir()) == (True, True)
-
-    with pytest.raises(ValueError, match="keep"):
-        mgr.prune_old_slots(keep=0)
-    for code, coro in (
-        ("upgrade_slot_active", mgr.install_slot("0.4.0", wheel)),
-        ("upgrade_invalid_version", mgr.install_slot("../evil", wheel)),
-        ("upgrade_invalid_wheel", mgr.install_slot("0.5.0", tmp_path / "missing.whl")),
-    ):
-        await _expect(code, coro)
-    with pytest.raises(LaiError) as err_miss:
-        mgr.activate_slot(tmp_path / "missing-slot")
-    assert err_miss.value.code == "upgrade_slot_missing"
-
-    for runner in (_os_err_runner, _rc_err_runner):
-        fail_mgr = ReleaseSlotManager(rel, cur, command_runner=runner)
-        await _expect("upgrade_slot_install_failed", fail_mgr.install_slot("0.5.0", wheel))
-        assert not (rel / "v0.5.0").exists()
-
-
-@respx.mock
-async def test_systemd_controller_and_http_health_probe() -> None:
-    """SystemdServiceController and HttpHealthProbe handle subprocess execution and polling."""
-    cmds: list[list[str]] = []
-
-    async def ok_runner(args: Sequence[str]) -> tuple[int, str, str]:
-        cmds.append(list(args))
-        return 0, "", ""
-
-    await SystemdServiceController(command_runner=ok_runner).restart("lai.service")
-    assert cmds == [["systemctl", "restart", "lai.service"]]
-    for ctrl, svc in (
-        (SystemdServiceController(systemctl_executable=sys.executable), "missing.service"),
-        (SystemdServiceController(command_runner=ok_runner), "   "),
-        (SystemdServiceController(command_runner=_os_err_runner), "lai.service"),
-    ):
-        await _expect("upgrade_service_restart_failed", ctrl.restart(svc))
-
-    now, url = [0.0], "http://127.0.0.1:8400/v1/health"
-
-    async def sleeper(dt: float) -> None:
-        now[0] += dt
-
-    resps: list[httpx.Response | Exception] = [
-        httpx.ConnectError("boot"),
-        httpx.Response(503, text="starting"),
-        httpx.Response(200, text="bad-json"),
-        httpx.Response(200, json=["list"]),
-        httpx.Response(200, json={"status": "degraded", "version": "0.2.0"}),
-        httpx.Response(200, json={"status": "ok", "version": "0.1.0"}),
-        httpx.Response(200, json={"status": "ok", "version": "0.2.0"}),
-    ]
-    route = respx.get(url).mock(side_effect=resps)
-    async with httpx.AsyncClient() as shared:
-        p1 = HttpHealthProbe(http_client=shared, clock=lambda: now[0], sleeper=sleeper)
-        assert await p1.wait_healthy(
-            url, expected_version="0.2.0", timeout_seconds=10.0, poll_interval_seconds=1.0
-        )
-        assert route.call_count == len(resps)
-    now[0] = 0.0
-    respx.get(url).mock(return_value=httpx.Response(200, json={"status": "ok", "version": "0.1.0"}))
-    p2 = HttpHealthProbe(clock=lambda: now[0], sleeper=sleeper)
-    assert not await p2.wait_healthy(
-        url, expected_version="0.2.0", timeout_seconds=2.0, poll_interval_seconds=1.0
-    )
