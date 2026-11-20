@@ -8,12 +8,20 @@ from typing import TYPE_CHECKING, cast
 import httpx
 
 from lai.domain.errors import InferenceBackendError
-from lai.domain.guardrails import GuardrailConfig, GuardrailDecision, GuardrailVerdict
+from lai.domain.guardrails import (
+    GuardrailConfig,
+    GuardrailDecision,
+    GuardrailDirection,
+    GuardrailVerdict,
+)
 from lai.domain.inference import BackendHealth
 from lai.domain.observability import AlertCategory
 from lai.guardrails.prompts import (
     DEFAULT_SAFETY_PRINCIPLES,
+    OUTPUT_SAFETY_PRINCIPLES,
     build_shieldgemma_prompt,
+    build_shieldgemma_response_prompt,
+    compute_yes_probability,
     parse_shieldgemma_verdict,
 )
 from lai.observability.logging import get_component_logger
@@ -21,13 +29,14 @@ from lai.observability.scrubber import fingerprint_prompt, scrub_sensitive_text
 from lai.ports.guardrails import GuardrailProviderPort
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from lai.domain.guardrails import SafetyPrinciple
 
 _HTTP_OK = 200
 _MS_PER_SECOND = 1000.0
 _N_PREDICT = 4
+_N_PROBS = 5
 _STOP_TOKENS: tuple[str, ...] = ("\n", "<end_of_turn>")
 _HEALTHY_STATUSES: frozenset[str] = frozenset({"ok", "ready", "healthy"})
 
@@ -52,18 +61,22 @@ def _non_negative_int(value: object) -> int:
 
 
 class ShieldGemmaCpuProvider(GuardrailProviderPort):
-    """Pre-flight ShieldGemma-2B safety classifier backed by CPU-only llama-server."""
+    """Ingress and egress ShieldGemma-2B safety classifier backed by CPU-only llama-server."""
 
     def __init__(
         self,
         config: GuardrailConfig | None = None,
         *,
         principles: Sequence[SafetyPrinciple] | None = None,
+        output_principles: Sequence[SafetyPrinciple] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._config = config or GuardrailConfig()
         self._principles = (
             tuple(principles) if principles is not None else DEFAULT_SAFETY_PRINCIPLES
+        )
+        self._output_principles = (
+            tuple(output_principles) if output_principles is not None else OUTPUT_SAFETY_PRINCIPLES
         )
         self._client = client
         self._log = get_component_logger("guardrails")
@@ -83,11 +96,24 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
         self._config = config
 
     async def evaluate(self, prompt: str) -> GuardrailDecision:
-        """Evaluate prompt sequentially across principles, short-circuiting on violation."""
-        if self._client is not None:
-            return await self._evaluate_with_client(self._client, prompt)
-        async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
-            return await self._evaluate_with_client(client, prompt)
+        """Evaluate prompt sequentially across ingress principles, short-circuiting on violation."""
+        return await self._run_with_client(
+            subject_text=prompt,
+            principles=self._principles,
+            direction=GuardrailDirection.INGRESS,
+            prompt_builder=lambda principle: build_shieldgemma_prompt(prompt, principle),
+        )
+
+    async def evaluate_response(self, prompt: str, response: str) -> GuardrailDecision:
+        """Evaluate model response sequentially across output principles."""
+        return await self._run_with_client(
+            subject_text=response,
+            principles=self._output_principles,
+            direction=GuardrailDirection.EGRESS,
+            prompt_builder=lambda principle: build_shieldgemma_response_prompt(
+                prompt, response, principle
+            ),
+        )
 
     async def health(self) -> BackendHealth:
         """Query ShieldGemma llama-server /health readiness and latency."""
@@ -96,51 +122,76 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
         async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
             return await self._health_with_client(client)
 
-    async def _evaluate_with_client(
+    async def _run_with_client(
+        self,
+        *,
+        subject_text: str,
+        principles: tuple[SafetyPrinciple, ...],
+        direction: GuardrailDirection,
+        prompt_builder: Callable[[SafetyPrinciple], str],
+    ) -> GuardrailDecision:
+        if self._client is not None:
+            return await self._evaluate_principles(
+                self._client, subject_text, principles, direction, prompt_builder
+            )
+        async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
+            return await self._evaluate_principles(
+                client, subject_text, principles, direction, prompt_builder
+            )
+
+    async def _evaluate_principles(
         self,
         client: httpx.AsyncClient,
-        prompt: str,
+        subject_text: str,
+        principles: tuple[SafetyPrinciple, ...],
+        direction: GuardrailDirection,
+        prompt_builder: Callable[[SafetyPrinciple], str],
     ) -> GuardrailDecision:
         """Run sequential principle checks using an active httpx.AsyncClient."""
         started = time.perf_counter()
-        prompt_sha256 = fingerprint_prompt(prompt)
-        prompt_chars = len(prompt)
+        text_sha256 = fingerprint_prompt(subject_text)
+        text_chars = len(subject_text)
         scrubbed = scrub_sensitive_text(
-            prompt,
-            max_chars=self._config.max_logged_prompt_chars,
+            subject_text, max_chars=self._config.max_logged_prompt_chars
         )
         last_raw_output = ""
+        max_yes_prob: float | None = None
+        noun = "Response" if direction is GuardrailDirection.EGRESS else "Prompt"
 
-        for principle in self._principles:
-            violated, raw_output = await self._evaluate_principle(
+        for principle in principles:
+            violated, raw_output, yes_prob = await self._evaluate_principle(
                 client=client,
-                prompt=prompt,
+                rendered_prompt=prompt_builder(principle),
                 principle=principle,
-                prompt_sha256=prompt_sha256,
+                prompt_sha256=text_sha256,
             )
             last_raw_output = raw_output
+            if yes_prob is not None:
+                max_yes_prob = yes_prob if max_yes_prob is None else max(max_yes_prob, yes_prob)
             if violated:
-                elapsed_ms = (time.perf_counter() - started) * _MS_PER_SECOND
                 return GuardrailDecision(
                     verdict=GuardrailVerdict.BLOCK,
                     provider=self.name,
+                    direction=direction,
                     violated_policy=principle.name,
-                    reason=f"Prompt violated safety principle '{principle.name}'.",
+                    violation_score=yes_prob,
+                    reason=f"{noun} violated safety principle '{principle.name}'.",
                     raw_output=raw_output,
-                    latency_ms=elapsed_ms,
-                    prompt_sha256=prompt_sha256,
-                    prompt_chars=prompt_chars,
+                    latency_ms=(time.perf_counter() - started) * _MS_PER_SECOND,
+                    prompt_sha256=text_sha256,
+                    prompt_chars=text_chars,
                     scrubbed_prompt=scrubbed,
                 )
 
-        elapsed_ms = (time.perf_counter() - started) * _MS_PER_SECOND
         return GuardrailDecision(
             verdict=GuardrailVerdict.ALLOW,
             provider=self.name,
+            direction=direction,
+            violation_score=max_yes_prob,
             raw_output=last_raw_output,
-            latency_ms=elapsed_ms,
-            prompt_sha256=prompt_sha256,
-            prompt_chars=prompt_chars,
+            latency_ms=(time.perf_counter() - started) * _MS_PER_SECOND,
+            prompt_sha256=text_sha256,
+            prompt_chars=text_chars,
             scrubbed_prompt=scrubbed,
         )
 
@@ -148,14 +199,15 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
         self,
         *,
         client: httpx.AsyncClient,
-        prompt: str,
+        rendered_prompt: str,
         principle: SafetyPrinciple,
         prompt_sha256: str,
-    ) -> tuple[bool, str]:
-        """Execute a single ShieldGemma /completion classification call."""
+    ) -> tuple[bool, str, float | None]:
+        """Execute a single ShieldGemma /completion classification call with n_probs."""
         payload = {
-            "prompt": build_shieldgemma_prompt(prompt, principle),
+            "prompt": rendered_prompt,
             "n_predict": _N_PREDICT,
+            "n_probs": _N_PROBS,
             "temperature": 0.0,
             "stop": list(_STOP_TOKENS),
         }
@@ -198,8 +250,8 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
         response: httpx.Response,
         principle: SafetyPrinciple,
         prompt_sha256: str,
-    ) -> tuple[bool, str]:
-        """Extract completion content and convert ShieldGemma Yes/No text to a bool."""
+    ) -> tuple[bool, str, float | None]:
+        """Calibrate violation via completion_probabilities or strict Yes/No fallback."""
         data = _parse_json_object(response)
         raw_content = data.get("content") if data is not None else None
         if not isinstance(raw_content, str):
@@ -208,6 +260,13 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
                 msg,
                 details={"provider": self.name, "principle": principle.name},
             )
+
+        yes_prob = compute_yes_probability(
+            data.get("completion_probabilities") if data is not None else None
+        )
+        if yes_prob is not None:
+            return yes_prob >= self._config.violation_threshold, raw_content, yes_prob
+
         try:
             violated = parse_shieldgemma_verdict(raw_content)
         except ValueError as exc:
@@ -223,7 +282,7 @@ class ShieldGemmaCpuProvider(GuardrailProviderPort):
                 msg,
                 details={"provider": self.name, "principle": principle.name},
             ) from exc
-        return violated, raw_content
+        return violated, raw_content, None
 
     async def _health_with_client(self, client: httpx.AsyncClient) -> BackendHealth:
         """Execute GET /health and map HTTP/transport outcomes to BackendHealth."""

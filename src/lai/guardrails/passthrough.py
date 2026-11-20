@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from lai.domain.guardrails import GuardrailDecision, GuardrailVerdict
+from lai.domain.guardrails import GuardrailDecision, GuardrailDirection, GuardrailVerdict
 from lai.observability.scrubber import fingerprint_prompt, scrub_sensitive_text
 from lai.ports.guardrails import GuardrailProviderPort
 
@@ -84,22 +84,31 @@ class AllowAllGuardrailProvider(GuardrailProviderPort):
 
     async def evaluate(self, prompt: str) -> GuardrailDecision:
         """Always allow the prompt while returning a scrubbed audit-ready decision."""
+        return self._allow_decision(prompt, direction=GuardrailDirection.INGRESS)
+
+    async def evaluate_response(self, prompt: str, response: str) -> GuardrailDecision:
+        """Always allow the model response while returning a scrubbed audit-ready decision."""
+        del prompt
+        return self._allow_decision(response, direction=GuardrailDirection.EGRESS)
+
+    def _allow_decision(self, text: str, *, direction: GuardrailDirection) -> GuardrailDecision:
         return GuardrailDecision(
             verdict=GuardrailVerdict.ALLOW,
             provider=self.name,
+            direction=direction,
             reason="Guardrails explicitly disabled.",
             latency_ms=0.0,
-            prompt_sha256=fingerprint_prompt(prompt),
-            prompt_chars=len(prompt),
+            prompt_sha256=fingerprint_prompt(text),
+            prompt_chars=len(text),
             scrubbed_prompt=scrub_sensitive_text(
-                prompt,
+                text,
                 max_chars=self._max_logged_prompt_chars,
             ),
         )
 
 
 class RegexPolicyGuardrailProvider(GuardrailProviderPort):
-    """Lightweight deterministic regex rule provider for pluggable pre-flight composition."""
+    """Lightweight deterministic regex rule provider for pluggable pre-flight/egress composition."""
 
     def __init__(
         self,
@@ -120,18 +129,32 @@ class RegexPolicyGuardrailProvider(GuardrailProviderPort):
 
     async def evaluate(self, prompt: str) -> GuardrailDecision:
         """Evaluate prompt sequentially against deterministic regex rules."""
+        return self._evaluate_text(prompt, direction=GuardrailDirection.INGRESS)
+
+    async def evaluate_response(self, prompt: str, response: str) -> GuardrailDecision:
+        """Evaluate model response sequentially against deterministic regex rules."""
+        del prompt
+        return self._evaluate_text(response, direction=GuardrailDirection.EGRESS)
+
+    def _evaluate_text(
+        self,
+        text: str,
+        *,
+        direction: GuardrailDirection,
+    ) -> GuardrailDecision:
         started = time.perf_counter()
-        prompt_sha256 = fingerprint_prompt(prompt)
-        prompt_chars = len(prompt)
-        scrubbed = scrub_sensitive_text(prompt, max_chars=self._max_logged_prompt_chars)
+        prompt_sha256 = fingerprint_prompt(text)
+        prompt_chars = len(text)
+        scrubbed = scrub_sensitive_text(text, max_chars=self._max_logged_prompt_chars)
 
         for rule in self._rules:
-            match = rule.pattern.search(prompt)
+            match = rule.pattern.search(text)
             if match is not None:
                 elapsed_ms = (time.perf_counter() - started) * _MS_PER_SECOND
                 return GuardrailDecision(
                     verdict=GuardrailVerdict.BLOCK,
                     provider=self.name,
+                    direction=direction,
                     violated_policy=rule.policy_name,
                     reason=rule.reason,
                     raw_output=scrub_sensitive_text(
@@ -148,6 +171,7 @@ class RegexPolicyGuardrailProvider(GuardrailProviderPort):
         return GuardrailDecision(
             verdict=GuardrailVerdict.ALLOW,
             provider=self.name,
+            direction=direction,
             latency_ms=elapsed_ms,
             prompt_sha256=prompt_sha256,
             prompt_chars=prompt_chars,

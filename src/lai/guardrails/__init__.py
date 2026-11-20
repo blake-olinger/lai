@@ -1,8 +1,7 @@
-"""Pre-flight safety guardrail providers, pipeline, and server supervisor."""
+"""Pre-flight and egress safety guardrail providers, pipeline, and server supervisor."""
 
 from __future__ import annotations
 
-from lai.guardrails.ollama_provider import OllamaShieldGemmaProvider
 from lai.guardrails.passthrough import (
     DEFAULT_REGEX_RULES,
     AllowAllGuardrailProvider,
@@ -17,7 +16,9 @@ from lai.guardrails.prompts import (
     NO_HATE_SPEECH,
     NO_PROMPT_INJECTION,
     NO_SEXUALLY_EXPLICIT_CONTENT,
+    OUTPUT_SAFETY_PRINCIPLES,
     build_shieldgemma_prompt,
+    build_shieldgemma_response_prompt,
     compute_yes_probability,
     parse_shieldgemma_verdict,
 )
@@ -32,14 +33,15 @@ __all__ = [
     "NO_HATE_SPEECH",
     "NO_PROMPT_INJECTION",
     "NO_SEXUALLY_EXPLICIT_CONTENT",
+    "OUTPUT_SAFETY_PRINCIPLES",
     "AllowAllGuardrailProvider",
     "CompositeGuardrailPipeline",
-    "OllamaShieldGemmaProvider",
     "RegexPolicyGuardrailProvider",
     "RegexPolicyRule",
     "ShieldGemmaCpuProvider",
     "ShieldGemmaSupervisor",
     "build_shieldgemma_prompt",
+    "build_shieldgemma_response_prompt",
     "build_shieldgemma_server_args",
     "compute_yes_probability",
     "parse_shieldgemma_verdict",

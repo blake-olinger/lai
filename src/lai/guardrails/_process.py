@@ -1,12 +1,7 @@
-"""Thin compatibility wrapper delegating subprocess isolation helpers to lai.observability."""
+"""Thin compatibility wrapper delegating POSIX process tree helpers to lai.observability."""
 
 from __future__ import annotations
 
-from lai.observability._process import (
-    WindowsJobObject,
-    attach_win32_job_object,
-    close_win32_handle,
-)
 from lai.observability._process import (
     kill_asyncio_process_tree as kill_process_tree,
 )
@@ -15,9 +10,6 @@ from lai.observability._process import (
 )
 
 __all__ = [
-    "WindowsJobObject",
-    "attach_win32_job_object",
-    "close_win32_handle",
     "kill_process_tree",
     "terminate_process_tree",
 ]

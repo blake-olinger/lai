@@ -1,4 +1,4 @@
-"""Composite pre-flight guardrail pipeline with fail-open/closed policy and auditing."""
+"""Composite ingress and egress guardrail pipeline with fail-open/closed, audit, and analytics."""
 
 from __future__ import annotations
 
@@ -7,16 +7,22 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from lai.domain.errors import GuardrailBlockedError, InferenceBackendError
+from lai.domain.errors import GuardrailBlockedError, InferenceBackendError, ValidationFailedError
 from lai.domain.guardrails import (
     GuardrailBlockMode,
     GuardrailConfig,
     GuardrailDecision,
+    GuardrailDirection,
+    GuardrailOutputMode,
     GuardrailVerdict,
-    PromptAuditEntry,
+    validate_guardrail_runtime_update,
 )
 from lai.domain.observability import AlertCategory
-from lai.guardrails._context import PromptCheckContext
+from lai.guardrails._context import (
+    PromptCheckContext,
+    record_audit_and_log,
+    record_guardrail_analytics,
+)
 from lai.guardrails.passthrough import AllowAllGuardrailProvider
 from lai.guardrails.shieldgemma import ShieldGemmaCpuProvider
 from lai.observability.logging import get_component_logger
@@ -24,9 +30,10 @@ from lai.observability.scrubber import PromptAuditLogger
 from lai.ports.guardrails import GuardrailPipelinePort
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
     from types import TracebackType
 
+    from lai.ports.analytics import UsageAnalyticsPort
     from lai.ports.guardrails import GuardrailProviderPort
 
 _DEFAULT_AUDIT_RETENTION_DAYS = 30
@@ -34,7 +41,7 @@ _BACKEND_ERRORS = (InferenceBackendError, httpx.HTTPError, TimeoutError, ValueEr
 
 
 class CompositeGuardrailPipeline(GuardrailPipelinePort):
-    """Coordinates guardrail providers, fail-open/closed handling, and scrubbed auditing."""
+    """Coordinates guardrail providers, boot locks, fail-open/closed, auditing, and analytics."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -42,11 +49,14 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
         *,
         providers: Sequence[GuardrailProviderPort] | None = None,
         audit_logger: PromptAuditLogger | None = None,
+        analytics_repo: UsageAnalyticsPort | None = None,
         log_dir: Path | None = None,
         retention_days: int = _DEFAULT_AUDIT_RETENTION_DAYS,
         compress_rotated: bool = True,
     ) -> None:
         self._config = config or GuardrailConfig()
+        self._boot_config = self._config
+        self._analytics_repo = analytics_repo
         if providers is None:
             default_provider: GuardrailProviderPort = (
                 ShieldGemmaCpuProvider(self._config)
@@ -76,6 +86,11 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
         """Return a snapshot of registered guardrail providers."""
         return tuple(self._providers)
 
+    @property
+    def boot_config(self) -> GuardrailConfig:
+        """Return the immutable startup GuardrailConfig governing runtime lock policies."""
+        return self._boot_config
+
     def register_provider(self, provider: GuardrailProviderPort) -> None:
         """Append a guardrail provider to the sequential evaluation chain."""
         self._providers.append(provider)
@@ -86,7 +101,18 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
         *,
         providers: Sequence[GuardrailProviderPort] | None = None,
     ) -> None:
-        """Hot-swap guardrail policy (and optionally providers) in place."""
+        """Hot-swap guardrail policy in place after enforcing boot-only security locks."""
+        try:
+            validate_guardrail_runtime_update(self._boot_config, config)
+        except ValidationFailedError as exc:
+            self._log.warning(
+                "guardrail_runtime_lock_rejected",
+                reason=exc.message,
+                field=exc.details.get("field", ""),
+                alert_category=AlertCategory.SECURITY_ALERT.value,
+            )
+            raise
+
         self._config = config
         if providers is not None:
             self._providers = list(providers)
@@ -115,27 +141,38 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
         del exc_type, exc, tb
         self.close()
 
-    async def check_prompt(
+    async def check_prompt(  # noqa: PLR0913
         self,
         prompt: str,
         *,
+        direction: GuardrailDirection = GuardrailDirection.INGRESS,
         request_id: str | None = None,
         session_id: str | None = None,
         project_id: str | None = None,
         principal_id: str | None = None,
     ) -> GuardrailDecision:
-        """Evaluate prompt across providers, write scrubbed audit entry, and enforce policy."""
+        """Evaluate a prompt or tool output, write audit/analytics, and enforce policy."""
         ctx = PromptCheckContext.build(
             prompt,
             max_chars=self._config.max_logged_prompt_chars,
+            direction=direction,
             request_id=request_id,
             session_id=session_id,
             project_id=project_id,
             principal_id=principal_id,
         )
-        decision, alert_emitted = await self._evaluate_chain(prompt, ctx)
-        self._record_audit_and_log(decision, ctx, alert_emitted=alert_emitted)
-
+        decision, fail_closed = await self._evaluate_chain(
+            ctx,
+            passthrough_eval=lambda p: p.evaluate(prompt),
+            provider_eval=lambda p: p.evaluate(prompt),
+            enabled=self._config.enabled,
+        )
+        record_audit_and_log(
+            self._audit_logger, self._log, decision, ctx, alert_emitted=fail_closed
+        )
+        await record_guardrail_analytics(
+            self._analytics_repo, self._log, decision, fail_closed=fail_closed
+        )
         if (
             decision.verdict is GuardrailVerdict.BLOCK
             and self._config.block_mode is GuardrailBlockMode.HTTP_ERROR
@@ -143,21 +180,79 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
             raise GuardrailBlockedError(
                 self._config.refusal_text,
                 violated_policy=decision.violated_policy,
-                details={"provider": decision.provider, "prompt_sha256": ctx.prompt_sha256},
+                details={
+                    "provider": decision.provider,
+                    "prompt_sha256": ctx.prompt_sha256,
+                    "direction": direction.value,
+                },
+            )
+        return decision
+
+    async def check_response(  # noqa: PLR0913
+        self,
+        prompt: str,
+        response: str,
+        *,
+        request_id: str | None = None,
+        session_id: str | None = None,
+        project_id: str | None = None,
+        principal_id: str | None = None,
+    ) -> GuardrailDecision:
+        """Evaluate a model response according to output_mode (BUFFERED, AUDIT_ONLY, or OFF)."""
+        ctx = PromptCheckContext.build(
+            response,
+            max_chars=self._config.max_logged_prompt_chars,
+            direction=GuardrailDirection.EGRESS,
+            request_id=request_id,
+            session_id=session_id,
+            project_id=project_id,
+            principal_id=principal_id,
+        )
+        egress_active = (
+            self._config.enabled and self._config.output_mode is not GuardrailOutputMode.OFF
+        )
+        decision, fail_closed = await self._evaluate_chain(
+            ctx,
+            passthrough_eval=lambda p: p.evaluate_response(prompt, response),
+            provider_eval=lambda p: p.evaluate_response(prompt, response),
+            enabled=egress_active,
+        )
+        record_audit_and_log(
+            self._audit_logger, self._log, decision, ctx, alert_emitted=fail_closed
+        )
+        await record_guardrail_analytics(
+            self._analytics_repo, self._log, decision, fail_closed=fail_closed
+        )
+        if (
+            self._config.output_mode is GuardrailOutputMode.BUFFERED
+            and decision.verdict is GuardrailVerdict.BLOCK
+            and self._config.block_mode is GuardrailBlockMode.HTTP_ERROR
+        ):
+            raise GuardrailBlockedError(
+                self._config.refusal_text,
+                violated_policy=decision.violated_policy,
+                details={
+                    "provider": decision.provider,
+                    "prompt_sha256": ctx.prompt_sha256,
+                    "direction": GuardrailDirection.EGRESS.value,
+                },
             )
         return decision
 
     async def _evaluate_chain(
         self,
-        prompt: str,
         ctx: PromptCheckContext,
+        *,
+        passthrough_eval: Callable[[AllowAllGuardrailProvider], Awaitable[GuardrailDecision]],
+        provider_eval: Callable[[GuardrailProviderPort], Awaitable[GuardrailDecision]],
+        enabled: bool,
     ) -> tuple[GuardrailDecision, bool]:
         """Run enabled providers sequentially with fail-open/closed error handling."""
-        if not self._config.enabled:
+        if not enabled:
             passthrough = AllowAllGuardrailProvider(
                 max_logged_prompt_chars=self._config.max_logged_prompt_chars,
             )
-            return ctx.normalize(await passthrough.evaluate(prompt)), False
+            return ctx.normalize(await passthrough_eval(passthrough)), False
 
         if not self._providers:
             return self._handle_unconfigured(ctx)
@@ -169,7 +264,7 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
         for provider in self._providers:
             last_provider_name = provider.name
             try:
-                raw = await provider.evaluate(prompt)
+                raw = await provider_eval(provider)
             except _BACKEND_ERRORS as exc:
                 if not self._config.fail_open:
                     decision = self._fail_closed(
@@ -252,44 +347,3 @@ class CompositeGuardrailPipeline(GuardrailPipelinePort):
             **ctx.log_fields(),
         )
         return decision
-
-    def _record_audit_and_log(
-        self,
-        decision: GuardrailDecision,
-        ctx: PromptCheckContext,
-        *,
-        alert_emitted: bool,
-    ) -> None:
-        """Persist scrubbed PromptAuditEntry and emit structured component log."""
-        self._audit_logger.log_entry(
-            PromptAuditEntry(
-                request_id=ctx.request_id,
-                session_id=ctx.session_id,
-                project_id=ctx.project_id,
-                principal_id=ctx.principal_id,
-                verdict=decision.verdict,
-                provider=decision.provider,
-                violated_policy=decision.violated_policy,
-                latency_ms=decision.latency_ms,
-                prompt_sha256=decision.prompt_sha256,
-                prompt_chars=decision.prompt_chars,
-                scrubbed_prompt=decision.scrubbed_prompt,
-            ),
-        )
-        if alert_emitted:
-            return
-        fields: dict[str, object] = {
-            "verdict": decision.verdict.value,
-            "provider": decision.provider,
-            "violated_policy": decision.violated_policy,
-            "latency_ms": decision.latency_ms,
-            **ctx.log_fields(),
-        }
-        if decision.verdict is GuardrailVerdict.BLOCK:
-            self._log.warning(
-                "guardrail_ruling",
-                alert_category=AlertCategory.SECURITY_ALERT.value,
-                **fields,
-            )
-            return
-        self._log.info("guardrail_ruling", **fields)

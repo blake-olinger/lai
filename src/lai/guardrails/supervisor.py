@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import subprocess
-import sys
+import hashlib
+import hmac
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -13,12 +13,7 @@ from typing import TYPE_CHECKING, cast
 from lai.domain.errors import InferenceBackendError
 from lai.domain.inference import BackendHealth
 from lai.domain.observability import AlertCategory
-from lai.guardrails._process import (
-    attach_win32_job_object,
-    close_win32_handle,
-    kill_process_tree,
-    terminate_process_tree,
-)
+from lai.guardrails._process import kill_process_tree, terminate_process_tree
 from lai.guardrails.shieldgemma import ShieldGemmaCpuProvider
 from lai.observability.logging import get_component_logger
 from lai.observability.rotation import DailyRotatingStreamWriter
@@ -31,6 +26,16 @@ if TYPE_CHECKING:
 
 _DEFAULT_STOP_TIMEOUT_SECONDS = 5.0
 _DEFAULT_RETENTION_DAYS = 14
+_HASH_CHUNK_BYTES = 1024 * 1024
+
+
+def _compute_file_sha256(path: Path) -> str:
+    """Stream file contents in 1 MiB chunks and return lowercase hex SHA-256."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_shieldgemma_server_args(config: GuardrailConfig, model_path: Path) -> list[str]:
@@ -69,6 +74,8 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
         retention_days: int = _DEFAULT_RETENTION_DAYS,
         compress_rotated: bool = True,
         http_client: httpx.AsyncClient | None = None,
+        expected_sha256: str | None = None,
+        verify_sha256: bool = False,
     ) -> None:
         self._executable_path = executable_path
         self._model_path = model_path
@@ -79,21 +86,19 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
         self._retention_days = retention_days
         self._compress_rotated = compress_rotated
         self._http_client = http_client
+        self._expected_sha256 = (
+            expected_sha256.strip().lower() if expected_sha256 is not None else None
+        )
+        self._verify_sha256 = verify_sha256
 
         self._lock = asyncio.Lock()
         self._process: asyncio.subprocess.Process | None = None
         self._config: GuardrailConfig | None = None
-        self._job_handle: int | None = None
         self._stream_writer: DailyRotatingStreamWriter | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._stopping = False
         self._last_exit_code: int | None = None
         self._log = get_component_logger("guardrails")
-
-    @property
-    def job_handle(self) -> int | None:
-        """Return the active Win32 Job Object handle if attached."""
-        return self._job_handle
 
     async def ensure_running(self, config: GuardrailConfig) -> BackendHealth:
         """Start or verify the CPU-only ShieldGemma llama-server process."""
@@ -111,6 +116,7 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
                 await self._stop_locked()
 
             self._validate_paths()
+            await self._verify_model_integrity(config)
             await self._spawn_locked(config)
             return await self._wait_for_ready_locked(config)
 
@@ -151,8 +157,41 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
             msg = f"ShieldGemma GGUF model not found: {self._model_path}"
             raise InferenceBackendError(msg, details={"path": str(self._model_path)})
 
+    async def _verify_model_integrity(self, config: GuardrailConfig) -> None:
+        """Verify ShieldGemma GGUF SHA-256 before spawn when integrity verification is enabled."""
+        if not self._verify_sha256 and self._expected_sha256 is None:
+            return
+        expected = self._expected_sha256 or config.sha256
+        if not expected:
+            self._log.error(
+                "shieldgemma_model_integrity_missing_digest",
+                path=str(self._model_path),
+                alert_category=AlertCategory.SECURITY_ALERT.value,
+            )
+            msg = "ShieldGemma SHA-256 verification enabled but no expected digest is configured."
+            raise InferenceBackendError(msg, details={"path": str(self._model_path)})
+
+        actual = await asyncio.to_thread(_compute_file_sha256, self._model_path)
+        if not hmac.compare_digest(actual, expected.lower()):
+            self._log.error(
+                "shieldgemma_model_integrity_violation",
+                path=str(self._model_path),
+                expected_sha256=expected.lower(),
+                actual_sha256=actual,
+                alert_category=AlertCategory.SECURITY_ALERT.value,
+            )
+            msg = f"ShieldGemma GGUF SHA-256 integrity mismatch for {self._model_path}."
+            raise InferenceBackendError(
+                msg,
+                details={
+                    "path": str(self._model_path),
+                    "expected_sha256": expected.lower(),
+                    "actual_sha256": actual,
+                },
+            )
+
     async def _spawn_locked(self, config: GuardrailConfig) -> None:
-        """Spawn llama-server, attach process isolation, and start log pumping."""
+        """Spawn llama-server in a new POSIX session and start rotating log pumping."""
         self._stopping = False
         self._last_exit_code = None
         self._config = config
@@ -163,26 +202,13 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
             logger_name="lai.guardrails.supervisor.stream",
         )
         args = build_shieldgemma_server_args(config, self._model_path)
-
-        if sys.platform == "win32":
-            creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-            proc = await asyncio.create_subprocess_exec(
-                str(self._executable_path),
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                creationflags=creationflags,
-            )
-            self._job_handle = attach_win32_job_object(proc.pid)
-        else:
-            proc = await asyncio.create_subprocess_exec(
-                str(self._executable_path),
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
-            )
-
+        proc = await asyncio.create_subprocess_exec(
+            str(self._executable_path),
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
         self._process = proc
         self._monitor_task = asyncio.create_task(self._pump_and_watch(proc))
 
@@ -265,7 +291,7 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
             await proc.wait()
 
     async def _stop_locked(self, *, preserve_last_exit_code: bool = False) -> None:
-        """Terminate running process, release handles, and close rotating log writer."""
+        """Terminate running process, release resources, and close rotating log writer."""
         self._stopping = True
         proc = self._process
         if proc is not None:
@@ -283,9 +309,6 @@ class ShieldGemmaSupervisor(GuardrailSupervisorPort):
             if transport is not None:
                 transport.close()
             await asyncio.sleep(0)
-
-        close_win32_handle(self._job_handle)
-        self._job_handle = None
 
         if self._stream_writer is not None:
             self._stream_writer.close()
